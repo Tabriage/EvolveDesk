@@ -1,99 +1,88 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
+import { EvolutionLab } from "./components/EvolutionLab";
+import { KnowledgeWorkbench } from "./components/KnowledgeWorkbench";
+import { QuickStart } from "./components/QuickStart";
+import { VideoWorkbench } from "./components/VideoWorkbench";
+import { WorkAgent } from "./components/WorkAgent";
+import {
+  WORKBENCH_STORAGE_KEY,
+  addInboxItem,
+  addTask,
+  applyAgentActions,
+  createInitialWorkbench,
+  getTodayKey,
+  parseWorkbenchState,
+  saveKnowledgeInquiry,
+  saveVideoSummary,
+} from "./features/workbench-core.mjs";
+import type {
+  Activity,
+  AgentAction,
+  WorkbenchState,
+} from "./features/workbench-core.mjs";
 
-type Module = {
-  id: string;
-  name: string;
-  description: string;
-  accent: string;
-  enabled: boolean;
-  source?: "core" | "agent";
-};
+type ActiveView = "today" | "inbox" | "video" | "knowledge" | "memory" | "lab";
 
-type Proposal = {
+type WorkPlan = {
   title: string;
   summary: string;
   reflection: string;
   risk: "low" | "medium" | "high";
-  changes: string[];
-  rollback: string;
-  module: { name: string; description: string; accent: string };
+  actions: AgentAction[];
 };
 
-const initialModules: Module[] = [
-  {
-    id: "focus",
-    name: "专注舱",
-    description: "把今天唯一重要的事固定在视野中央。",
-    accent: "#3159f5",
-    enabled: true,
-    source: "core",
-  },
-  {
-    id: "capture",
-    name: "灵感收件箱",
-    description: "不分类，先接住刚刚冒出来的念头。",
-    accent: "#ff6d5a",
-    enabled: true,
-    source: "core",
-  },
-  {
-    id: "signals",
-    name: "信号观察",
-    description: "把值得持续留意的人、项目和变化放在一起。",
-    accent: "#e5a62a",
-    enabled: false,
-    source: "core",
-  },
-];
+function newActivity(label: string, detail: string, source: Activity["source"] = "human"): Activity {
+  return {
+    id: `activity-${globalThis.crypto?.randomUUID?.() || Date.now()}`,
+    label,
+    detail,
+    source,
+    createdAt: new Date().toISOString(),
+  };
+}
 
-const seedProposal: Proposal = {
-  title: "给工作台增加「夜间收束」",
-  summary: "每天结束时，用三个问题生成一张可回看的日结卡。",
-  reflection:
-    "当前工作台擅长开始任务，但缺少结束一天的仪式。新模块应该轻量，不应变成另一套待办系统。",
-  risk: "low",
-  changes: ["新增日结入口", "保存三条本地回答", "次日首页展示一句回声"],
-  rollback: "移除模块并清空它在此浏览器中的本地记录。",
-  module: {
-    name: "夜间收束",
-    description: "用三个问题结束今天，给明天留下一句回声。",
-    accent: "#7657d6",
-  },
-};
+function appendActivity(state: WorkbenchState, entry: Activity): WorkbenchState {
+  return { ...state, activity: [...state.activity, entry].slice(-80) };
+}
 
-const prompts = [
-  "帮我增加一个每周复盘模块",
-  "观察现在的工作台，找出一个最值得改进的地方",
-  "设计一个不会让我焦虑的任务入口",
-];
+function formatTime(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+function isSupportedVideoLink(value: string) {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return ["youtube.com", "youtu.be", "bilibili.com", "b23.tv", "xiaohongshu.com", "xhslink.com", "douyin.com", "v.douyin.com"]
+      .some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
+  } catch {
+    return false;
+  }
+}
 
 export default function Home() {
-  const [modules, setModules] = useState<Module[]>(initialModules);
-  const [proposal, setProposal] = useState<Proposal>(seedProposal);
-  const [prompt, setPrompt] = useState("");
-  const [thinking, setThinking] = useState(false);
-  const [notice, setNotice] = useState("等待你的确认");
+  const [activeView, setActiveView] = useState<ActiveView>("today");
+  const [desk, setDesk] = useState<WorkbenchState>(() => createInitialWorkbench());
+  const [hydrated, setHydrated] = useState(false);
+  const [taskInput, setTaskInput] = useState("");
+  const [captureInput, setCaptureInput] = useState("");
+  const [habitInput, setHabitInput] = useState("");
+  const [videoUrl, setVideoUrl] = useState("");
+  const [starterOpen, setStarterOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [baseURL, setBaseURL] = useState("http://localhost:62783/v1");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState("");
   const [models, setModels] = useState<string[]>([]);
   const [connected, setConnected] = useState(false);
-  const [activeView, setActiveView] = useState<"canvas" | "memory">("canvas");
+  const [connectionMessage, setConnectionMessage] = useState("尚未连接模型");
+  const [dateLabel, setDateLabel] = useState("本地日期");
 
   useEffect(() => {
-    const savedModules = window.localStorage.getItem("evolve-desk.modules");
-    const savedSettings = window.localStorage.getItem("evolve-desk.connection");
     const frame = window.requestAnimationFrame(() => {
-      if (savedModules) {
-        try {
-          setModules(JSON.parse(savedModules));
-        } catch {
-          window.localStorage.removeItem("evolve-desk.modules");
-        }
-      }
+      setDesk(parseWorkbenchState(window.localStorage.getItem(WORKBENCH_STORAGE_KEY)));
+      const savedSettings = window.localStorage.getItem("evolve-desk.connection");
       if (savedSettings) {
         try {
           const settings = JSON.parse(savedSettings);
@@ -103,33 +92,146 @@ export default function Home() {
           window.localStorage.removeItem("evolve-desk.connection");
         }
       }
+      if (window.localStorage.getItem("evolve-desk.onboarding.v2") !== "complete") setStarterOpen(true);
+      setDateLabel(new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", weekday: "long" }).format(new Date()));
+      setHydrated(true);
     });
     return () => window.cancelAnimationFrame(frame);
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem("evolve-desk.modules", JSON.stringify(modules));
-  }, [modules]);
+    if (hydrated) window.localStorage.setItem(WORKBENCH_STORAGE_KEY, JSON.stringify(desk));
+  }, [desk, hydrated]);
 
-  const enabledCount = useMemo(
-    () => modules.filter((item) => item.enabled).length,
-    [modules],
-  );
+  const todayKey = getTodayKey();
+  const openTasks = desk.tasks.filter((task) => !task.done);
+  const completedTasks = desk.tasks.filter((task) => task.done);
+  const newInbox = desk.inbox.filter((item) => item.status === "new");
+  const focusTask = desk.tasks.find((task) => task.id === desk.focusTaskId && !task.done) || openTasks[0] || null;
+  const habitsDone = desk.habits.filter((habit) => habit.completedDates.includes(todayKey)).length;
+  function finishOnboarding() {
+    window.localStorage.setItem("evolve-desk.onboarding.v2", "complete");
+    setStarterOpen(false);
+  }
 
-  function toggleModule(id: string) {
-    setModules((current) =>
-      current.map((item) =>
-        item.id === id ? { ...item, enabled: !item.enabled } : item,
-      ),
-    );
+  function createTask(title: string, source: "manual" | "inbox" | "agent" = "manual", note = "") {
+    setDesk((current) => {
+      const next = addTask(current, { title, note, source });
+      if (next === current) return current;
+      const label = source === "inbox" ? "从收件箱生成任务" : source === "agent" ? "从知识问答生成任务" : "添加今日任务";
+      return appendActivity(next, newActivity(label, title, source === "agent" ? "agent" : "human"));
+    });
+  }
+
+  function submitTask(event: FormEvent) {
+    event.preventDefault();
+    const title = taskInput.trim();
+    if (!title) return;
+    createTask(title);
+    setTaskInput("");
+  }
+
+  function saveCapture(event?: FormEvent) {
+    event?.preventDefault();
+    const content = captureInput.trim();
+    if (!content) return;
+    setDesk((current) => addInboxItem(current, content));
+    setCaptureInput("");
+  }
+
+  function toggleTask(id: string) {
+    setDesk((current) => {
+      let completedTitle = "";
+      const tasks = current.tasks.map((task) => {
+        if (task.id !== id) return task;
+        const done = !task.done;
+        if (done) completedTitle = task.title;
+        return { ...task, done, completedAt: done ? new Date().toISOString() : null };
+      });
+      const next = { ...current, tasks };
+      return completedTitle ? appendActivity(next, newActivity("完成一项任务", completedTitle)) : next;
+    });
+  }
+
+  function removeTask(id: string) {
+    setDesk((current) => ({
+      ...current,
+      focusTaskId: current.focusTaskId === id ? null : current.focusTaskId,
+      tasks: current.tasks.filter((task) => task.id !== id),
+    }));
+  }
+
+  function setFocus(id: string) {
+    setDesk((current) => {
+      const task = current.tasks.find((item) => item.id === id);
+      if (!task) return current;
+      return appendActivity({ ...current, focusTaskId: id }, newActivity("更新今日焦点", task.title));
+    });
+  }
+
+  function addHabit(event: FormEvent) {
+    event.preventDefault();
+    const name = habitInput.trim().slice(0, 50);
+    if (!name) return;
+    setDesk((current) => {
+      if (current.habits.length >= 12 || current.habits.some((habit) => habit.name === name)) return current;
+      const habit = { id: `habit-${globalThis.crypto?.randomUUID?.() || Date.now()}`, name, completedDates: [] as string[] };
+      return appendActivity({ ...current, habits: [...current.habits, habit] }, newActivity("增加一个轻量习惯", name));
+    });
+    setHabitInput("");
+  }
+
+  function toggleHabit(id: string) {
+    setDesk((current) => {
+      let checkedName = "";
+      const habits = current.habits.map((habit) => {
+        if (habit.id !== id) return habit;
+        const checked = habit.completedDates.includes(todayKey);
+        if (!checked) checkedName = habit.name;
+        return {
+          ...habit,
+          completedDates: checked
+            ? habit.completedDates.filter((date) => date !== todayKey)
+            : [...habit.completedDates, todayKey].slice(-90),
+        };
+      });
+      const next = { ...current, habits };
+      return checkedName ? appendActivity(next, newActivity("完成今日习惯", checkedName)) : next;
+    });
+  }
+
+  function convertInboxItem(id: string) {
+    setDesk((current) => {
+      const item = current.inbox.find((entry) => entry.id === id);
+      if (!item) return current;
+      const title = item.kind === "link" ? "处理收件箱链接" : item.content;
+      const next = addTask(current, { title, note: item.kind === "link" ? item.content : "", source: "inbox" });
+      return appendActivity({
+        ...next,
+        inbox: next.inbox.map((entry) => entry.id === id ? { ...entry, status: "planned" as const } : entry),
+      }, newActivity("从收件箱生成任务", title));
+    });
+  }
+
+  function deleteInboxItem(id: string) {
+    setDesk((current) => ({ ...current, inbox: current.inbox.filter((item) => item.id !== id) }));
+  }
+
+  function openVideo(url: string) {
+    setVideoUrl(url);
+    setActiveView("video");
+  }
+
+  function applyWorkPlan(plan: WorkPlan) {
+    setDesk((current) => applyAgentActions(current, plan.actions, plan.title));
   }
 
   async function connect() {
     if (!apiKey.trim()) {
-      setNotice("请先输入密钥；它只保留在当前页面内存中");
+      setConnectionMessage("请先输入密钥；它只保留在当前页面内存中");
       return;
     }
-    setNotice("正在询问本地模型…");
+    setConnectionMessage("正在询问本地模型…");
     try {
       const response = await fetch("/api/agent", {
         method: "POST",
@@ -142,272 +244,212 @@ export default function Home() {
       const selected = model || data.models[0] || "";
       setModel(selected);
       setConnected(true);
-      setNotice(`已连接 · ${data.models.length} 个模型可用`);
-      window.localStorage.setItem(
-        "evolve-desk.connection",
-        JSON.stringify({ baseURL, model: selected }),
-      );
+      setSettingsOpen(false);
+      setConnectionMessage(`本地模型在线 · ${data.models.length} 个模型`);
+      window.localStorage.setItem("evolve-desk.connection", JSON.stringify({ baseURL, model: selected }));
     } catch (error) {
       setConnected(false);
-      setNotice(error instanceof Error ? error.message : "无法连接本地模型");
+      setConnectionMessage(error instanceof Error ? error.message : "无法连接本地模型");
     }
-  }
-
-  async function askAgent(event: FormEvent) {
-    event.preventDefault();
-    const request = prompt.trim();
-    if (!request) return;
-    if (!apiKey.trim()) {
-      setSettingsOpen(true);
-      setNotice("先在连接设置中输入密钥");
-      return;
-    }
-    setThinking(true);
-    setNotice("Agent 正在观察、设计和自检…");
-    try {
-      const response = await fetch("/api/agent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "propose",
-          baseURL,
-          apiKey,
-          model,
-          prompt: request,
-          modules: modules.map(({ name, description, enabled }) => ({
-            name,
-            description,
-            enabled,
-          })),
-        }),
-      });
-      const data = (await response.json()) as { error?: string; proposal: Proposal; model?: string };
-      if (!response.ok) throw new Error(data.error || "Agent 没有返回提案");
-      setProposal(data.proposal);
-      setModel(data.model || model);
-      setPrompt("");
-      setNotice("新提案已就绪，等待你的确认");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Agent 暂时不可用");
-    } finally {
-      setThinking(false);
-    }
-  }
-
-  function applyProposal() {
-    const newModule: Module = {
-      id: `agent-${Date.now()}`,
-      ...proposal.module,
-      enabled: true,
-      source: "agent",
-    };
-    setModules((current) => [...current, newModule]);
-    setNotice(`已加入「${newModule.name}」，可随时停用或移除`);
-  }
-
-  function dismissProposal() {
-    setNotice("已搁置提案，没有改变工作台");
   }
 
   return (
     <main className="app-shell">
       <header className="topbar">
-        <button className="brand" onClick={() => setActiveView("canvas")}>
-          <span className="brand-mark" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </span>
-          <span>
-            <strong>Evolve Desk</strong>
-            <small>会和你一起长大的工作台</small>
-          </span>
+        <button className="brand" onClick={() => setActiveView("today")}>
+          <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
+          <span><strong>Evolve Desk</strong><small>会和你一起长大的工作台</small></span>
         </button>
         <div className="top-actions">
-          <span className={`connection ${connected ? "is-online" : ""}`}>
-            <i /> {connected ? "本地模型在线" : "尚未连接模型"}
-          </span>
-          <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="打开连接设置">
-            ⌘
-          </button>
+          <span className={`connection ${connected ? "is-online" : ""}`}><i /> {connectionMessage}</span>
+          <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="打开连接设置">⌘</button>
           <div className="avatar">岚</div>
         </div>
       </header>
 
       <aside className="rail" aria-label="工作台导航">
-        <button
-          className={activeView === "canvas" ? "active" : ""}
-          onClick={() => setActiveView("canvas")}
-        >
-          <span>◫</span> 生长画布
-        </button>
-        <button
-          className={activeView === "memory" ? "active" : ""}
-          onClick={() => setActiveView("memory")}
-        >
-          <span>◎</span> 自省记忆
-        </button>
-        <div className="rail-label">能力模块</div>
-        {modules.map((item) => (
-          <button key={item.id} onClick={() => toggleModule(item.id)}>
-            <i className="module-dot" style={{ background: item.accent }} />
-            {item.name}
-            <small>{item.enabled ? "开" : "关"}</small>
-          </button>
-        ))}
-        <div className="rail-footer">
-          <span>{enabledCount}</span>
-          <p>个能力正在陪你工作</p>
-        </div>
+        <button className={activeView === "today" ? "active" : ""} onClick={() => setActiveView("today")}><span>◫</span> 今日</button>
+        <button className={activeView === "inbox" ? "active" : ""} onClick={() => setActiveView("inbox")}><span>↘</span> 收件箱<small>{newInbox.length}</small></button>
+        <button className={activeView === "video" ? "active" : ""} onClick={() => setActiveView("video")}><span>▷</span> 视频总结<small>{desk.videos.length}</small></button>
+        <button className={activeView === "knowledge" ? "active" : ""} onClick={() => setActiveView("knowledge")}><span>◇</span> 知识库<small>{desk.knowledge.length}</small></button>
+        <button className={activeView === "memory" ? "active" : ""} onClick={() => setActiveView("memory")}><span>◎</span> 自省记忆</button>
+        <button className={activeView === "lab" ? "active" : ""} onClick={() => setActiveView("lab")}><span>⌘</span> 进化实验室</button>
+        <div className="rail-label">能力底座</div>
+        <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>任务与焦点</span><b>运行中</b></div>
+        <div className="rail-capability"><i style={{ background: "#ff6d5a" }} /><span>统一收件箱</span><b>运行中</b></div>
+        <div className="rail-capability"><i style={{ background: "#7657d6" }} /><span>视频理解</span><b>运行中</b></div>
+        <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>知识再利用</span><b>运行中</b></div>
+        <div className="rail-capability"><i style={{ background: "#1f9d6a" }} /><span>本地记忆</span><b>运行中</b></div>
+        <div className="rail-footer"><span>{openTasks.length}</span><p>件事仍在等待推进<br />{newInbox.length} 条输入待整理</p></div>
       </aside>
 
       <section className="workspace">
-        {activeView === "canvas" ? (
+        {activeView === "today" && (
           <>
-            <div className="workspace-heading">
-              <div>
-                <p className="eyebrow">今天 · 2026.08.05</p>
-                <h1>工作台不必完成，<em>它只需要继续生长。</em></h1>
-              </div>
-              <div className="growth-index">
-                <span>生长指数</span>
-                <strong>{Math.min(96, 48 + modules.length * 7)}</strong>
-                <small>比上周更贴近你</small>
-              </div>
+            <div className="workspace-heading today-heading">
+              <div><p className="eyebrow">今天 · {dateLabel}</p><h1>把输入接住，<em>把最重要的事推向完成。</em></h1></div>
+              <button className="reopen-guide" onClick={() => setStarterOpen(true)}>重新打开起步引导</button>
             </div>
 
-            <div className="canvas-grid">
-              <article className="focus-card">
-                <div className="card-label"><span /> 今日锚点</div>
-                <h2>把个人工作台<br />变成长期伙伴</h2>
-                <p>第一步：让 Agent 提出的每次改变都有理由、有边界、可撤销。</p>
-                <div className="focus-progress"><i /></div>
-                <footer><span>1 / 3 个里程碑</span><button>继续推进 →</button></footer>
+            <div className="dayline" aria-label="今天的工作流">
+              <div className="active"><i>1</i><span><strong>先接住</strong><small>{newInbox.length} 条待整理</small></span></div><b />
+              <div className={openTasks.length ? "active" : ""}><i>2</i><span><strong>再推进</strong><small>{openTasks.length} 个进行中</small></span></div><b />
+              <div className={completedTasks.length ? "active" : ""}><i>3</i><span><strong>有完成</strong><small>{completedTasks.length} 个已完成</small></span></div>
+            </div>
+
+            <div className="today-grid">
+              <article className="focus-card day-focus-card">
+                <div className="card-label"><span /> 今日唯一焦点</div>
+                {focusTask ? (
+                  <>
+                    <h2>{focusTask.title}</h2>
+                    <p>{focusTask.note || "只推进这一件。其他输入先交给收件箱。"}</p>
+                    <div className="focus-progress"><i style={{ width: `${Math.max(18, Math.round((completedTasks.length / Math.max(1, desk.tasks.length)) * 100))}%` }} /></div>
+                    <footer><span>{completedTasks.length} / {desk.tasks.length} 项完成</span><button onClick={() => toggleTask(focusTask.id)}>标记完成 →</button></footer>
+                  </>
+                ) : (
+                  <div className="focus-empty"><h2>今天还没有焦点</h2><p>写下一件值得推进的事，工作台会把它固定在这里。</p><button onClick={() => setStarterOpen(true)}>从一件事开始</button></div>
+                )}
               </article>
 
-              <article className="capture-card">
-                <div className="card-label">快速捕捉</div>
-                <textarea aria-label="记录灵感" placeholder="刚刚想到什么？先放在这里…" />
-                <footer><span>⌘ + Enter 保存</span><button>收下</button></footer>
+              <article className="capture-card live-capture-card">
+                <div className="card-label">快速捕捉 · 想法或链接</div>
+                <form onSubmit={saveCapture}>
+                  <textarea value={captureInput} onChange={(event) => setCaptureInput(event.target.value)} aria-label="记录想法或链接" placeholder="先放在这里，不用马上分类…" onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") saveCapture(); }} />
+                  <footer><span>⌘ / Ctrl + Enter 保存</span><button disabled={!captureInput.trim()}>收下</button></footer>
+                </form>
               </article>
 
-              <article className="pulse-card">
-                <div className="pulse-orbit" aria-hidden="true">
-                  <i /><i /><span>3</span>
-                </div>
-                <div>
-                  <div className="card-label">工作台脉搏</div>
-                  <h3>{enabledCount} 个能力活跃</h3>
-                  <p>最近一次进化发生在今天</p>
-                </div>
-              </article>
-
-              <article className="modules-card">
-                <header>
-                  <div><div className="card-label">能力花园</div><h3>你的工作方式</h3></div>
-                  <span>{modules.length} 个模块</span>
-                </header>
-                <div className="module-list">
-                  {modules.slice(-4).map((item) => (
-                    <div className="module-row" key={item.id}>
-                      <i style={{ background: item.accent }}>{item.source === "agent" ? "✦" : ""}</i>
-                      <div><strong>{item.name}</strong><p>{item.description}</p></div>
-                      <button
-                        className={`switch ${item.enabled ? "on" : ""}`}
-                        onClick={() => toggleModule(item.id)}
-                        aria-label={`${item.enabled ? "停用" : "启用"}${item.name}`}
-                      ><span /></button>
+              <article className="task-board">
+                <header><div><div className="card-label">今日任务</div><h3>接下来做什么</h3></div><span>{completedTasks.length}/{desk.tasks.length}</span></header>
+                <form className="inline-add" onSubmit={submitTask}><input value={taskInput} onChange={(event) => setTaskInput(event.target.value)} placeholder="添加一件具体的小事" aria-label="添加今日任务" /><button disabled={!taskInput.trim()}>＋</button></form>
+                <div className="task-list">
+                  {desk.tasks.length ? desk.tasks.slice().reverse().map((task) => (
+                    <div className={`task-row ${task.done ? "done" : ""}`} key={task.id}>
+                      <button className="task-check" onClick={() => toggleTask(task.id)} aria-label={`${task.done ? "恢复" : "完成"}${task.title}`}>{task.done ? "✓" : ""}</button>
+                      <div><strong>{task.title}</strong><small>{task.source === "agent" ? "Agent 创建" : task.source === "inbox" ? "来自收件箱" : task.id === focusTask?.id ? "今日焦点" : "手动添加"}</small></div>
+                      {!task.done && task.id !== focusTask?.id && <button className="pin-task" onClick={() => setFocus(task.id)}>设为焦点</button>}
+                      <button className="remove-task" onClick={() => removeTask(task.id)} aria-label={`删除${task.title}`}>×</button>
                     </div>
-                  ))}
+                  )) : <div className="list-empty"><strong>还没有任务</strong><p>从一件 20 分钟内能推进的小事开始。</p></div>}
                 </div>
+              </article>
+
+              <article className="habit-board">
+                <header><div><div className="card-label">今日节律</div><h3>重复得足够轻</h3></div><span>{habitsDone}/{desk.habits.length}</span></header>
+                <div className="habit-list">
+                  {desk.habits.map((habit) => {
+                    const checked = habit.completedDates.includes(todayKey);
+                    return <button className={checked ? "checked" : ""} onClick={() => toggleHabit(habit.id)} key={habit.id}><i>{checked ? "✓" : ""}</i><span>{habit.name}</span><small>{checked ? "今天已完成" : "点一下完成"}</small></button>;
+                  })}
+                  {!desk.habits.length && <div className="list-empty compact"><strong>还没有固定习惯</strong><p>保持轻量，先加一个就够。</p></div>}
+                </div>
+                <form className="inline-add habit-add" onSubmit={addHabit}><input value={habitInput} onChange={(event) => setHabitInput(event.target.value)} placeholder="例如：阅读 20 分钟" aria-label="添加习惯" /><button disabled={!habitInput.trim()}>＋</button></form>
               </article>
             </div>
           </>
-        ) : (
-          <section className="memory-view">
-            <p className="eyebrow">自省记忆 · 只保存在这台设备</p>
-            <h1>工作台为什么<br /><em>成为现在的样子？</em></h1>
-            <div className="memory-line">
-              <time>今天</time>
-              <article><strong>{proposal.title}</strong><p>{proposal.reflection}</p><span>来自 Agent 的设计判断</span></article>
-            </div>
-            <div className="memory-line muted">
-              <time>起点</time>
-              <article><strong>确立安全边界</strong><p>能力可以生长，但所有改变都必须由人确认，并且可以撤销。</p><span>核心原则</span></article>
+        )}
+
+        {activeView === "inbox" && (
+          <section className="inbox-view">
+            <div className="workspace-heading"><div><p className="eyebrow">统一收件箱 · 本地保存</p><h1>先捕捉，<em>稍后再决定它去哪里。</em></h1></div><div className="inbox-count"><strong>{newInbox.length}</strong><span>待处理</span></div></div>
+            <form className="inbox-capture" onSubmit={saveCapture}><textarea value={captureInput} onChange={(event) => setCaptureInput(event.target.value)} aria-label="收件箱输入" placeholder="粘贴一个视频链接、网页，或者记下一段想法…" /><button disabled={!captureInput.trim()}>放进收件箱 <span>↘</span></button></form>
+            <div className="inbox-list">
+              {desk.inbox.length ? desk.inbox.slice().reverse().map((item) => (
+                <article className={item.status === "planned" ? "planned" : ""} key={item.id}>
+                  <div className={`inbox-kind ${item.kind}`}><span>{item.kind === "link" ? "↗" : "✦"}</span><small>{item.kind === "link" ? "链接" : "想法"}</small></div>
+                  <div className="inbox-content">
+                    {item.kind === "link" ? <a href={item.content} target="_blank" rel="noreferrer">{item.content}</a> : <p>{item.content}</p>}
+                    <small>{formatTime(item.createdAt)} · {item.status === "planned" ? "已经进入后续行动" : item.kind === "link" && isSupportedVideoLink(item.content) ? "可以进入视频总结" : item.kind === "link" ? "等待网页理解能力" : "等待整理"}</small>
+                  </div>
+                  <div className="inbox-actions">
+                    {item.kind === "link" && isSupportedVideoLink(item.content)
+                      ? <button onClick={() => openVideo(item.content)}>去总结</button>
+                      : <button disabled={item.status === "planned"} onClick={() => convertInboxItem(item.id)}>{item.status === "planned" ? "已安排" : "转为任务"}</button>}
+                    <button className="icon-danger" onClick={() => deleteInboxItem(item.id)} aria-label="删除收件箱条目">×</button>
+                  </div>
+                </article>
+              )) : <div className="inbox-empty"><span>↘</span><strong>收件箱现在是空的</strong><p>下一次看到值得保存的视频、网页或想法，直接扔进来。</p></div>}
             </div>
           </section>
         )}
+
+        {activeView === "video" && (
+          <VideoWorkbench
+            key={videoUrl || "video-workbench"}
+            baseURL={baseURL}
+            apiKey={apiKey}
+            model={model}
+            initialUrl={videoUrl}
+            videos={desk.videos}
+            knowledge={desk.knowledge}
+            onNeedSettings={() => setSettingsOpen(true)}
+            onSave={(video, createTasks) => setDesk((current) => saveVideoSummary(current, video, createTasks))}
+          />
+        )}
+
+        {activeView === "knowledge" && (
+          <KnowledgeWorkbench
+            baseURL={baseURL}
+            apiKey={apiKey}
+            model={model}
+            cards={desk.knowledge}
+            inquiries={desk.knowledgeInquiries || []}
+            onNeedSettings={() => setSettingsOpen(true)}
+            onOpenVideo={() => setActiveView("video")}
+            onSave={(inquiry) => setDesk((current) => saveKnowledgeInquiry(current, inquiry))}
+            onCreateTask={(task) => createTask(task.title, "agent", task.note)}
+          />
+        )}
+
+        {activeView === "memory" && (
+          <section className="memory-view">
+            <p className="eyebrow">自省记忆 · 只保存在这台设备</p>
+            <h1>工作台记住的不是数据，<br /><em>而是你怎样推进事情。</em></h1>
+            {desk.activity.length ? desk.activity.slice().reverse().slice(0, 12).map((entry) => (
+              <div className={`memory-line ${entry.source === "agent" ? "agent-memory" : ""}`} key={entry.id}>
+                <time>{formatTime(entry.createdAt)}</time>
+                <article><strong>{entry.label}</strong><p>{entry.detail}</p><span>{entry.source === "agent" ? "由你确认的 Agent 动作" : "来自真实使用"}</span></article>
+              </div>
+            )) : <div className="memory-empty"><strong>还没有形成记忆</strong><p>完成任务、整理输入或确认 Agent 动作后，这里会解释工作台为什么成为现在的样子。</p></div>}
+          </section>
+        )}
+
+        {activeView === "lab" && <EvolutionLab baseURL={baseURL} apiKey={apiKey} model={model} onNeedSettings={() => setSettingsOpen(true)} />}
       </section>
 
-      <aside className="agent-panel">
-        <header>
-          <div className="agent-glyph"><span>✦</span></div>
-          <div><strong>内生 Agent</strong><small>{thinking ? "正在思考" : "可配置 · 可审阅"}</small></div>
-          <button aria-label="打开连接设置" onClick={() => setSettingsOpen(true)}>•••</button>
-        </header>
+      {activeView === "lab" ? (
+        <aside className="agent-panel lab-guardrail">
+          <header><div className="agent-glyph"><span>⌁</span></div><div><strong>执行边界</strong><small>写死在本地服务中</small></div><button aria-label="打开连接设置" onClick={() => setSettingsOpen(true)}>•••</button></header>
+          <div className="guardrail-intro"><span>原则 02</span><h3>Agent 可以写代码，<br />不能扩大自己的权力。</h3><p>它没有终端工具，也无法修改模型连接、沙箱规则、依赖或构建配置。</p></div>
+          <ol className="guardrail-gates"><li><i>1</i><div><strong>路径门</strong><p>只允许产品界面、组件和测试文件。</p></div></li><li><i>2</i><div><strong>内容门</strong><p>阻断密钥、外部网络和动态执行。</p></div></li><li><i>3</i><div><strong>指纹门</strong><p>文件有变化就拒绝覆盖，避免踩掉人工编辑。</p></div></li><li><i>4</i><div><strong>确认门</strong><p>逐文件看完差异，由你触发最终写入。</p></div></li></ol>
+          <div className="protected-zone"><span>永不开放</span><code>tools/</code><code>app/api/</code><code>EvolutionLab.tsx</code><code>.env*</code><code>package.json</code><code>.git/</code></div>
+          <div className="guardrail-footer"><i className={connected ? "online" : ""} /><div><strong>{connected ? "模型已连接" : "等待模型连接"}</strong><p>密钥只停留在当前页面内存</p></div><button onClick={() => setSettingsOpen(true)}>设置</button></div>
+        </aside>
+      ) : activeView === "video" ? (
+        <aside className="agent-panel video-guide-panel">
+          <header><div className="agent-glyph video-glyph"><span>▷</span></div><div><strong>视频理解边界</strong><small>本地导入 · 有据可查</small></div><button aria-label="打开连接设置" onClick={() => setSettingsOpen(true)}>•••</button></header>
+          <div className="video-guide-intro"><span>Plan A → Plan B</span><h3>先找平台字幕，<br />没有就在本机转写。</h3><p>标题和封面只能帮助识别来源，永远不能代替字幕成为总结依据。</p></div>
+          <ol className="video-guide-steps"><li><i>1</i><div><strong>受限导入</strong><p>只接受 B站、YouTube、小红书和抖音的 HTTPS 链接。</p></div></li><li><i>2</i><div><strong>字幕优先</strong><p>yt-dlp 在本机读取平台字幕，不上传视频文件。</p></div></li><li><i>3</i><div><strong>本机转写</strong><p>没有字幕时，Whisper 处理临时音频并在完成后删除。</p></div></li><li><i>4</i><div><strong>确认复用</strong><p>模型只读真实文本；知识和任务由你确认后保存。</p></div></li></ol>
+          <div className="video-plan-b"><span>无字幕时</span><p>点击本地转录，或粘贴平台字幕、飞书妙记等已有文本；两条路径都保留真实证据。</p></div>
+          <div className="guardrail-footer"><i className={connected ? "online" : ""} /><div><strong>{connected ? "总结模型已连接" : "等待模型连接"}</strong><p>导入视频不需要模型密钥</p></div><button onClick={() => setSettingsOpen(true)}>设置</button></div>
+        </aside>
+      ) : (
+        <WorkAgent baseURL={baseURL} apiKey={apiKey} model={model} connected={connected} state={desk} onNeedSettings={() => setSettingsOpen(true)} onApply={applyWorkPlan} />
+      )}
 
-        <div className="agent-intro">
-          <p>我会观察你的工作方式，提出具体改变。<br />未经确认，我不会动任何东西。</p>
-        </div>
-
-        <div className="proposal">
-          <div className="proposal-meta">
-            <span>变更提案</span>
-            <i className={`risk ${proposal.risk}`}>{proposal.risk === "low" ? "低风险" : proposal.risk === "medium" ? "中风险" : "高风险"}</i>
-          </div>
-          <h3>{proposal.title}</h3>
-          <p>{proposal.summary}</p>
-          <div className="reflection">
-            <span>✦ 自省</span>
-            <p>{proposal.reflection}</p>
-          </div>
-          <div className="change-list">
-            {proposal.changes.map((change) => <span key={change}>+ {change}</span>)}
-          </div>
-          <details>
-            <summary>回滚方式</summary>
-            <p>{proposal.rollback}</p>
-          </details>
-          <div className="proposal-actions">
-            <button className="ghost" onClick={dismissProposal}>先不改变</button>
-            <button className="approve" onClick={applyProposal}>确认加入 <span>↗</span></button>
-          </div>
-        </div>
-
-        <div className="agent-composer">
-          <div className="suggestions">
-            {prompts.map((item) => <button key={item} onClick={() => setPrompt(item)}>{item}</button>)}
-          </div>
-          <form onSubmit={askAgent}>
-            <textarea
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              placeholder="告诉 Agent，你想让工作台学会什么…"
-              aria-label="给 Agent 的要求"
-            />
-            <button disabled={thinking || !prompt.trim()} aria-label="发送给 Agent">↑</button>
-          </form>
-          <p className="status-line"><i />{notice}</p>
-        </div>
-      </aside>
+      {starterOpen && <QuickStart connected={connected} onClose={finishOnboarding} onOpenSettings={() => setSettingsOpen(true)} onCreateTask={(title) => createTask(title)} />}
 
       {settingsOpen && (
         <div className="modal-backdrop" onMouseDown={() => setSettingsOpen(false)}>
           <section className="settings-modal" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="settings-title">
             <button className="modal-close" onClick={() => setSettingsOpen(false)} aria-label="关闭设置">×</button>
-            <p className="eyebrow">本地连接</p>
-            <h2 id="settings-title">把 Agent 接到你的模型</h2>
+            <p className="eyebrow">本地连接</p><h2 id="settings-title">把 Agent 接到你的模型</h2>
             <p className="modal-copy">密钥只停留在当前页面内存，不会写入代码或浏览器存储。刷新页面后需要重新输入。</p>
             <label>Base URL<input value={baseURL} onChange={(event) => setBaseURL(event.target.value)} /></label>
             <label>API 密钥<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="输入本地服务密钥" autoComplete="off" /></label>
-            <label>模型
-              {models.length ? (
-                <select value={model} onChange={(event) => setModel(event.target.value)}>{models.map((item) => <option key={item}>{item}</option>)}</select>
-              ) : (
-                <input value={model} onChange={(event) => setModel(event.target.value)} placeholder="连接后自动发现，也可手动填写" />
-              )}
-            </label>
-            <div className="settings-note"><span>安全边界</span><p>第一版只允许连接 localhost / 127.0.0.1；Agent 只能生成模块提案，不能执行终端命令。</p></div>
+            <label>模型{models.length ? <select value={model} onChange={(event) => setModel(event.target.value)}>{models.map((item) => <option key={item}>{item}</option>)}</select> : <input value={model} onChange={(event) => setModel(event.target.value)} placeholder="连接后自动发现，也可手动填写" />}</label>
+            <div className="settings-note"><span>安全边界</span><p>只允许连接 localhost / 127.0.0.1。行动 Agent 只能提出结构化动作；源码 Agent 只能在白名单内生成可审阅差异。</p></div>
             <button className="connect-button" onClick={connect}>{connected ? "重新检查连接" : "检查连接"}</button>
           </section>
         </div>

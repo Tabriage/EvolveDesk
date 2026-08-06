@@ -31,9 +31,60 @@ test("server-renders the Evolve Desk product", async () => {
   const html = await response.text();
   assert.match(html, /<title>Evolve Desk · 会生长的个人工作台<\/title>/i);
   assert.match(html, /Evolve Desk/);
-  assert.match(html, /内生 Agent/);
-  assert.match(html, /未经确认，我不会动任何东西/);
+  assert.match(html, /行动 Agent/);
+  assert.match(html, /今日唯一焦点/);
+  assert.match(html, /统一收件箱/);
+  assert.match(html, /视频总结/);
+  assert.match(html, /知识库/);
+  assert.match(html, /进化实验室/);
+  assert.match(html, /工作台数据不会因为一次对话就被悄悄改掉/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
+});
+
+test("knowledge Q&A requires selected local evidence before calling a model", async () => {
+  const worker = await createWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/agent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "ask-knowledge",
+        baseURL: "http://localhost:62783/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        question: "这些材料共同说明了什么？",
+        knowledge: [],
+      }),
+    }),
+    env,
+    context,
+  );
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /至少选择一张/);
+});
+
+test("video summary endpoint refuses to infer from title without transcript evidence", async () => {
+  const worker = await createWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/agent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "summarize-video",
+        baseURL: "http://localhost:62783/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        video: { title: "只有标题的视频" },
+        transcript: "内容太短",
+      }),
+    }),
+    env,
+    context,
+  );
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /字幕内容太短/);
 });
 
 test("agent endpoint rejects non-local model hosts", async () => {
