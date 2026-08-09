@@ -36,9 +36,37 @@ test("server-renders the Evolve Desk product", async () => {
   assert.match(html, /统一收件箱/);
   assert.match(html, /视频总结/);
   assert.match(html, /知识库/);
+  assert.match(html, /周回顾/);
   assert.match(html, /进化实验室/);
   assert.match(html, /工作台数据不会因为一次对话就被悄悄改掉/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/);
+});
+
+test("weekly review endpoint refuses to invent a review without recorded evidence", async () => {
+  const worker = await createWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/agent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "weekly-review",
+        baseURL: "http://localhost:62783/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        weeklySnapshot: {
+          weekKey: "2026-08-03",
+          periodLabel: "8月3日—8月9日",
+          sourceStats: {},
+          activity: [],
+        },
+      }),
+    }),
+    env,
+    context,
+  );
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /没有可回顾/);
 });
 
 test("knowledge Q&A requires selected local evidence before calling a model", async () => {

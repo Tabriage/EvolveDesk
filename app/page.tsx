@@ -5,6 +5,7 @@ import { EvolutionLab } from "./components/EvolutionLab";
 import { KnowledgeWorkbench } from "./components/KnowledgeWorkbench";
 import { QuickStart } from "./components/QuickStart";
 import { VideoWorkbench } from "./components/VideoWorkbench";
+import { WeeklyReview } from "./components/WeeklyReview";
 import { WorkAgent } from "./components/WorkAgent";
 import {
   WORKBENCH_STORAGE_KEY,
@@ -15,6 +16,7 @@ import {
   getTodayKey,
   parseWorkbenchState,
   saveKnowledgeInquiry,
+  saveWeeklyReview,
   saveVideoSummary,
 } from "./features/workbench-core.mjs";
 import type {
@@ -23,7 +25,7 @@ import type {
   WorkbenchState,
 } from "./features/workbench-core.mjs";
 
-type ActiveView = "today" | "inbox" | "video" | "knowledge" | "memory" | "lab";
+type ActiveView = "today" | "inbox" | "video" | "knowledge" | "review" | "memory" | "lab";
 
 type WorkPlan = {
   title: string;
@@ -272,6 +274,7 @@ export default function Home() {
         <button className={activeView === "inbox" ? "active" : ""} onClick={() => setActiveView("inbox")}><span>↘</span> 收件箱<small>{newInbox.length}</small></button>
         <button className={activeView === "video" ? "active" : ""} onClick={() => setActiveView("video")}><span>▷</span> 视频总结<small>{desk.videos.length}</small></button>
         <button className={activeView === "knowledge" ? "active" : ""} onClick={() => setActiveView("knowledge")}><span>◇</span> 知识库<small>{desk.knowledge.length}</small></button>
+        <button className={activeView === "review" ? "active" : ""} onClick={() => setActiveView("review")}><span>↺</span> 周回顾<small>{desk.weeklyReviews.length}</small></button>
         <button className={activeView === "memory" ? "active" : ""} onClick={() => setActiveView("memory")}><span>◎</span> 自省记忆</button>
         <button className={activeView === "lab" ? "active" : ""} onClick={() => setActiveView("lab")}><span>⌘</span> 进化实验室</button>
         <div className="rail-label">能力底座</div>
@@ -279,6 +282,7 @@ export default function Home() {
         <div className="rail-capability"><i style={{ background: "#ff6d5a" }} /><span>统一收件箱</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#7657d6" }} /><span>视频理解</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>知识再利用</span><b>运行中</b></div>
+        <div className="rail-capability"><i style={{ background: "#d39a2c" }} /><span>周度回顾</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#1f9d6a" }} /><span>本地记忆</span><b>运行中</b></div>
         <div className="rail-footer"><span>{openTasks.length}</span><p>件事仍在等待推进<br />{newInbox.length} 条输入待整理</p></div>
       </aside>
@@ -399,6 +403,19 @@ export default function Home() {
             onOpenVideo={() => setActiveView("video")}
             onSave={(inquiry) => setDesk((current) => saveKnowledgeInquiry(current, inquiry))}
             onCreateTask={(task) => createTask(task.title, "agent", task.note)}
+          />
+        )}
+
+        {activeView === "review" && hydrated && (
+          <WeeklyReview
+            baseURL={baseURL}
+            apiKey={apiKey}
+            model={model}
+            state={desk}
+            reviews={desk.weeklyReviews || []}
+            onNeedSettings={() => setSettingsOpen(true)}
+            onSave={(review) => setDesk((current) => saveWeeklyReview(current, review))}
+            onCreateTasks={(tasks) => tasks.forEach((task) => createTask(task.title, "agent", task.note))}
           />
         )}
 

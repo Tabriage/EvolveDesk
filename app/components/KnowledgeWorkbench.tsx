@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
+import { findKnowledgeRelations } from "../features/workbench-core.mjs";
 import type { KnowledgeCard, KnowledgeInquiry } from "../features/workbench-core.mjs";
 
 type KnowledgeDraft = Omit<KnowledgeInquiry, "id" | "createdAt">;
@@ -62,6 +63,7 @@ export function KnowledgeWorkbench({
   );
   const sourceCount = useMemo(() => new Set(cards.map((card) => card.sourceUrl)).size, [cards]);
   const tagCount = useMemo(() => new Set(cards.flatMap((card) => card.tags)).size, [cards]);
+  const relations = useMemo(() => findKnowledgeRelations(cards, 6), [cards]);
 
   function toggleCard(id: string) {
     if (!selectedIds.includes(id) && selectedIds.length >= 12) {
@@ -135,6 +137,16 @@ export function KnowledgeWorkbench({
     setMessage("建议行动已加入今日任务");
   }
 
+  function compareRelation(leftId: string, rightId: string, leftTitle: string, rightTitle: string) {
+    setSearch("");
+    setSelectedIds([leftId, rightId]);
+    setQuestion(`「${leftTitle}」和「${rightTitle}」之间有哪些一致、互补或冲突之处？`);
+    setAnswer(null);
+    setSaved(false);
+    setTaskAdded(false);
+    setMessage("已把这条自动关联放到证据桌；检查问题后即可向本地模型求证");
+  }
+
   if (!cards.length) {
     return (
       <section className="knowledge-workbench knowledge-empty">
@@ -202,6 +214,21 @@ export function KnowledgeWorkbench({
           <p className="knowledge-message"><i className={busy ? "busy" : ""} />{message}</p>
         </main>
       </div>
+
+      {relations.length > 0 && (
+        <section className="knowledge-relations">
+          <header><div><p className="eyebrow">自动关联 · 跨来源</p><h2>旧理解正在和新材料相遇。</h2></div><span>{relations.length} 条可解释关联</span></header>
+          <div>{relations.map((relation) => (
+            <button key={relation.id} onClick={() => compareRelation(relation.leftId, relation.rightId, relation.leftTitle, relation.rightTitle)}>
+              <span><small>{relation.leftSourceTitle}</small><strong>{relation.leftTitle}</strong></span>
+              <i><b>↔</b><em>{relation.sharedTags.length ? relation.sharedTags.map((tag) => `#${tag}`).join(" ") : relation.sharedTerms.slice(0, 2).join(" · ")}</em></i>
+              <span><small>{relation.rightSourceTitle}</small><strong>{relation.rightTitle}</strong></span>
+              <u>放到证据桌 ↗</u>
+            </button>
+          ))}</div>
+          <p>关联只来自跨来源的共同标签或重复概念；它是待核对线索，不会直接写成结论。</p>
+        </section>
+      )}
 
       {inquiries.length > 0 && (
         <section className="inquiry-history">

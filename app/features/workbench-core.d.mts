@@ -79,8 +79,80 @@ export type KnowledgeInquiry = {
   createdAt: string;
 };
 
+export type WeeklyReviewSourceStats = {
+  completedTasks: number;
+  createdTasks: number;
+  capturedItems: number;
+  plannedItems: number;
+  habitCheckins: number;
+  videos: number;
+  knowledgeCards: number;
+  knowledgeInquiries: number;
+};
+
+export type WeeklyReview = {
+  id: string;
+  weekKey: string;
+  periodLabel: string;
+  headline: string;
+  summary: string;
+  wins: string[];
+  friction: string[];
+  knowledgeConnections: string[];
+  nextWeekFocus: string;
+  suggestedActions: Array<{ title: string; note: string }>;
+  sourceStats: WeeklyReviewSourceStats;
+  createdAt: string;
+};
+
+export type WeeklyDaySnapshot = {
+  key: string;
+  label: string;
+  dateLabel: string;
+  tasksCreated: number;
+  tasksCompleted: number;
+  inboxCaptured: number;
+  habitCheckins: number;
+  videos: number;
+  knowledgeCards: number;
+  inquiries: number;
+  activityCount: number;
+  total: number;
+};
+
+export type WeeklySnapshot = {
+  weekKey: string;
+  startDate: string;
+  endDate: string;
+  periodLabel: string;
+  days: WeeklyDaySnapshot[];
+  completedTasks: Array<Pick<WorkTask, "id" | "title" | "note" | "completedAt">>;
+  createdTasks: Array<Pick<WorkTask, "id" | "title" | "note" | "done" | "createdAt">>;
+  openTasks: Array<Pick<WorkTask, "id" | "title" | "note" | "priority" | "createdAt">>;
+  capturedItems: Array<Pick<InboxItem, "id" | "content" | "kind" | "status" | "createdAt">>;
+  videos: Array<Pick<VideoRecord, "id" | "title" | "platform" | "createdAt">>;
+  knowledgeCards: Array<Pick<KnowledgeCard, "id" | "title" | "tags" | "sourceTitle" | "createdAt">>;
+  inquiries: Array<{ id: string; question: string; answerable: boolean; sourceCount: number; createdAt: string }>;
+  activity: Array<Pick<Activity, "label" | "detail" | "source" | "createdAt">>;
+  sourceStats: WeeklyReviewSourceStats;
+  hasEvidence: boolean;
+};
+
+export type KnowledgeRelation = {
+  id: string;
+  leftId: string;
+  rightId: string;
+  leftTitle: string;
+  rightTitle: string;
+  leftSourceTitle: string;
+  rightSourceTitle: string;
+  sharedTags: string[];
+  sharedTerms: string[];
+  score: number;
+};
+
 export type WorkbenchState = {
-  version: 3;
+  version: 4;
   focusTaskId: string | null;
   tasks: WorkTask[];
   inbox: InboxItem[];
@@ -89,6 +161,7 @@ export type WorkbenchState = {
   videos: VideoRecord[];
   knowledge: KnowledgeCard[];
   knowledgeInquiries: KnowledgeInquiry[];
+  weeklyReviews: WeeklyReview[];
 };
 
 export type AgentAction =
@@ -98,6 +171,7 @@ export type AgentAction =
   | { type: "set_focus"; title: string; note?: string };
 
 export function getTodayKey(date?: Date): string;
+export function getWeekKey(date?: Date): string;
 export function inboxKind(content: string): "note" | "link";
 export function createInitialWorkbench(): WorkbenchState;
 export function parseWorkbenchState(raw: string | null): WorkbenchState;
@@ -116,3 +190,9 @@ export function saveKnowledgeInquiry(
   state: WorkbenchState,
   input: Omit<KnowledgeInquiry, "id" | "createdAt">,
 ): WorkbenchState;
+export function buildWeeklySnapshot(state: WorkbenchState, anchorDate?: Date): WeeklySnapshot;
+export function saveWeeklyReview(
+  state: WorkbenchState,
+  input: Omit<WeeklyReview, "id" | "createdAt">,
+): WorkbenchState;
+export function findKnowledgeRelations(cards: KnowledgeCard[], limit?: number): KnowledgeRelation[];

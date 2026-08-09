@@ -7,6 +7,7 @@ const MAX_ACTIVITY = 80;
 const MAX_VIDEOS = 40;
 const MAX_KNOWLEDGE_CARDS = 120;
 const MAX_KNOWLEDGE_INQUIRIES = 40;
+const MAX_WEEKLY_REVIEWS = 24;
 
 function cleanText(value, limit = 240) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
@@ -24,13 +25,40 @@ export function getTodayKey(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
+function startOfLocalWeek(date = new Date()) {
+  const value = new Date(date);
+  value.setHours(0, 0, 0, 0);
+  const day = value.getDay();
+  value.setDate(value.getDate() - (day === 0 ? 6 : day - 1));
+  return value;
+}
+
+export function getWeekKey(date = new Date()) {
+  return getTodayKey(startOfLocalWeek(date));
+}
+
+function addLocalDays(date, days) {
+  const value = new Date(date);
+  value.setDate(value.getDate() + days);
+  return value;
+}
+
+function dateInRange(value, start, end) {
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) && time >= start.getTime() && time < end.getTime();
+}
+
+function formatShortDate(date) {
+  return `${date.getMonth() + 1}月${date.getDate()}日`;
+}
+
 export function inboxKind(content) {
   return /^https?:\/\/\S+$/i.test(cleanText(content, 2_000)) ? "link" : "note";
 }
 
 export function createInitialWorkbench() {
   return {
-    version: 3,
+    version: 4,
     focusTaskId: null,
     tasks: [],
     inbox: [],
@@ -39,6 +67,7 @@ export function createInitialWorkbench() {
     videos: [],
     knowledge: [],
     knowledgeInquiries: [],
+    weeklyReviews: [],
   };
 }
 
@@ -108,6 +137,38 @@ function sanitizeKnowledgeInquiry(inquiry) {
   };
 }
 
+function sanitizeWeeklyReview(review) {
+  const value = review && typeof review === "object" ? review : {};
+  const stats = value.sourceStats && typeof value.sourceStats === "object" ? value.sourceStats : {};
+  const safeCount = (count) => Number.isFinite(count) ? Math.max(0, Math.round(count)) : 0;
+  return {
+    id: cleanText(value.id, 100) || createId("review"),
+    weekKey: cleanText(value.weekKey, 10),
+    periodLabel: cleanText(value.periodLabel, 40),
+    headline: cleanText(value.headline, 100),
+    summary: cleanText(value.summary, 1_200),
+    wins: validArray(value.wins).slice(0, 5).map((item) => cleanText(item, 360)).filter(Boolean),
+    friction: validArray(value.friction).slice(0, 5).map((item) => cleanText(item, 360)).filter(Boolean),
+    knowledgeConnections: validArray(value.knowledgeConnections).slice(0, 5).map((item) => cleanText(item, 420)).filter(Boolean),
+    nextWeekFocus: cleanText(value.nextWeekFocus, 360),
+    suggestedActions: validArray(value.suggestedActions).slice(0, 4).map((action) => ({
+      title: cleanText(action?.title, 120),
+      note: cleanText(action?.note, 320),
+    })).filter((action) => action.title),
+    sourceStats: {
+      completedTasks: safeCount(stats.completedTasks),
+      createdTasks: safeCount(stats.createdTasks),
+      capturedItems: safeCount(stats.capturedItems),
+      plannedItems: safeCount(stats.plannedItems),
+      habitCheckins: safeCount(stats.habitCheckins),
+      videos: safeCount(stats.videos),
+      knowledgeCards: safeCount(stats.knowledgeCards),
+      knowledgeInquiries: safeCount(stats.knowledgeInquiries),
+    },
+    createdAt: cleanText(value.createdAt, 40) || new Date().toISOString(),
+  };
+}
+
 export function parseWorkbenchState(raw) {
   if (!raw) return createInitialWorkbench();
   try {
@@ -171,8 +232,12 @@ export function parseWorkbenchState(raw) {
       .slice(-MAX_KNOWLEDGE_INQUIRIES)
       .map(sanitizeKnowledgeInquiry)
       .filter((inquiry) => inquiry.question && inquiry.answer);
+    const weeklyReviews = validArray(parsed.weeklyReviews)
+      .slice(-MAX_WEEKLY_REVIEWS)
+      .map(sanitizeWeeklyReview)
+      .filter((review) => review.weekKey && review.headline && review.summary && review.nextWeekFocus);
     const focusTaskId = tasks.some((task) => task.id === parsed.focusTaskId) ? parsed.focusTaskId : null;
-    return { version: 3, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries };
+    return { version: 4, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries, weeklyReviews };
   } catch {
     return createInitialWorkbench();
   }
@@ -282,7 +347,7 @@ export function saveVideoSummary(state, input, createTasks = false) {
   };
   let next = {
     ...state,
-    version: 3,
+    version: 4,
     videos: [...state.videos.filter((item) => item.url !== url), video].slice(-MAX_VIDEOS),
     inbox: state.inbox.map((item) => item.content === url || item.content === cleanText(input?.capturedUrl, 2_000) ? { ...item, status: "planned" } : item),
   };
@@ -324,7 +389,7 @@ export function saveKnowledgeInquiry(state, input) {
   if (!inquiry.question || !inquiry.answer) return state;
   return {
     ...state,
-    version: 3,
+    version: 4,
     knowledgeInquiries: [...validArray(state.knowledgeInquiries), inquiry].slice(-MAX_KNOWLEDGE_INQUIRIES),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -334,4 +399,166 @@ export function saveKnowledgeInquiry(state, input) {
       source: "agent",
     }].slice(-MAX_ACTIVITY),
   };
+}
+
+export function buildWeeklySnapshot(state, anchorDate = new Date()) {
+  const start = startOfLocalWeek(anchorDate);
+  const end = addLocalDays(start, 7);
+  const dayKeys = Array.from({ length: 7 }, (_, index) => getTodayKey(addLocalDays(start, index)));
+  const keyIndex = new Map(dayKeys.map((key, index) => [key, index]));
+  const days = dayKeys.map((key, index) => {
+    const date = addLocalDays(start, index);
+    return {
+      key,
+      label: ["一", "二", "三", "四", "五", "六", "日"][index],
+      dateLabel: `${date.getMonth() + 1}/${date.getDate()}`,
+      tasksCreated: 0,
+      tasksCompleted: 0,
+      inboxCaptured: 0,
+      habitCheckins: 0,
+      videos: 0,
+      knowledgeCards: 0,
+      inquiries: 0,
+      activityCount: 0,
+      total: 0,
+    };
+  });
+  const dayForTimestamp = (timestamp) => {
+    if (!dateInRange(timestamp, start, end)) return null;
+    return days[keyIndex.get(getTodayKey(new Date(timestamp)))] || null;
+  };
+  const tasksCreated = validArray(state.tasks).filter((task) => dateInRange(task.createdAt, start, end));
+  const completedTasks = validArray(state.tasks).filter((task) => task.completedAt && dateInRange(task.completedAt, start, end));
+  const capturedItems = validArray(state.inbox).filter((item) => dateInRange(item.createdAt, start, end));
+  const videos = validArray(state.videos).filter((video) => dateInRange(video.createdAt, start, end));
+  const knowledgeCards = validArray(state.knowledge).filter((card) => dateInRange(card.createdAt, start, end));
+  const inquiries = validArray(state.knowledgeInquiries).filter((inquiry) => dateInRange(inquiry.createdAt, start, end));
+  const activity = validArray(state.activity).filter((entry) => dateInRange(entry.createdAt, start, end));
+
+  for (const task of tasksCreated) dayForTimestamp(task.createdAt).tasksCreated += 1;
+  for (const task of completedTasks) dayForTimestamp(task.completedAt).tasksCompleted += 1;
+  for (const item of capturedItems) dayForTimestamp(item.createdAt).inboxCaptured += 1;
+  for (const video of videos) dayForTimestamp(video.createdAt).videos += 1;
+  for (const card of knowledgeCards) dayForTimestamp(card.createdAt).knowledgeCards += 1;
+  for (const inquiry of inquiries) dayForTimestamp(inquiry.createdAt).inquiries += 1;
+  for (const entry of activity) dayForTimestamp(entry.createdAt).activityCount += 1;
+
+  let habitCheckins = 0;
+  for (const habit of validArray(state.habits)) {
+    for (const dateKey of validArray(habit.completedDates)) {
+      const day = days[keyIndex.get(dateKey)];
+      if (!day) continue;
+      day.habitCheckins += 1;
+      habitCheckins += 1;
+    }
+  }
+  for (const day of days) {
+    day.total = day.tasksCreated + day.tasksCompleted + day.inboxCaptured + day.habitCheckins
+      + day.videos + day.knowledgeCards + day.inquiries;
+  }
+  const sourceStats = {
+    completedTasks: completedTasks.length,
+    createdTasks: tasksCreated.length,
+    capturedItems: capturedItems.length,
+    plannedItems: capturedItems.filter((item) => item.status === "planned").length,
+    habitCheckins,
+    videos: videos.length,
+    knowledgeCards: knowledgeCards.length,
+    knowledgeInquiries: inquiries.length,
+  };
+  const evidenceTotal = Object.values(sourceStats).reduce((total, count) => total + count, 0);
+  return {
+    weekKey: getTodayKey(start),
+    startDate: getTodayKey(start),
+    endDate: getTodayKey(addLocalDays(end, -1)),
+    periodLabel: `${formatShortDate(start)}—${formatShortDate(addLocalDays(end, -1))}`,
+    days,
+    completedTasks: completedTasks.slice(-12).map(({ id, title, note, completedAt }) => ({ id, title, note, completedAt })),
+    createdTasks: tasksCreated.slice(-12).map(({ id, title, note, done, createdAt }) => ({ id, title, note, done, createdAt })),
+    openTasks: validArray(state.tasks).filter((task) => !task.done).slice(-8).map(({ id, title, note, priority, createdAt }) => ({ id, title, note, priority, createdAt })),
+    capturedItems: capturedItems.slice(-12).map(({ id, content, kind, status, createdAt }) => ({ id, content, kind, status, createdAt })),
+    videos: videos.slice(-8).map(({ id, title, platform, createdAt }) => ({ id, title, platform, createdAt })),
+    knowledgeCards: knowledgeCards.slice(-12).map(({ id, title, tags, sourceTitle, createdAt }) => ({ id, title, tags, sourceTitle, createdAt })),
+    inquiries: inquiries.slice(-8).map(({ id, question, answerable, sources, createdAt }) => ({
+      id,
+      question,
+      answerable,
+      sourceCount: validArray(sources).length,
+      createdAt,
+    })),
+    activity: activity.slice(-16).map(({ label, detail, source, createdAt }) => ({ label, detail, source, createdAt })),
+    sourceStats,
+    hasEvidence: evidenceTotal > 0 || activity.length > 0,
+  };
+}
+
+export function saveWeeklyReview(state, input) {
+  const existing = validArray(state.weeklyReviews).find((review) => review.weekKey === cleanText(input?.weekKey, 10));
+  const review = sanitizeWeeklyReview({
+    ...input,
+    id: existing?.id || createId("review"),
+    createdAt: existing?.createdAt || new Date().toISOString(),
+  });
+  if (!review.weekKey || !review.headline || !review.summary || !review.nextWeekFocus) return state;
+  const now = new Date().toISOString();
+  return {
+    ...state,
+    version: 4,
+    weeklyReviews: [
+      ...validArray(state.weeklyReviews).filter((item) => item.weekKey !== review.weekKey),
+      review,
+    ].slice(-MAX_WEEKLY_REVIEWS),
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: existing ? "更新本周回顾" : "保存本周回顾",
+      detail: `${review.periodLabel} · ${review.headline}`,
+      createdAt: now,
+      source: "agent",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+function relationTokens(card) {
+  const normalized = `${cleanText(card?.title, 120)} ${cleanText(card?.content, 1_200)}`.toLocaleLowerCase("zh-CN");
+  const tokens = new Set(normalized.match(/[a-z0-9][a-z0-9-]{2,}/g) || []);
+  const chinese = normalized.replace(/[^\p{Script=Han}]/gu, "");
+  for (let index = 0; index < chinese.length - 1; index += 1) tokens.add(chinese.slice(index, index + 2));
+  return tokens;
+}
+
+export function findKnowledgeRelations(cards, limit = 8) {
+  const list = validArray(cards).slice(-MAX_KNOWLEDGE_CARDS);
+  const tokenCache = new Map(list.map((card) => [card.id, relationTokens(card)]));
+  const relations = [];
+  for (let leftIndex = 0; leftIndex < list.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < list.length; rightIndex += 1) {
+      const left = list[leftIndex];
+      const right = list[rightIndex];
+      if (!left?.id || !right?.id || left.sourceUrl === right.sourceUrl) continue;
+      const leftTags = new Map(validArray(left.tags).map((tag) => [cleanText(tag, 24).toLocaleLowerCase("zh-CN"), cleanText(tag, 24)]));
+      const sharedTags = validArray(right.tags)
+        .map((tag) => cleanText(tag, 24).toLocaleLowerCase("zh-CN"))
+        .filter((tag) => tag && leftTags.has(tag))
+        .map((tag) => leftTags.get(tag));
+      const leftTokens = tokenCache.get(left.id);
+      const overlap = [...(tokenCache.get(right.id) || [])].filter((token) => leftTokens?.has(token));
+      if (!sharedTags.length && overlap.length < 2) continue;
+      const score = sharedTags.length * 4 + Math.min(overlap.length, 4) + 2;
+      relations.push({
+        id: `${left.id}--${right.id}`,
+        leftId: left.id,
+        rightId: right.id,
+        leftTitle: cleanText(left.title, 120),
+        rightTitle: cleanText(right.title, 120),
+        leftSourceTitle: cleanText(left.sourceTitle, 240),
+        rightSourceTitle: cleanText(right.sourceTitle, 240),
+        sharedTags: sharedTags.filter(Boolean),
+        sharedTerms: overlap.slice(0, 4),
+        score,
+      });
+    }
+  }
+  return relations
+    .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+    .slice(0, Math.max(0, Math.min(Number(limit) || 0, 24)));
 }

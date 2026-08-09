@@ -4,11 +4,14 @@ import {
   addInboxItem,
   addTask,
   applyAgentActions,
+  buildWeeklySnapshot,
   createInitialWorkbench,
+  findKnowledgeRelations,
   getTodayKey,
   inboxKind,
   parseWorkbenchState,
   saveKnowledgeInquiry,
+  saveWeeklyReview,
   saveVideoSummary,
 } from "../app/features/workbench-core.mjs";
 
@@ -74,7 +77,7 @@ test("video summaries become durable knowledge and optional tasks", () => {
     },
   }, true);
 
-  assert.equal(saved.version, 3);
+  assert.equal(saved.version, 4);
   assert.equal(saved.videos.length, 1);
   assert.equal(saved.videos[0].transcriptSource, "local-whisper");
   assert.equal(saved.knowledge.length, 1);
@@ -103,10 +106,74 @@ test("grounded knowledge answers persist with citations and remain actionable", 
     suggestedTask: { title: "整理最近三条学习输入", note: "只做归入口，不做复杂分类" },
   });
 
-  assert.equal(answered.version, 3);
+  assert.equal(answered.version, 4);
   assert.equal(answered.knowledgeInquiries.length, 1);
   assert.equal(answered.knowledgeInquiries[0].sources[0].cardTitle, "渐进整理");
   assert.equal(answered.activity.at(-1)?.label, "保存一次知识问答");
   const restored = parseWorkbenchState(JSON.stringify(answered));
   assert.equal(restored.knowledgeInquiries[0].suggestedTask?.title, "整理最近三条学习输入");
+});
+
+test("weekly snapshots count only evidence inside the selected local week", () => {
+  const state = {
+    ...createInitialWorkbench(),
+    tasks: [
+      { id: "task-1", title: "完成周回顾", note: "", priority: "high", done: true, source: "manual", createdAt: "2026-08-03T01:00:00.000Z", completedAt: "2026-08-04T02:00:00.000Z" },
+      { id: "task-2", title: "下周才做", note: "", priority: "normal", done: false, source: "manual", createdAt: "2026-08-10T01:00:00.000Z", completedAt: null },
+    ],
+    inbox: [{ id: "inbox-1", content: "研究一个工作台案例", kind: "note", status: "planned", createdAt: "2026-08-05T02:00:00.000Z" }],
+    habits: [{ id: "habit-1", name: "每日记录", completedDates: ["2026-08-03", "2026-08-05"] }],
+    knowledge: [{ id: "card-1", title: "渐进整理", content: "用时再组织。", tags: ["工作台"], sourceUrl: "https://one.example", sourceTitle: "来源一", createdAt: "2026-08-06T02:00:00.000Z" }],
+    activity: [{ id: "activity-1", label: "完成一项任务", detail: "完成周回顾", source: "human", createdAt: "2026-08-04T02:00:00.000Z" }],
+  };
+  const snapshot = buildWeeklySnapshot(state, new Date(2026, 7, 9, 12));
+
+  assert.equal(snapshot.weekKey, "2026-08-03");
+  assert.equal(snapshot.sourceStats.createdTasks, 1);
+  assert.equal(snapshot.sourceStats.completedTasks, 1);
+  assert.equal(snapshot.sourceStats.capturedItems, 1);
+  assert.equal(snapshot.sourceStats.plannedItems, 1);
+  assert.equal(snapshot.sourceStats.habitCheckins, 2);
+  assert.equal(snapshot.sourceStats.knowledgeCards, 1);
+  assert.equal(snapshot.days.reduce((total, day) => total + day.habitCheckins, 0), 2);
+  assert.equal(snapshot.openTasks[0].title, "下周才做");
+  assert.equal(snapshot.hasEvidence, true);
+});
+
+test("weekly reviews upsert by week and survive local state migration", () => {
+  const review = {
+    weekKey: "2026-08-03",
+    periodLabel: "8月3日—8月9日",
+    headline: "从输入走到完成",
+    summary: "本周完成了一项真实任务，也留下了可以继续复用的知识。",
+    wins: ["完成周回顾"],
+    friction: ["仍有输入可能等待整理"],
+    knowledgeConnections: ["周回顾与渐进整理都强调使用后再组织"],
+    nextWeekFocus: "把一个未完成任务推进到可验收状态",
+    suggestedActions: [{ title: "完成一个未完成任务", note: "只选择一个" }],
+    sourceStats: { completedTasks: 1, createdTasks: 1, capturedItems: 1, plannedItems: 1, habitCheckins: 2, videos: 0, knowledgeCards: 1, knowledgeInquiries: 0 },
+  };
+  const first = saveWeeklyReview(createInitialWorkbench(), review);
+  const updated = saveWeeklyReview(first, { ...review, headline: "一周只有一个方向" });
+
+  assert.equal(first.weeklyReviews.length, 1);
+  assert.equal(updated.weeklyReviews.length, 1);
+  assert.equal(updated.weeklyReviews[0].headline, "一周只有一个方向");
+  assert.equal(updated.activity.at(-1)?.label, "更新本周回顾");
+  const restored = parseWorkbenchState(JSON.stringify(updated));
+  assert.equal(restored.version, 4);
+  assert.equal(restored.weeklyReviews[0].suggestedActions[0].title, "完成一个未完成任务");
+});
+
+test("knowledge relations expose cross-source shared evidence and ignore same-source pairs", () => {
+  const cards = [
+    { id: "a", title: "渐进整理", content: "信息在真正使用时再增加结构。", tags: ["学习系统", "整理"], sourceUrl: "https://one.example", sourceTitle: "来源一", createdAt: "2026-08-01T00:00:00.000Z" },
+    { id: "b", title: "低摩擦采集", content: "先统一入口，真正使用时再整理信息。", tags: ["学习系统", "采集"], sourceUrl: "https://two.example", sourceTitle: "来源二", createdAt: "2026-08-02T00:00:00.000Z" },
+    { id: "c", title: "同源补充", content: "真正使用时再整理。", tags: ["学习系统"], sourceUrl: "https://one.example", sourceTitle: "来源一", createdAt: "2026-08-03T00:00:00.000Z" },
+  ];
+  const relations = findKnowledgeRelations(cards, 6);
+
+  assert.ok(relations.some((relation) => relation.leftId === "a" && relation.rightId === "b"));
+  assert.ok(relations.every((relation) => !(relation.leftId === "a" && relation.rightId === "c")));
+  assert.deepEqual(relations.find((relation) => relation.leftId === "a" && relation.rightId === "b")?.sharedTags, ["学习系统"]);
 });

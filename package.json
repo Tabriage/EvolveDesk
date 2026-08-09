@@ -9,7 +9,8 @@
       "brace-expansion@<1.1.18": "1.1.18",
       "brace-expansion@>=4.0.0 <5.0.9": "5.0.9",
       "fast-uri@>=3.0.0 <3.1.5": "3.1.5",
-      "js-yaml@>=4.0.0 <4.3.0": "4.3.0",
+      "js-yaml@>=4.0.0 <4.3.1": "4.3.1",
+      "image-size": "file:vendor/image-size-safe",
       "undici@>=7.0.0 <7.29.0": "7.29.0"
     }
   },
@@ -51,6 +52,7 @@
     "@vitejs/plugin-rsc": "0.5.32",
     "eslint": "9.39.4",
     "eslint-config-next": "^16.3.0",
+    "image-size": "file:vendor/image-size-safe",
     "react-server-dom-webpack": "19.2.8",
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3",
