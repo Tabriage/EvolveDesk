@@ -1,17 +1,21 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import type { KnowledgeCard, VideoRecord, VideoSummary } from "../features/workbench-core.mjs";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { loadTranscript, saveTranscript } from "../features/transcript-store.mjs";
+import type { KnowledgeCard, KnowledgeInquiry, VideoRecord, VideoSummary } from "../features/workbench-core.mjs";
+import { TranscriptStudio } from "./TranscriptStudio";
 
-type ImportedVideo = Omit<VideoRecord, "id" | "summary" | "createdAt" | "transcriptSource"> & {
+type ImportedVideo = Omit<VideoRecord, "id" | "summary" | "createdAt" | "transcriptSource" | "localFileName"> & {
   inputUrl: string;
   transcript: string | null;
   transcriptSource: "platform" | "local-whisper" | "unavailable";
   importedAt: string;
+  uploadId?: string;
+  localFileName?: string;
 };
 
 type TranscriptionStatus = {
-  runtime: { whisper: boolean; ffmpeg: boolean; ytDlp: boolean; ready: boolean };
+  runtime: { whisper: boolean; ffmpeg: boolean; ytDlp: boolean; ready: boolean; localReady: boolean };
   model: {
     name: string;
     filename: string;
@@ -33,6 +37,8 @@ type VideoWorkbenchProps = {
   knowledge: KnowledgeCard[];
   onNeedSettings: () => void;
   onSave: (video: Omit<VideoRecord, "id" | "createdAt"> & { capturedUrl?: string }, createTasks: boolean) => void;
+  onSaveInquiry: (inquiry: Omit<KnowledgeInquiry, "id" | "createdAt">) => void;
+  onCreateTask: (task: { title: string; note: string }) => void;
 };
 
 const platformNames: Record<ImportedVideo["platform"], string> = {
@@ -40,6 +46,7 @@ const platformNames: Record<ImportedVideo["platform"], string> = {
   bilibili: "哔哩哔哩",
   xiaohongshu: "小红书",
   douyin: "抖音",
+  local: "本地文件",
 };
 
 function companionUrl(path: string) {
@@ -75,15 +82,19 @@ export function VideoWorkbench({
   knowledge,
   onNeedSettings,
   onSave,
+  onSaveInquiry,
+  onCreateTask,
 }: VideoWorkbenchProps) {
+  const [sourceMode, setSourceMode] = useState<"url" | "file">("url");
   const [url, setUrl] = useState(initialUrl);
   const [video, setVideo] = useState<ImportedVideo | null>(null);
   const [transcript, setTranscript] = useState("");
   const [summary, setSummary] = useState<VideoSummary | null>(null);
-  const [busy, setBusy] = useState<"" | "import" | "model" | "transcribe" | "summarize">("");
+  const [busy, setBusy] = useState<"" | "import" | "upload" | "model" | "transcribe" | "summarize">("");
   const [message, setMessage] = useState("粘贴视频链接，先读取真实元数据与字幕");
   const [savedMode, setSavedMode] = useState<"" | "knowledge" | "tasks">("");
   const [transcriptionStatus, setTranscriptionStatus] = useState<TranscriptionStatus | null>(null);
+  const [transcriptStored, setTranscriptStored] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -101,6 +112,15 @@ export function VideoWorkbench({
     [knowledge, summary, video],
   );
 
+  async function discardPendingUpload(current: ImportedVideo | null) {
+    if (!current?.uploadId) return;
+    await fetch(companionUrl("/api/video/upload/discard"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ uploadId: current.uploadId }),
+    }).catch(() => {});
+  }
+
   async function importFromUrl(event: FormEvent) {
     event.preventDefault();
     if (!url.trim()) return;
@@ -108,7 +128,9 @@ export function VideoWorkbench({
     setMessage("本地导入器正在读取元数据，并优先寻找平台字幕…");
     setSummary(null);
     setSavedMode("");
+    setTranscriptStored(false);
     try {
+      await discardPendingUpload(video);
       const response = await fetch(companionUrl("/api/video/import"), {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -126,6 +148,46 @@ export function VideoWorkbench({
       setVideo(null);
       setTranscript("");
       setMessage(error instanceof Error ? error.message : "视频导入失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function importFromFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > 500 * 1024 * 1024) {
+      setMessage("本地音视频超过 500MB 安全上限");
+      return;
+    }
+    setBusy("upload");
+    setMessage("正在把文件交给本机导入器读取；文件不会离开这台设备…");
+    setSummary(null);
+    setSavedMode("");
+    setTranscriptStored(false);
+    try {
+      await discardPendingUpload(video);
+      const response = await fetch(companionUrl("/api/video/upload"), {
+        method: "POST",
+        headers: {
+          "content-type": file.type || "application/octet-stream",
+          "x-evolve-file-name": encodeURIComponent(file.name),
+          "x-evolve-file-size": String(file.size),
+          "x-evolve-file-type": file.type || "application/octet-stream",
+        },
+        body: file,
+      });
+      const data = (await response.json()) as { error?: string; video?: ImportedVideo };
+      if (!response.ok || !data.video) throw new Error(data.error || "没有读取到本地媒体信息");
+      setVideo(data.video);
+      setUrl("");
+      setTranscript("");
+      setMessage(`已读取 ${data.video.localFileName || file.name} · 文件仅临时保留，转录后立即删除`);
+    } catch (error) {
+      setVideo(null);
+      setTranscript("");
+      setMessage(error instanceof Error ? error.message : "本地文件导入失败");
     } finally {
       setBusy("");
     }
@@ -155,7 +217,7 @@ export function VideoWorkbench({
       const response = await fetch(companionUrl("/api/video/transcribe"), {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: video.url }),
+        body: JSON.stringify(video.platform === "local" ? { uploadId: video.uploadId } : { url: video.url }),
       });
       const data = (await response.json()) as {
         error?: string;
@@ -224,7 +286,7 @@ export function VideoWorkbench({
     }
   }
 
-  function save(createTasks: boolean) {
+  async function save(createTasks: boolean) {
     if (!video || !summary) return;
     onSave({
       capturedUrl: video.inputUrl,
@@ -236,18 +298,23 @@ export function VideoWorkbench({
       description: video.description,
       duration: video.duration,
       thumbnail: video.thumbnail,
+      localFileName: video.localFileName || "",
       transcriptSource: video.transcriptSource === "platform"
         ? "platform"
         : video.transcriptSource === "local-whisper" ? "local-whisper" : "manual",
       summary,
     }, createTasks);
+    const stored = await saveTranscript(video.url, transcript);
+    await discardPendingUpload(video);
+    setVideo((current) => current ? { ...current, uploadId: undefined } : current);
+    setTranscriptStored(stored);
     setSavedMode(createTasks ? "tasks" : "knowledge");
     setMessage(createTasks
-      ? `已保存 ${summary.cards.length} 张知识卡片，并加入 ${summary.suggestedTasks.length} 个任务`
-      : `已保存视频总结和 ${summary.cards.length} 张知识卡片`);
+      ? `已保存 ${summary.cards.length} 张知识卡片，并加入 ${summary.suggestedTasks.length} 个任务${stored ? "；字幕已进入浏览器资料库" : "；字幕未能持久化"}`
+      : `已保存视频总结和 ${summary.cards.length} 张知识卡片${stored ? "；字幕已进入浏览器资料库" : "；字幕未能持久化"}`);
   }
 
-  function openSaved(saved: VideoRecord) {
+  async function openSaved(saved: VideoRecord) {
     setUrl(saved.url);
     setVideo({
       inputUrl: saved.url,
@@ -259,14 +326,20 @@ export function VideoWorkbench({
       description: saved.description,
       duration: saved.duration,
       thumbnail: saved.thumbnail,
+      localFileName: saved.localFileName,
       transcript: null,
-      transcriptSource: "unavailable",
+      transcriptSource: saved.transcriptSource === "platform"
+        ? "platform"
+        : saved.transcriptSource === "local-whisper" ? "local-whisper" : "unavailable",
       importedAt: saved.createdAt,
     });
-    setTranscript("");
+    const savedTranscript = await loadTranscript(saved.url).catch(() => "");
+    setTranscript(savedTranscript);
+    setTranscriptStored(Boolean(savedTranscript));
+    setSourceMode(saved.platform === "local" ? "file" : "url");
     setSummary(saved.summary);
     setSavedMode("knowledge");
-    setMessage("正在查看已保存总结；重新生成前需要再次导入字幕");
+    setMessage(savedTranscript ? "已从浏览器本地资料库恢复字幕，可继续搜索和提问" : "这条旧总结没有持久化字幕；重新生成前需要再次导入来源");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -287,11 +360,25 @@ export function VideoWorkbench({
         <div className={savedMode ? "done" : summary ? "active" : ""}><i>4</i><span><strong>再利用</strong><small>知识卡与任务</small></span></div>
       </div>
 
-      <form className="video-import-bar" onSubmit={importFromUrl}>
-        <label htmlFor="video-url">视频链接</label>
-        <input id="video-url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="粘贴 B站、YouTube、小红书或抖音链接" />
-        <button disabled={Boolean(busy) || !url.trim()}>{busy === "import" ? "正在导入…" : "读取视频"}<span>↘</span></button>
-      </form>
+      <div className="video-source-tabs" aria-label="选择视频来源">
+        <button className={sourceMode === "url" ? "active" : ""} onClick={() => setSourceMode("url")}><i>↗</i><span><strong>视频链接</strong><small>平台字幕优先</small></span></button>
+        <button className={sourceMode === "file" ? "active" : ""} onClick={() => setSourceMode("file")}><i>＋</i><span><strong>本地文件</strong><small>音频或视频 · ≤ 500MB</small></span></button>
+      </div>
+
+      {sourceMode === "url" ? (
+        <form className="video-import-bar" onSubmit={importFromUrl}>
+          <label htmlFor="video-url">视频链接</label>
+          <input id="video-url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="粘贴 B站、YouTube、小红书或抖音链接" />
+          <button disabled={Boolean(busy) || !url.trim()}>{busy === "import" ? "正在导入…" : "读取视频"}<span>↘</span></button>
+        </form>
+      ) : (
+        <label className={`local-media-drop ${busy === "upload" ? "busy" : ""}`}>
+          <input type="file" accept="audio/*,video/*,.mkv,.m4a,.flac,.aac" onChange={(event) => void importFromFile(event)} disabled={Boolean(busy)} />
+          <i>{busy === "upload" ? "…" : "＋"}</i>
+          <span><strong>{busy === "upload" ? "正在本机读取文件" : "选择音频或视频文件"}</strong><small>MP4 · MOV · MKV · WebM · MP3 · M4A · WAV · OGG · AAC · FLAC</small></span>
+          <b>文件不上传云端</b>
+        </label>
+      )}
 
       {video ? (
         <div className="video-source-grid">
@@ -307,7 +394,7 @@ export function VideoWorkbench({
               <span>已读取来源</span>
               <h2>{video.title}</h2>
               <p>{video.author || "作者未知"}</p>
-              <a href={video.url} target="_blank" rel="noreferrer">打开原视频 ↗</a>
+              {video.platform === "local" ? <em>本地临时文件 · 转录后删除</em> : <a href={video.url} target="_blank" rel="noreferrer">打开原视频 ↗</a>}
             </div>
           </article>
 
@@ -321,12 +408,12 @@ export function VideoWorkbench({
                 <span><i>⌁</i><strong>本地转录 Plan B</strong><small>只在本机处理，临时音频完成后删除</small></span>
                 {!transcriptionStatus ? (
                   <em>正在检测本机能力…</em>
-                ) : !transcriptionStatus.runtime.ready ? (
+                ) : !(video.platform === "local" ? transcriptionStatus.runtime.localReady : transcriptionStatus.runtime.ready) ? (
                   <div><p>缺少 {[
                     !transcriptionStatus.runtime.whisper && "whisper-cpp",
                     !transcriptionStatus.runtime.ffmpeg && "ffmpeg",
-                    !transcriptionStatus.runtime.ytDlp && "yt-dlp",
-                  ].filter(Boolean).join("、")}</p><code>brew install whisper-cpp ffmpeg yt-dlp</code></div>
+                    video.platform !== "local" && !transcriptionStatus.runtime.ytDlp && "yt-dlp",
+                  ].filter(Boolean).join("、")}</p><code>{video.platform === "local" ? "brew install whisper-cpp ffmpeg" : "brew install whisper-cpp ffmpeg yt-dlp"}</code></div>
                 ) : !transcriptionStatus.model.ready ? (
                   <button type="button" onClick={() => void downloadModel()} disabled={Boolean(busy)}>{busy === "model" ? "正在下载并校验…" : "下载多语言模型 · 约 142 MiB"}</button>
                 ) : (
@@ -346,6 +433,21 @@ export function VideoWorkbench({
       )}
 
       <p className="video-status"><i className={busy ? "busy" : ""} />{message}</p>
+
+      {video && transcript.trim().length >= 80 && (
+        <TranscriptStudio
+          key={`${video.url}-${transcript.length}`}
+          transcript={transcript}
+          video={{ title: video.title, url: video.url, platform: video.platform }}
+          baseURL={baseURL}
+          apiKey={apiKey}
+          model={model}
+          stored={transcriptStored}
+          onNeedSettings={onNeedSettings}
+          onSave={onSaveInquiry}
+          onCreateTask={onCreateTask}
+        />
+      )}
 
       {summary && video && (
         <article className="video-result">
@@ -383,7 +485,7 @@ export function VideoWorkbench({
 
           <footer className="video-save-actions">
             <p><i className={savedMode ? "saved" : ""} />{savedMode ? "已进入你的本地知识与行动系统" : "确认后才写入本地知识库"}</p>
-            <div><button className="save-knowledge" onClick={() => save(false)} disabled={Boolean(savedMode)}>只保存知识</button><button className="save-with-tasks" onClick={() => save(true)} disabled={Boolean(savedMode)}>保存并生成任务 <span>↗</span></button></div>
+            <div><button className="save-knowledge" onClick={() => void save(false)} disabled={Boolean(savedMode)}>只保存知识</button><button className="save-with-tasks" onClick={() => void save(true)} disabled={Boolean(savedMode)}>保存并生成任务 <span>↗</span></button></div>
           </footer>
         </article>
       )}
@@ -393,7 +495,7 @@ export function VideoWorkbench({
           <header><div><p className="eyebrow">本地知识架</p><h2>看过之后，仍然找得到。</h2></div><span>{videos.length} 个视频 · {knowledge.length} 张卡片</span></header>
           <div className="saved-video-grid">
             {videos.slice().reverse().slice(0, 6).map((saved) => (
-              <button key={saved.id} onClick={() => openSaved(saved)}><i>{platformNames[saved.platform]}</i><strong>{saved.title}</strong><p>{saved.summary.oneSentence}</p><small>{saved.summary.cards.length} 张卡片</small></button>
+              <button key={saved.id} onClick={() => void openSaved(saved)}><i>{platformNames[saved.platform]}</i><strong>{saved.title}</strong><p>{saved.summary.oneSentence}</p><small>{saved.summary.cards.length} 张卡片</small></button>
             ))}
           </div>
           {relatedCards.length > 0 && <p className="related-card-note">当前视频已有 {relatedCards.length} 张知识卡片保存在本机。</p>}

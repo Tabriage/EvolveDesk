@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   parseVideoUrl,
+  validateLocalMediaUpload,
   vttToTranscript,
   WHISPER_MODEL,
   whisperModelIntegrity,
@@ -38,4 +39,19 @@ test("local Whisper model requires the pinned size and checksum", () => {
   assert.equal(whisperModelIntegrity(562_000, WHISPER_MODEL.sha1).reason, "size-mismatch");
   assert.equal(whisperModelIntegrity(WHISPER_MODEL.bytes, "0".repeat(40)).reason, "checksum-mismatch");
   assert.match(WHISPER_MODEL.url, /^https:\/\/huggingface\.co\/ggerganov\/whisper\.cpp\//);
+});
+
+test("local media upload accepts bounded media files and strips path components", () => {
+  assert.deepEqual(validateLocalMediaUpload({
+    name: encodeURIComponent("../课程复盘.mp4"),
+    type: "video/mp4",
+    size: 4096,
+  }), {
+    originalName: "课程复盘.mp4",
+    extension: ".mp4",
+    declaredSize: 4096,
+    mimeType: "video/mp4",
+  });
+  assert.throws(() => validateLocalMediaUpload({ name: "notes.txt", type: "text/plain", size: 10 }), /请选择/);
+  assert.throws(() => validateLocalMediaUpload({ name: "large.mp4", type: "video/mp4", size: 501 * 1024 * 1024 }), /500MB/);
 });

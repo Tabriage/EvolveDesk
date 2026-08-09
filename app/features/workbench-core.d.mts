@@ -45,13 +45,14 @@ export type VideoSummary = {
 export type VideoRecord = {
   id: string;
   url: string;
-  platform: "youtube" | "bilibili" | "xiaohongshu" | "douyin";
+  platform: "youtube" | "bilibili" | "xiaohongshu" | "douyin" | "local";
   sourceId: string;
   title: string;
   author: string;
   description: string;
   duration: number | null;
   thumbnail: string;
+  localFileName: string;
   transcriptSource: "platform" | "local-whisper" | "manual";
   summary: VideoSummary;
   createdAt: string;
@@ -152,7 +153,7 @@ export type KnowledgeRelation = {
 };
 
 export type WorkbenchState = {
-  version: 4;
+  version: 5;
   focusTaskId: string | null;
   tasks: WorkTask[];
   inbox: InboxItem[];

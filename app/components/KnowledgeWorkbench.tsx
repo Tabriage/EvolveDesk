@@ -204,7 +204,9 @@ export function KnowledgeWorkbench({
               <header><span>{answer.answerable ? "有证据支持" : "资料仍不足"}</span><strong>{answer.sources.length} 条引用</strong></header>
               <h3>{answer.answer}</h3>
               {answer.keyPoints.length > 0 && <div className="answer-points">{answer.keyPoints.map((point, index) => <p key={point}><i>{String(index + 1).padStart(2, "0")}</i>{point}</p>)}</div>}
-              {answer.sources.length > 0 && <div className="answer-sources"><span>引用</span>{answer.sources.map((source) => <a href={source.sourceUrl} target="_blank" rel="noreferrer" key={source.cardId}><strong>{source.cardTitle}</strong><small>{source.sourceTitle}</small></a>)}</div>}
+              {answer.sources.length > 0 && <div className="answer-sources"><span>引用</span>{answer.sources.map((source) => /^https:\/\//i.test(source.sourceUrl)
+                ? <a href={source.sourceUrl} target="_blank" rel="noreferrer" key={source.cardId}><strong>{source.cardTitle}</strong><small>{source.sourceTitle}</small></a>
+                : <article key={source.cardId}><strong>{source.cardTitle}</strong><small>{source.sourceTitle} · 本地来源</small></article>)}</div>}
               {answer.gaps.length > 0 && <div className="answer-gaps"><span>还不能确认</span>{answer.gaps.map((gap) => <p key={gap}>! {gap}</p>)}</div>}
               <footer><button className="save-inquiry" onClick={saveAnswer} disabled={saved}>{saved ? "已保存问答" : "保存到知识记忆"}</button>{answer.suggestedTask && <button className="inquiry-task" onClick={createSuggestedTask} disabled={taskAdded}>{taskAdded ? "已加入今日任务" : "加入建议行动 ↗"}</button>}</footer>
             </article>

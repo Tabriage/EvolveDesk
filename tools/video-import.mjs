@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -13,9 +13,13 @@ const MAX_VIDEO_SECONDS = 2 * 60 * 60;
 const MAX_AUDIO_BYTES = 500 * 1024 * 1024;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MODEL_DIRECTORY = join(ROOT, ".evolve", "models");
+const UPLOAD_DIRECTORY = join(ROOT, ".evolve", "uploads");
 const MODEL_PATH = join(MODEL_DIRECTORY, "ggml-base.bin");
 const MODEL_PART_PATH = `${MODEL_PATH}.part`;
 const MODEL_MAX_BYTES = 160 * 1024 * 1024;
+const UPLOAD_TTL_MS = 24 * 60 * 60 * 1_000;
+const pendingUploads = new Map();
+const ALLOWED_MEDIA_EXTENSIONS = new Set([".aac", ".flac", ".m4a", ".mkv", ".mov", ".mp3", ".mp4", ".ogg", ".wav", ".webm"]);
 
 export const WHISPER_MODEL = Object.freeze({
   name: "Whisper base（多语言）",
@@ -44,6 +48,114 @@ const SUPPORTED_HOSTS = new Map([
 
 function cleanText(value, limit) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+export function validateLocalMediaUpload({ name, type, size, contentLength } = {}) {
+  let decodedName = String(name || "");
+  try {
+    decodedName = decodeURIComponent(decodedName);
+  } catch {
+    throw new Error("本地文件名编码无效");
+  }
+  const originalName = basename(decodedName.replaceAll("\\", "/")).slice(0, 180);
+  const extension = extname(originalName).toLowerCase();
+  const declaredSize = Number(size || contentLength || 0);
+  const mimeType = cleanText(type, 120).toLowerCase();
+  if (!originalName || !ALLOWED_MEDIA_EXTENSIONS.has(extension)) {
+    throw new Error("请选择 MP4、MOV、MKV、WebM、MP3、M4A、WAV、OGG、AAC 或 FLAC 文件");
+  }
+  if (!Number.isFinite(declaredSize) || declaredSize <= 0) throw new Error("本地文件大小无效");
+  if (declaredSize > MAX_AUDIO_BYTES) throw new Error("本地音视频超过 500MB 安全上限");
+  if (mimeType && !mimeType.startsWith("audio/") && !mimeType.startsWith("video/") && mimeType !== "application/octet-stream") {
+    throw new Error("文件类型不是受支持的音频或视频");
+  }
+  return { originalName, extension, declaredSize, mimeType };
+}
+
+async function cleanupExpiredUploads(now = Date.now()) {
+  await mkdir(UPLOAD_DIRECTORY, { recursive: true, mode: 0o700 });
+  const entries = await readdir(UPLOAD_DIRECTORY, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const path = join(UPLOAD_DIRECTORY, entry.name);
+    const details = await stat(path).catch(() => null);
+    if (details && now - details.mtimeMs > UPLOAD_TTL_MS) await rm(path, { force: true }).catch(() => {});
+  }
+  for (const [id, upload] of pendingUploads) {
+    if (now - upload.createdAt > UPLOAD_TTL_MS) pendingUploads.delete(id);
+  }
+}
+
+async function probeLocalMedia(path) {
+  try {
+    const { stdout } = await execFileAsync("ffprobe", [
+      "-v", "error",
+      "-show_entries", "format=duration:format_tags=title,artist,author:stream=codec_type",
+      "-of", "json",
+      path,
+    ], { timeout: 30_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true });
+    const payload = JSON.parse(stdout || "{}");
+    const streams = Array.isArray(payload.streams) ? payload.streams : [];
+    if (!streams.some((stream) => stream?.codec_type === "audio" || stream?.codec_type === "video")) {
+      throw new Error("文件中没有可读取的音频或视频轨道");
+    }
+    const duration = Number(payload.format?.duration);
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error("无法读取本地媒体时长");
+    if (duration > MAX_VIDEO_SECONDS) throw new Error("本地音视频最长支持两小时");
+    return {
+      duration: Math.round(duration),
+      title: cleanText(payload.format?.tags?.title, 240),
+      author: cleanText(payload.format?.tags?.artist || payload.format?.tags?.author, 120),
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") throw new Error("缺少 ffprobe，请先安装 ffmpeg");
+    const detail = cleanText(error?.stderr || error?.message, 260);
+    throw new Error(detail ? `无法读取本地媒体：${detail}` : "无法读取本地媒体");
+  }
+}
+
+export async function importLocalMedia(stream, metadata) {
+  const file = validateLocalMediaUpload(metadata);
+  await cleanupExpiredUploads();
+  const id = randomUUID();
+  const path = join(UPLOAD_DIRECTORY, `${id}${file.extension}`);
+  let handle;
+  let receivedBytes = 0;
+  try {
+    handle = await open(path, "wx", 0o600);
+    for await (const chunk of stream) {
+      const buffer = Buffer.from(chunk);
+      receivedBytes += buffer.length;
+      if (receivedBytes > MAX_AUDIO_BYTES || receivedBytes > file.declaredSize) throw new Error("接收到的本地文件超过声明大小或安全上限");
+      await handle.write(buffer);
+    }
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    if (receivedBytes !== file.declaredSize) throw new Error("本地文件传输不完整，请重新选择文件");
+    const probed = await probeLocalMedia(path);
+    pendingUploads.set(id, { path, createdAt: Date.now(), originalName: file.originalName });
+    return {
+      inputUrl: `local-media://${id}`,
+      url: `local-media://${id}`,
+      platform: "local",
+      sourceId: id,
+      title: probed.title || file.originalName.replace(/\.[^.]+$/, "") || "本地媒体",
+      author: probed.author,
+      description: `本地文件 · ${file.originalName}`,
+      duration: probed.duration,
+      thumbnail: "",
+      transcript: null,
+      transcriptSource: "unavailable",
+      importedAt: new Date().toISOString(),
+      uploadId: id,
+      localFileName: file.originalName,
+    };
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    await rm(path, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 export function whisperModelIntegrity(size, sha1) {
@@ -91,7 +203,7 @@ export async function transcriptionStatus() {
     modelStatus(),
   ]);
   return {
-    runtime: { whisper, ffmpeg, ytDlp, ready: whisper && ffmpeg && ytDlp },
+    runtime: { whisper, ffmpeg, ytDlp, ready: whisper && ffmpeg && ytDlp, localReady: whisper && ffmpeg },
     model: {
       name: WHISPER_MODEL.name,
       filename: WHISPER_MODEL.filename,
@@ -280,35 +392,11 @@ async function downloadedAudioPath(directory) {
   return path;
 }
 
-export async function transcribeVideo(value) {
-  const target = parseVideoUrl(value);
-  const status = await transcriptionStatus();
-  if (!status.runtime.ytDlp) throw new Error("缺少 yt-dlp，无法读取视频音频");
-  if (!status.runtime.ffmpeg) throw new Error("缺少 ffmpeg，无法转换本地音频");
-  if (!status.runtime.whisper) throw new Error("缺少 whisper-cli，请先安装 whisper-cpp");
-  if (!status.model.ready) throw new Error("本地 Whisper 模型尚未就绪，请先明确下载模型");
-
+async function transcribeMediaPath(sourcePath) {
   const temporary = await mkdtemp(join(tmpdir(), "evolve-transcribe-"));
   const wavePath = join(temporary, "audio.wav");
   const outputPath = join(temporary, "transcript");
   try {
-    await execFileAsync("yt-dlp", [
-      "--no-playlist",
-      "--format", "bestaudio/best",
-      "--match-filter", `duration <= ${MAX_VIDEO_SECONDS}`,
-      "--max-filesize", "500M",
-      "--paths", temporary,
-      "--output", "source.%(ext)s",
-      "--no-warnings",
-      "--socket-timeout", "20",
-      "--retries", "2",
-      target.url,
-    ], {
-      timeout: 10 * 60_000,
-      maxBuffer: 8 * 1024 * 1024,
-      windowsHide: true,
-    });
-    const sourcePath = await downloadedAudioPath(temporary);
     await execFileAsync("ffmpeg", [
       "-nostdin",
       "-hide_banner",
@@ -343,6 +431,39 @@ export async function transcribeVideo(value) {
       transcriptSource: "local-whisper",
       model: WHISPER_MODEL.name,
     };
+  } finally {
+    await rm(temporary, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+export async function transcribeVideo(value) {
+  const target = parseVideoUrl(value);
+  const status = await transcriptionStatus();
+  if (!status.runtime.ytDlp) throw new Error("缺少 yt-dlp，无法读取视频音频");
+  if (!status.runtime.ffmpeg) throw new Error("缺少 ffmpeg，无法转换本地音频");
+  if (!status.runtime.whisper) throw new Error("缺少 whisper-cli，请先安装 whisper-cpp");
+  if (!status.model.ready) throw new Error("本地 Whisper 模型尚未就绪，请先明确下载模型");
+
+  const temporary = await mkdtemp(join(tmpdir(), "evolve-transcribe-"));
+  try {
+    await execFileAsync("yt-dlp", [
+      "--no-playlist",
+      "--format", "bestaudio/best",
+      "--match-filter", `duration <= ${MAX_VIDEO_SECONDS}`,
+      "--max-filesize", "500M",
+      "--paths", temporary,
+      "--output", "source.%(ext)s",
+      "--no-warnings",
+      "--socket-timeout", "20",
+      "--retries", "2",
+      target.url,
+    ], {
+      timeout: 10 * 60_000,
+      maxBuffer: 8 * 1024 * 1024,
+      windowsHide: true,
+    });
+    const sourcePath = await downloadedAudioPath(temporary);
+    return await transcribeMediaPath(sourcePath);
   } catch (error) {
     if (error?.killed || error?.signal === "SIGTERM") throw new Error("本地转录超时，已清理临时音频");
     const detail = cleanText(error?.stderr || error?.message, 360);
@@ -350,4 +471,36 @@ export async function transcribeVideo(value) {
   } finally {
     await rm(temporary, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+export async function transcribeLocalMedia(uploadId) {
+  const id = String(uploadId || "").trim();
+  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("本地文件标识无效，请重新选择文件");
+  const status = await transcriptionStatus();
+  if (!status.runtime.ffmpeg) throw new Error("缺少 ffmpeg，无法转换本地音频");
+  if (!status.runtime.whisper) throw new Error("缺少 whisper-cli，请先安装 whisper-cpp");
+  if (!status.model.ready) throw new Error("本地 Whisper 模型尚未就绪，请先明确下载模型");
+  await cleanupExpiredUploads();
+  const upload = pendingUploads.get(id);
+  if (!upload) throw new Error("临时文件已经失效，请重新选择本地文件");
+  try {
+    return await transcribeMediaPath(upload.path);
+  } catch (error) {
+    if (error?.killed || error?.signal === "SIGTERM") throw new Error("本地转录超时，已清理临时文件");
+    const detail = cleanText(error?.stderr || error?.message, 360);
+    throw new Error(detail ? `本地转录失败：${detail}` : "本地转录失败");
+  } finally {
+    pendingUploads.delete(id);
+    await rm(upload.path, { force: true }).catch(() => {});
+  }
+}
+
+export async function discardLocalMedia(uploadId) {
+  const id = String(uploadId || "").trim();
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return false;
+  const upload = pendingUploads.get(id);
+  pendingUploads.delete(id);
+  if (!upload) return false;
+  await rm(upload.path, { force: true }).catch(() => {});
+  return true;
 }

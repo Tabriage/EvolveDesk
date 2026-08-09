@@ -12,8 +12,11 @@ import {
 } from "./evolution-core.mjs";
 import {
   downloadWhisperModel,
+  discardLocalMedia,
+  importLocalMedia,
   importVideo,
   transcriptionStatus,
+  transcribeLocalMedia,
   transcribeVideo,
 } from "./video-import.mjs";
 
@@ -22,6 +25,7 @@ const PORT = Number(process.env.EVOLVE_AGENT_PORT || 4242);
 const ALLOWED_ORIGINS = new Set(["http://localhost:3000", "http://127.0.0.1:3000"]);
 const MAX_REQUEST_BYTES = 256 * 1024;
 let videoImportBusy = false;
+let localMediaImportBusy = false;
 let modelDownloadBusy = false;
 let videoTranscriptionBusy = false;
 
@@ -41,7 +45,7 @@ function corsHeaders(origin) {
   return {
     "access-control-allow-origin": ALLOWED_ORIGINS.has(origin) ? origin : "http://localhost:3000",
     "access-control-allow-methods": "GET, POST, OPTIONS",
-    "access-control-allow-headers": "content-type",
+    "access-control-allow-headers": "content-type, x-evolve-file-name, x-evolve-file-size, x-evolve-file-type",
     "cache-control": "no-store",
     vary: "origin",
   };
@@ -132,6 +136,23 @@ async function handleVideoImport(body) {
   }
 }
 
+async function handleLocalMediaImport(request) {
+  if (localMediaImportBusy) throw new Error("已有一个本地文件正在导入，请等待它完成");
+  localMediaImportBusy = true;
+  try {
+    return {
+      video: await importLocalMedia(request, {
+        name: request.headers["x-evolve-file-name"],
+        type: request.headers["x-evolve-file-type"] || request.headers["content-type"],
+        size: request.headers["x-evolve-file-size"],
+        contentLength: request.headers["content-length"],
+      }),
+    };
+  } finally {
+    localMediaImportBusy = false;
+  }
+}
+
 async function currentTranscriptionStatus() {
   return {
     ...(await transcriptionStatus()),
@@ -156,7 +177,7 @@ async function handleVideoTranscription(body) {
   if (videoTranscriptionBusy) throw new Error("已有一个视频正在本地转录，请等待它完成");
   videoTranscriptionBusy = true;
   try {
-    return { transcription: await transcribeVideo(body.url) };
+    return { transcription: body.uploadId ? await transcribeLocalMedia(body.uploadId) : await transcribeVideo(body.url) };
   } finally {
     videoTranscriptionBusy = false;
   }
@@ -175,8 +196,8 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/health") {
       send(response, 200, {
         ok: true,
-        version: "0.5.0",
-        capabilities: ["source-evolution", "video-import", "local-transcription"],
+        version: "0.6.0",
+        capabilities: ["source-evolution", "video-import", "local-media-upload", "local-transcription"],
         latest: await latestProposal(),
       }, origin);
       return;
@@ -190,6 +211,10 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (request.method === "POST") {
+      if (url.pathname === "/api/video/upload") {
+        send(response, 200, await handleLocalMediaImport(request), origin);
+        return;
+      }
       const body = await readBody(request);
       if (url.pathname === "/api/propose") {
         send(response, 200, await propose(body), origin);
@@ -205,6 +230,10 @@ const server = createServer(async (request, response) => {
       }
       if (url.pathname === "/api/video/transcribe") {
         send(response, 200, await handleVideoTranscription(body), origin);
+        return;
+      }
+      if (url.pathname === "/api/video/upload/discard") {
+        send(response, 200, { discarded: await discardLocalMedia(body.uploadId) }, origin);
         return;
       }
       if (url.pathname === "/api/apply") {

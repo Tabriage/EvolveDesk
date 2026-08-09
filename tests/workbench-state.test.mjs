@@ -77,7 +77,7 @@ test("video summaries become durable knowledge and optional tasks", () => {
     },
   }, true);
 
-  assert.equal(saved.version, 4);
+  assert.equal(saved.version, 5);
   assert.equal(saved.videos.length, 1);
   assert.equal(saved.videos[0].transcriptSource, "local-whisper");
   assert.equal(saved.knowledge.length, 1);
@@ -87,6 +87,12 @@ test("video summaries become durable knowledge and optional tasks", () => {
   const restored = parseWorkbenchState(JSON.stringify(saved));
   assert.equal(restored.videos[0].summary.oneSentence, saved.videos[0].summary.oneSentence);
   assert.equal(restored.videos[0].transcriptSource, "local-whisper");
+  const localRestored = parseWorkbenchState(JSON.stringify({
+    ...saved,
+    videos: [{ ...saved.videos[0], url: "local-media://source-1", platform: "local", localFileName: "课程录音.wav" }],
+  }));
+  assert.equal(localRestored.videos[0].platform, "local");
+  assert.equal(localRestored.videos[0].localFileName, "课程录音.wav");
 });
 
 test("grounded knowledge answers persist with citations and remain actionable", () => {
@@ -106,7 +112,7 @@ test("grounded knowledge answers persist with citations and remain actionable", 
     suggestedTask: { title: "整理最近三条学习输入", note: "只做归入口，不做复杂分类" },
   });
 
-  assert.equal(answered.version, 4);
+  assert.equal(answered.version, 5);
   assert.equal(answered.knowledgeInquiries.length, 1);
   assert.equal(answered.knowledgeInquiries[0].sources[0].cardTitle, "渐进整理");
   assert.equal(answered.activity.at(-1)?.label, "保存一次知识问答");
@@ -161,7 +167,7 @@ test("weekly reviews upsert by week and survive local state migration", () => {
   assert.equal(updated.weeklyReviews[0].headline, "一周只有一个方向");
   assert.equal(updated.activity.at(-1)?.label, "更新本周回顾");
   const restored = parseWorkbenchState(JSON.stringify(updated));
-  assert.equal(restored.version, 4);
+  assert.equal(restored.version, 5);
   assert.equal(restored.weeklyReviews[0].suggestedActions[0].title, "完成一个未完成任务");
 });
 

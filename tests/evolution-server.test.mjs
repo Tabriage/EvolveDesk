@@ -32,6 +32,7 @@ test("local source agent exposes health and rejects foreign origins", async (con
   assert.equal(healthPayload.ok, true);
   assert.ok(healthPayload.capabilities.includes("video-import"));
   assert.ok(healthPayload.capabilities.includes("local-transcription"));
+  assert.ok(healthPayload.capabilities.includes("local-media-upload"));
 
   const transcriptionStatus = await fetch(`http://127.0.0.1:${port}/api/video/transcription/status`, {
     headers: { origin: "http://localhost:3000" },
@@ -39,6 +40,7 @@ test("local source agent exposes health and rejects foreign origins", async (con
   assert.equal(transcriptionStatus.status, 200);
   const transcriptionPayload = await transcriptionStatus.json();
   assert.equal(typeof transcriptionPayload.status.runtime.ready, "boolean");
+  assert.equal(typeof transcriptionPayload.status.runtime.localReady, "boolean");
   assert.equal(typeof transcriptionPayload.status.model.ready, "boolean");
   assert.equal(transcriptionPayload.status.downloading, false);
 
@@ -65,4 +67,17 @@ test("local source agent exposes health and rejects foreign origins", async (con
   });
   assert.equal(unsafeTranscription.status, 400);
   assert.match((await unsafeTranscription.json()).error, /当前支持/);
+
+  const unsafeUpload = await fetch(`http://127.0.0.1:${port}/api/video/upload`, {
+    method: "POST",
+    headers: {
+      origin: "http://localhost:3000",
+      "content-type": "text/plain",
+      "x-evolve-file-name": "notes.txt",
+      "x-evolve-file-size": "8",
+    },
+    body: "not media",
+  });
+  assert.equal(unsafeUpload.status, 400);
+  assert.match((await unsafeUpload.json()).error, /请选择/);
 });

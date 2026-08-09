@@ -58,7 +58,7 @@ export function inboxKind(content) {
 
 export function createInitialWorkbench() {
   return {
-    version: 4,
+    version: 5,
     focusTaskId: null,
     tasks: [],
     inbox: [],
@@ -206,13 +206,14 @@ export function parseWorkbenchState(raw) {
     const videos = validArray(parsed.videos).slice(-MAX_VIDEOS).map((video) => ({
       id: cleanText(video.id, 100) || createId("video"),
       url: cleanText(video.url, 2_000),
-      platform: ["youtube", "bilibili", "xiaohongshu", "douyin"].includes(video.platform) ? video.platform : "youtube",
+      platform: ["youtube", "bilibili", "xiaohongshu", "douyin", "local"].includes(video.platform) ? video.platform : "youtube",
       sourceId: cleanText(video.sourceId, 120),
       title: cleanText(video.title, 240),
       author: cleanText(video.author, 120),
       description: cleanText(video.description, 800),
       duration: Number.isFinite(video.duration) ? Math.max(0, Math.round(video.duration)) : null,
       thumbnail: cleanText(video.thumbnail, 2_000),
+      localFileName: cleanText(video.localFileName, 180),
       transcriptSource: video.transcriptSource === "manual"
         ? "manual"
         : video.transcriptSource === "local-whisper" ? "local-whisper" : "platform",
@@ -237,7 +238,7 @@ export function parseWorkbenchState(raw) {
       .map(sanitizeWeeklyReview)
       .filter((review) => review.weekKey && review.headline && review.summary && review.nextWeekFocus);
     const focusTaskId = tasks.some((task) => task.id === parsed.focusTaskId) ? parsed.focusTaskId : null;
-    return { version: 4, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries, weeklyReviews };
+    return { version: 5, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries, weeklyReviews };
   } catch {
     return createInitialWorkbench();
   }
@@ -332,13 +333,14 @@ export function saveVideoSummary(state, input, createTasks = false) {
   const video = {
     id: existing?.id || createId("video"),
     url,
-    platform: ["youtube", "bilibili", "xiaohongshu", "douyin"].includes(input?.platform) ? input.platform : "youtube",
+    platform: ["youtube", "bilibili", "xiaohongshu", "douyin", "local"].includes(input?.platform) ? input.platform : "youtube",
     sourceId: cleanText(input?.sourceId, 120),
     title,
     author: cleanText(input?.author, 120),
     description: cleanText(input?.description, 800),
     duration: Number.isFinite(input?.duration) ? Math.max(0, Math.round(input.duration)) : null,
     thumbnail: cleanText(input?.thumbnail, 2_000),
+    localFileName: cleanText(input?.localFileName, 180),
     transcriptSource: input?.transcriptSource === "manual"
       ? "manual"
       : input?.transcriptSource === "local-whisper" ? "local-whisper" : "platform",
@@ -347,7 +349,7 @@ export function saveVideoSummary(state, input, createTasks = false) {
   };
   let next = {
     ...state,
-    version: 4,
+    version: 5,
     videos: [...state.videos.filter((item) => item.url !== url), video].slice(-MAX_VIDEOS),
     inbox: state.inbox.map((item) => item.content === url || item.content === cleanText(input?.capturedUrl, 2_000) ? { ...item, status: "planned" } : item),
   };
@@ -389,7 +391,7 @@ export function saveKnowledgeInquiry(state, input) {
   if (!inquiry.question || !inquiry.answer) return state;
   return {
     ...state,
-    version: 4,
+    version: 5,
     knowledgeInquiries: [...validArray(state.knowledgeInquiries), inquiry].slice(-MAX_KNOWLEDGE_INQUIRIES),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -503,7 +505,7 @@ export function saveWeeklyReview(state, input) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 4,
+    version: 5,
     weeklyReviews: [
       ...validArray(state.weeklyReviews).filter((item) => item.weekKey !== review.weekKey),
       review,

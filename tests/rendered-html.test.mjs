@@ -115,6 +115,30 @@ test("video summary endpoint refuses to infer from title without transcript evid
   assert.match((await response.json()).error, /字幕内容太短/);
 });
 
+test("single-video Q&A requires real transcript segments before calling a model", async () => {
+  const worker = await createWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/agent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "ask-video",
+        baseURL: "http://localhost:62783/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        question: "作者给出了哪些步骤？",
+        video: { title: "示例视频", url: "local-media://example" },
+        segments: [],
+      }),
+    }),
+    env,
+    context,
+  );
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /没有可用于回答/);
+});
+
 test("agent endpoint rejects non-local model hosts", async () => {
   const worker = await createWorker();
   const response = await worker.fetch(

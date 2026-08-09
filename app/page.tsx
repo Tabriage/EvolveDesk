@@ -389,6 +389,8 @@ export default function Home() {
             knowledge={desk.knowledge}
             onNeedSettings={() => setSettingsOpen(true)}
             onSave={(video, createTasks) => setDesk((current) => saveVideoSummary(current, video, createTasks))}
+            onSaveInquiry={(inquiry) => setDesk((current) => saveKnowledgeInquiry(current, inquiry))}
+            onCreateTask={(task) => createTask(task.title, "agent", task.note)}
           />
         )}
 
@@ -446,9 +448,9 @@ export default function Home() {
       ) : activeView === "video" ? (
         <aside className="agent-panel video-guide-panel">
           <header><div className="agent-glyph video-glyph"><span>▷</span></div><div><strong>视频理解边界</strong><small>本地导入 · 有据可查</small></div><button aria-label="打开连接设置" onClick={() => setSettingsOpen(true)}>•••</button></header>
-          <div className="video-guide-intro"><span>Plan A → Plan B</span><h3>先找平台字幕，<br />没有就在本机转写。</h3><p>标题和封面只能帮助识别来源，永远不能代替字幕成为总结依据。</p></div>
-          <ol className="video-guide-steps"><li><i>1</i><div><strong>受限导入</strong><p>只接受 B站、YouTube、小红书和抖音的 HTTPS 链接。</p></div></li><li><i>2</i><div><strong>字幕优先</strong><p>yt-dlp 在本机读取平台字幕，不上传视频文件。</p></div></li><li><i>3</i><div><strong>本机转写</strong><p>没有字幕时，Whisper 处理临时音频并在完成后删除。</p></div></li><li><i>4</i><div><strong>确认复用</strong><p>模型只读真实文本；知识和任务由你确认后保存。</p></div></li></ol>
-          <div className="video-plan-b"><span>无字幕时</span><p>点击本地转录，或粘贴平台字幕、飞书妙记等已有文本；两条路径都保留真实证据。</p></div>
+          <div className="video-guide-intro"><span>LINK OR FILE → EVIDENCE</span><h3>先得到真实字幕，<br />再沿时间点理解。</h3><p>标题和封面只能帮助识别来源，永远不能代替字幕成为总结或问答依据。</p></div>
+          <ol className="video-guide-steps"><li><i>1</i><div><strong>本地导入</strong><p>支持四个平台链接与不超过 500MB 的本地音视频。</p></div></li><li><i>2</i><div><strong>字幕优先</strong><p>平台字幕直接读取；本地文件只在临时目录停留。</p></div></li><li><i>3</i><div><strong>时间证据</strong><p>Whisper 转录完成即删媒体，字幕保存在浏览器资料库。</p></div></li><li><i>4</i><div><strong>有据问答</strong><p>Agent 只读相关片段，回答必须返回有效时间引用。</p></div></li></ol>
+          <div className="video-plan-b"><span>资料边界</span><p>搜索在浏览器本地完成；提问最多发送 12 段相关字幕到你配置的本机模型。</p></div>
           <div className="guardrail-footer"><i className={connected ? "online" : ""} /><div><strong>{connected ? "总结模型已连接" : "等待模型连接"}</strong><p>导入视频不需要模型密钥</p></div><button onClick={() => setSettingsOpen(true)}>设置</button></div>
         </aside>
       ) : (
