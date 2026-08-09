@@ -8,6 +8,9 @@ const MAX_VIDEOS = 40;
 const MAX_KNOWLEDGE_CARDS = 120;
 const MAX_KNOWLEDGE_INQUIRIES = 40;
 const MAX_WEEKLY_REVIEWS = 24;
+const MAX_PERSONAL_ROUTES = 12;
+const MAX_ROUTE_PHASES = 6;
+const MAX_ROUTE_ACTIONS = 5;
 
 function cleanText(value, limit = 240) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
@@ -58,7 +61,7 @@ export function inboxKind(content) {
 
 export function createInitialWorkbench() {
   return {
-    version: 5,
+    version: 6,
     focusTaskId: null,
     tasks: [],
     inbox: [],
@@ -68,6 +71,7 @@ export function createInitialWorkbench() {
     knowledge: [],
     knowledgeInquiries: [],
     weeklyReviews: [],
+    routes: [],
   };
 }
 
@@ -169,6 +173,53 @@ function sanitizeWeeklyReview(review) {
   };
 }
 
+function sanitizePersonalRoute(route) {
+  const value = route && typeof route === "object" ? route : {};
+  const seenPhaseIds = new Set();
+  const seenActionIds = new Set();
+  const phases = validArray(value.phases).slice(0, MAX_ROUTE_PHASES).map((phase) => {
+    let phaseId = cleanText(phase?.id, 100) || createId("phase");
+    if (seenPhaseIds.has(phaseId)) phaseId = createId("phase");
+    seenPhaseIds.add(phaseId);
+    const actions = validArray(phase?.actions).slice(0, MAX_ROUTE_ACTIONS).map((action) => {
+      let actionId = cleanText(action?.id, 100) || createId("route-action");
+      if (seenActionIds.has(actionId)) actionId = createId("route-action");
+      seenActionIds.add(actionId);
+      return {
+        id: actionId,
+        title: cleanText(action?.title, 120),
+        note: cleanText(action?.note, 320),
+        mode: action?.mode === "habit" ? "habit" : "task",
+        linkedTaskId: action?.linkedTaskId ? cleanText(action.linkedTaskId, 100) : null,
+        linkedHabitId: action?.linkedHabitId ? cleanText(action.linkedHabitId, 100) : null,
+      };
+    }).filter((action) => action.title);
+    return {
+      id: phaseId,
+      title: cleanText(phase?.title, 80),
+      outcome: cleanText(phase?.outcome, 260),
+      completionRule: cleanText(phase?.completionRule, 220),
+      actions,
+      completedAt: phase?.completedAt ? cleanText(phase.completedAt, 40) : null,
+    };
+  }).filter((phase) => phase.title && phase.outcome && phase.actions.length);
+  const now = new Date().toISOString();
+  return {
+    id: cleanText(value.id, 100) || createId("route"),
+    name: cleanText(value.name, 40),
+    purpose: cleanText(value.purpose, 360),
+    category: ["create", "learn", "practice", "manage"].includes(value.category) ? value.category : "practice",
+    accent: ["blue", "coral", "violet", "green", "amber"].includes(value.accent) ? value.accent : "blue",
+    cadence: cleanText(value.cadence, 100),
+    successMetric: cleanText(value.successMetric, 220),
+    reflection: cleanText(value.reflection, 500),
+    phases,
+    createdAt: cleanText(value.createdAt, 40) || now,
+    updatedAt: cleanText(value.updatedAt, 40) || now,
+    archivedAt: value.archivedAt ? cleanText(value.archivedAt, 40) : null,
+  };
+}
+
 export function parseWorkbenchState(raw) {
   if (!raw) return createInitialWorkbench();
   try {
@@ -237,8 +288,12 @@ export function parseWorkbenchState(raw) {
       .slice(-MAX_WEEKLY_REVIEWS)
       .map(sanitizeWeeklyReview)
       .filter((review) => review.weekKey && review.headline && review.summary && review.nextWeekFocus);
+    const routes = validArray(parsed.routes)
+      .slice(-MAX_PERSONAL_ROUTES)
+      .map(sanitizePersonalRoute)
+      .filter((route) => route.name && route.purpose && route.phases.length);
     const focusTaskId = tasks.some((task) => task.id === parsed.focusTaskId) ? parsed.focusTaskId : null;
-    return { version: 5, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries, weeklyReviews };
+    return { version: 6, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries, weeklyReviews, routes };
   } catch {
     return createInitialWorkbench();
   }
@@ -308,6 +363,8 @@ export function applyAgentActions(state, actions, planTitle = "Agent 整理工�
         next = addTask(next, { title, note: rawAction.note, priority: "high", source: "agent" });
         next = { ...next, focusTaskId: next.tasks.at(-1)?.id || next.focusTaskId };
       }
+    } else if (rawAction?.type === "activate_route_action") {
+      next = activateRouteAction(next, rawAction.routeId, rawAction.phaseId, rawAction.actionId, false);
     }
   }
   const now = new Date().toISOString();
@@ -349,7 +406,7 @@ export function saveVideoSummary(state, input, createTasks = false) {
   };
   let next = {
     ...state,
-    version: 5,
+    version: 6,
     videos: [...state.videos.filter((item) => item.url !== url), video].slice(-MAX_VIDEOS),
     inbox: state.inbox.map((item) => item.content === url || item.content === cleanText(input?.capturedUrl, 2_000) ? { ...item, status: "planned" } : item),
   };
@@ -391,7 +448,7 @@ export function saveKnowledgeInquiry(state, input) {
   if (!inquiry.question || !inquiry.answer) return state;
   return {
     ...state,
-    version: 5,
+    version: 6,
     knowledgeInquiries: [...validArray(state.knowledgeInquiries), inquiry].slice(-MAX_KNOWLEDGE_INQUIRIES),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -505,7 +562,7 @@ export function saveWeeklyReview(state, input) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 5,
+    version: 6,
     weeklyReviews: [
       ...validArray(state.weeklyReviews).filter((item) => item.weekKey !== review.weekKey),
       review,
@@ -516,6 +573,124 @@ export function saveWeeklyReview(state, input) {
       detail: `${review.periodLabel} · ${review.headline}`,
       createdAt: now,
       source: "agent",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function savePersonalRoute(state, input) {
+  const now = new Date().toISOString();
+  const existing = validArray(state.routes).find((route) => route.id === input?.id);
+  const route = sanitizePersonalRoute({
+    ...input,
+    id: existing?.id || input?.id,
+    createdAt: existing?.createdAt || input?.createdAt || now,
+    updatedAt: now,
+    archivedAt: null,
+  });
+  if (!route.name || !route.purpose || !route.phases.length) return state;
+  const isUpdate = Boolean(existing);
+  return {
+    ...state,
+    version: 6,
+    routes: [...validArray(state.routes).filter((item) => item.id !== route.id), route].slice(-MAX_PERSONAL_ROUTES),
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: isUpdate ? "调整一条个人路线" : "建立一条个人路线",
+      detail: `${route.name} · ${route.phases.length} 个阶段`,
+      createdAt: now,
+      source: "agent",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function activateRouteAction(state, routeId, phaseId, actionId, recordActivity = true) {
+  const route = validArray(state.routes).find((item) => item.id === routeId && !item.archivedAt);
+  const phase = route?.phases.find((item) => item.id === phaseId);
+  const action = phase?.actions.find((item) => item.id === actionId);
+  if (!route || !phase || !action || action.linkedTaskId || action.linkedHabitId) return state;
+
+  let next = state;
+  let linkedTaskId = null;
+  let linkedHabitId = null;
+  if (action.mode === "habit") {
+    const existingHabit = state.habits.find((habit) => habit.name === action.title);
+    if (existingHabit) {
+      linkedHabitId = existingHabit.id;
+    } else {
+      if (state.habits.length >= MAX_HABITS) return state;
+      linkedHabitId = createId("habit");
+      next = { ...state, habits: [...state.habits, { id: linkedHabitId, name: action.title, completedDates: [] }] };
+    }
+  } else {
+    next = addTask(state, {
+      title: action.title,
+      note: [action.note, `来自路线「${route.name}」· ${phase.title}`].filter(Boolean).join(" · "),
+      priority: "normal",
+      source: "agent",
+    });
+    linkedTaskId = next.tasks.at(-1)?.id || null;
+  }
+
+  const updatedAt = new Date().toISOString();
+  const routes = validArray(next.routes).map((item) => item.id !== route.id ? item : {
+    ...item,
+    updatedAt,
+    phases: item.phases.map((phaseItem) => phaseItem.id !== phase.id ? phaseItem : {
+      ...phaseItem,
+      actions: phaseItem.actions.map((actionItem) => actionItem.id !== action.id ? actionItem : {
+        ...actionItem,
+        linkedTaskId,
+        linkedHabitId,
+      }),
+    }),
+  });
+  const activity = recordActivity ? [...next.activity, {
+    id: createId("activity"),
+    label: action.mode === "habit" ? "从路线建立习惯" : "从路线加入任务",
+    detail: `${route.name} · ${action.title}`,
+    createdAt: updatedAt,
+    source: "agent",
+  }].slice(-MAX_ACTIVITY) : next.activity;
+  return { ...next, version: 6, routes, activity };
+}
+
+export function completeRoutePhase(state, routeId, phaseId) {
+  const route = validArray(state.routes).find((item) => item.id === routeId && !item.archivedAt);
+  const currentPhase = route?.phases.find((phase) => !phase.completedAt);
+  if (!route || !currentPhase || currentPhase.id !== phaseId || !currentPhase.actions.some((action) => action.linkedTaskId || action.linkedHabitId)) return state;
+  const now = new Date().toISOString();
+  return {
+    ...state,
+    version: 6,
+    routes: state.routes.map((item) => item.id !== route.id ? item : {
+      ...item,
+      updatedAt: now,
+      phases: item.phases.map((phase) => phase.id === phaseId ? { ...phase, completedAt: now } : phase),
+    }),
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: "完成路线阶段",
+      detail: `${route.name} · ${currentPhase.title}`,
+      createdAt: now,
+      source: "human",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function archivePersonalRoute(state, routeId) {
+  const route = validArray(state.routes).find((item) => item.id === routeId && !item.archivedAt);
+  if (!route) return state;
+  const now = new Date().toISOString();
+  return {
+    ...state,
+    version: 6,
+    routes: state.routes.map((item) => item.id === routeId ? { ...item, archivedAt: now, updatedAt: now } : item),
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: "归档一条个人路线",
+      detail: route.name,
+      createdAt: now,
+      source: "human",
     }].slice(-MAX_ACTIVITY),
   };
 }

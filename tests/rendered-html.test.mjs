@@ -33,6 +33,7 @@ test("server-renders the Evolve Desk product", async () => {
   assert.match(html, /Evolve Desk/);
   assert.match(html, /行动 Agent/);
   assert.match(html, /今日唯一焦点/);
+  assert.match(html, /我的路线/);
   assert.match(html, /统一收件箱/);
   assert.match(html, /视频总结/);
   assert.match(html, /知识库/);
@@ -67,6 +68,28 @@ test("weekly review endpoint refuses to invent a review without recorded evidenc
 
   assert.equal(response.status, 400);
   assert.match((await response.json()).error, /没有可回顾/);
+});
+
+test("route designer requires a concrete direction before calling a model", async () => {
+  const worker = await createWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/agent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "design-route",
+        baseURL: "http://localhost:62783/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        prompt: "学",
+      }),
+    }),
+    env,
+    context,
+  );
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /至少 4 个字符/);
 });
 
 test("knowledge Q&A requires selected local evidence before calling a model", async () => {

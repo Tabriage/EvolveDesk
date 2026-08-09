@@ -152,8 +152,55 @@ export type KnowledgeRelation = {
   score: number;
 };
 
+export type PersonalRouteAction = {
+  id: string;
+  title: string;
+  note: string;
+  mode: "task" | "habit";
+  linkedTaskId: string | null;
+  linkedHabitId: string | null;
+};
+
+export type PersonalRoutePhase = {
+  id: string;
+  title: string;
+  outcome: string;
+  completionRule: string;
+  actions: PersonalRouteAction[];
+  completedAt: string | null;
+};
+
+export type PersonalRoute = {
+  id: string;
+  name: string;
+  purpose: string;
+  category: "create" | "learn" | "practice" | "manage";
+  accent: "blue" | "coral" | "violet" | "green" | "amber";
+  cadence: string;
+  successMetric: string;
+  reflection: string;
+  phases: PersonalRoutePhase[];
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+};
+
+export type PersonalRouteBlueprint = Omit<PersonalRoute, "id" | "createdAt" | "updatedAt" | "archivedAt" | "phases"> & {
+  id?: string;
+  createdAt?: string;
+  phases: Array<Omit<PersonalRoutePhase, "id" | "completedAt" | "actions"> & {
+    id?: string;
+    completedAt?: string | null;
+    actions: Array<Omit<PersonalRouteAction, "id" | "linkedTaskId" | "linkedHabitId"> & {
+      id?: string;
+      linkedTaskId?: string | null;
+      linkedHabitId?: string | null;
+    }>;
+  }>;
+};
+
 export type WorkbenchState = {
-  version: 5;
+  version: 6;
   focusTaskId: string | null;
   tasks: WorkTask[];
   inbox: InboxItem[];
@@ -163,13 +210,15 @@ export type WorkbenchState = {
   knowledge: KnowledgeCard[];
   knowledgeInquiries: KnowledgeInquiry[];
   weeklyReviews: WeeklyReview[];
+  routes: PersonalRoute[];
 };
 
 export type AgentAction =
   | { type: "add_task"; title: string; note?: string; priority?: "low" | "normal" | "high" }
   | { type: "save_inbox"; content: string }
   | { type: "add_habit"; name: string }
-  | { type: "set_focus"; title: string; note?: string };
+  | { type: "set_focus"; title: string; note?: string }
+  | { type: "activate_route_action"; routeId: string; phaseId: string; actionId: string };
 
 export function getTodayKey(date?: Date): string;
 export function getWeekKey(date?: Date): string;
@@ -196,4 +245,14 @@ export function saveWeeklyReview(
   state: WorkbenchState,
   input: Omit<WeeklyReview, "id" | "createdAt">,
 ): WorkbenchState;
+export function savePersonalRoute(state: WorkbenchState, input: PersonalRouteBlueprint | PersonalRoute): WorkbenchState;
+export function activateRouteAction(
+  state: WorkbenchState,
+  routeId: string,
+  phaseId: string,
+  actionId: string,
+  recordActivity?: boolean,
+): WorkbenchState;
+export function completeRoutePhase(state: WorkbenchState, routeId: string, phaseId: string): WorkbenchState;
+export function archivePersonalRoute(state: WorkbenchState, routeId: string): WorkbenchState;
 export function findKnowledgeRelations(cards: KnowledgeCard[], limit?: number): KnowledgeRelation[];

@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  activateRouteAction,
   addInboxItem,
   addTask,
   applyAgentActions,
+  archivePersonalRoute,
   buildWeeklySnapshot,
+  completeRoutePhase,
   createInitialWorkbench,
   findKnowledgeRelations,
   getTodayKey,
   inboxKind,
   parseWorkbenchState,
   saveKnowledgeInquiry,
+  savePersonalRoute,
   saveWeeklyReview,
   saveVideoSummary,
 } from "../app/features/workbench-core.mjs";
@@ -77,7 +81,7 @@ test("video summaries become durable knowledge and optional tasks", () => {
     },
   }, true);
 
-  assert.equal(saved.version, 5);
+  assert.equal(saved.version, 6);
   assert.equal(saved.videos.length, 1);
   assert.equal(saved.videos[0].transcriptSource, "local-whisper");
   assert.equal(saved.knowledge.length, 1);
@@ -112,7 +116,7 @@ test("grounded knowledge answers persist with citations and remain actionable", 
     suggestedTask: { title: "整理最近三条学习输入", note: "只做归入口，不做复杂分类" },
   });
 
-  assert.equal(answered.version, 5);
+  assert.equal(answered.version, 6);
   assert.equal(answered.knowledgeInquiries.length, 1);
   assert.equal(answered.knowledgeInquiries[0].sources[0].cardTitle, "渐进整理");
   assert.equal(answered.activity.at(-1)?.label, "保存一次知识问答");
@@ -167,7 +171,7 @@ test("weekly reviews upsert by week and survive local state migration", () => {
   assert.equal(updated.weeklyReviews[0].headline, "一周只有一个方向");
   assert.equal(updated.activity.at(-1)?.label, "更新本周回顾");
   const restored = parseWorkbenchState(JSON.stringify(updated));
-  assert.equal(restored.version, 5);
+  assert.equal(restored.version, 6);
   assert.equal(restored.weeklyReviews[0].suggestedActions[0].title, "完成一个未完成任务");
 });
 
@@ -182,4 +186,91 @@ test("knowledge relations expose cross-source shared evidence and ignore same-so
   assert.ok(relations.some((relation) => relation.leftId === "a" && relation.rightId === "b"));
   assert.ok(relations.every((relation) => !(relation.leftId === "a" && relation.rightId === "c")));
   assert.deepEqual(relations.find((relation) => relation.leftId === "a" && relation.rightId === "b")?.sharedTags, ["学习系统"]);
+});
+
+test("personal routes turn confirmed phase actions into tasks or habits", () => {
+  const saved = savePersonalRoute(createInitialWorkbench(), {
+    name: "稳定发布视频",
+    purpose: "把零散灵感推进成可以发布并复盘的视频作品。",
+    category: "create",
+    accent: "coral",
+    cadence: "每次只推进当前阶段",
+    successMetric: "留下发布链接与一次真实复盘",
+    reflection: "没有假设账号规模或发布日期，需要用户自己调整节奏。",
+    phases: [
+      {
+        title: "形成选题",
+        outcome: "得到一个有明确受众和价值承诺的选题",
+        completionRule: "写下一句话选题与三条素材证据",
+        actions: [
+          { title: "写下一句话选题", note: "明确给谁看和解决什么问题", mode: "task" },
+          { title: "每天记录一个选题", note: "只记录，不要求展开", mode: "habit" },
+        ],
+      },
+      {
+        title: "完成发布",
+        outcome: "视频完成发布并留下链接",
+        completionRule: "发布链接能够打开",
+        actions: [{ title: "完成视频发布", note: "保存发布链接", mode: "task" }],
+      },
+    ],
+  });
+
+  assert.equal(saved.version, 6);
+  assert.equal(saved.routes.length, 1);
+  const route = saved.routes[0];
+  const [taskAction, habitAction] = route.phases[0].actions;
+  const withTask = activateRouteAction(saved, route.id, route.phases[0].id, taskAction.id);
+  const withHabit = activateRouteAction(withTask, route.id, route.phases[0].id, habitAction.id);
+
+  assert.equal(withHabit.tasks.at(-1)?.title, "写下一句话选题");
+  assert.match(withHabit.tasks.at(-1)?.note ?? "", /来自路线/);
+  assert.equal(withHabit.habits.at(-1)?.name, "每天记录一个选题");
+  assert.ok(withHabit.routes[0].phases[0].actions[0].linkedTaskId);
+  assert.ok(withHabit.routes[0].phases[0].actions[1].linkedHabitId);
+
+  const progressed = completeRoutePhase(withHabit, route.id, route.phases[0].id);
+  assert.ok(progressed.routes[0].phases[0].completedAt);
+  assert.equal(progressed.activity.at(-1)?.label, "完成路线阶段");
+  const restored = parseWorkbenchState(JSON.stringify(progressed));
+  assert.equal(restored.routes[0].phases[0].actions[0].linkedTaskId, withHabit.routes[0].phases[0].actions[0].linkedTaskId);
+
+  const archived = archivePersonalRoute(restored, route.id);
+  assert.ok(archived.routes[0].archivedAt);
+});
+
+test("action agent can only activate route actions by real identifiers", () => {
+  const saved = savePersonalRoute(createInitialWorkbench(), {
+    name: "英语听说训练",
+    purpose: "逐步建立能够持续进行的英语输入和口头输出。",
+    category: "learn",
+    accent: "blue",
+    cadence: "按当前阶段轻量重复",
+    successMetric: "能够保存一段自己的英语口头表达",
+    reflection: "没有假定英语水平，需要后续编辑难度。",
+    phases: [{
+      title: "建立输入节律",
+      outcome: "形成一项可以重复的听力练习",
+      completionRule: "至少建立一个真实习惯",
+      actions: [{ title: "听一段英语材料", note: "材料由用户选择", mode: "habit" }],
+    }],
+  });
+  const route = saved.routes[0];
+  const action = route.phases[0].actions[0];
+  const planned = applyAgentActions(saved, [{
+    type: "activate_route_action",
+    routeId: route.id,
+    phaseId: route.phases[0].id,
+    actionId: action.id,
+  }], "连接当前路线");
+
+  assert.equal(planned.habits.length, 1);
+  assert.ok(planned.routes[0].phases[0].actions[0].linkedHabitId);
+  const rejected = applyAgentActions(planned, [{
+    type: "activate_route_action",
+    routeId: "missing",
+    phaseId: "missing",
+    actionId: "missing",
+  }], "拒绝未知路线动作");
+  assert.equal(rejected.habits.length, 1);
 });

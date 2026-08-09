@@ -4,18 +4,23 @@ import { FormEvent, useEffect, useState } from "react";
 import { EvolutionLab } from "./components/EvolutionLab";
 import { KnowledgeWorkbench } from "./components/KnowledgeWorkbench";
 import { QuickStart } from "./components/QuickStart";
+import { RouteWorkbench } from "./components/RouteWorkbench";
 import { VideoWorkbench } from "./components/VideoWorkbench";
 import { WeeklyReview } from "./components/WeeklyReview";
 import { WorkAgent } from "./components/WorkAgent";
 import {
   WORKBENCH_STORAGE_KEY,
+  activateRouteAction,
   addInboxItem,
   addTask,
   applyAgentActions,
+  archivePersonalRoute,
+  completeRoutePhase,
   createInitialWorkbench,
   getTodayKey,
   parseWorkbenchState,
   saveKnowledgeInquiry,
+  savePersonalRoute,
   saveWeeklyReview,
   saveVideoSummary,
 } from "./features/workbench-core.mjs";
@@ -25,7 +30,7 @@ import type {
   WorkbenchState,
 } from "./features/workbench-core.mjs";
 
-type ActiveView = "today" | "inbox" | "video" | "knowledge" | "review" | "memory" | "lab";
+type ActiveView = "today" | "routes" | "inbox" | "video" | "knowledge" | "review" | "memory" | "lab";
 
 type WorkPlan = {
   title: string;
@@ -111,6 +116,7 @@ export default function Home() {
   const newInbox = desk.inbox.filter((item) => item.status === "new");
   const focusTask = desk.tasks.find((task) => task.id === desk.focusTaskId && !task.done) || openTasks[0] || null;
   const habitsDone = desk.habits.filter((habit) => habit.completedDates.includes(todayKey)).length;
+  const activeRoutes = desk.routes.filter((route) => !route.archivedAt);
   function finishOnboarding() {
     window.localStorage.setItem("evolve-desk.onboarding.v2", "complete");
     setStarterOpen(false);
@@ -271,6 +277,7 @@ export default function Home() {
 
       <aside className="rail" aria-label="工作台导航">
         <button className={activeView === "today" ? "active" : ""} onClick={() => setActiveView("today")}><span>◫</span> 今日</button>
+        <button className={activeView === "routes" ? "active" : ""} onClick={() => setActiveView("routes")}><span>⌁</span> 我的路线<small>{activeRoutes.length}</small></button>
         <button className={activeView === "inbox" ? "active" : ""} onClick={() => setActiveView("inbox")}><span>↘</span> 收件箱<small>{newInbox.length}</small></button>
         <button className={activeView === "video" ? "active" : ""} onClick={() => setActiveView("video")}><span>▷</span> 视频总结<small>{desk.videos.length}</small></button>
         <button className={activeView === "knowledge" ? "active" : ""} onClick={() => setActiveView("knowledge")}><span>◇</span> 知识库<small>{desk.knowledge.length}</small></button>
@@ -278,6 +285,7 @@ export default function Home() {
         <button className={activeView === "memory" ? "active" : ""} onClick={() => setActiveView("memory")}><span>◎</span> 自省记忆</button>
         <button className={activeView === "lab" ? "active" : ""} onClick={() => setActiveView("lab")}><span>⌘</span> 进化实验室</button>
         <div className="rail-label">能力底座</div>
+        <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>可配置路线</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>任务与焦点</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#ff6d5a" }} /><span>统一收件箱</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#7657d6" }} /><span>视频理解</span><b>运行中</b></div>
@@ -352,6 +360,22 @@ export default function Home() {
               </article>
             </div>
           </>
+        )}
+
+        {activeView === "routes" && hydrated && (
+          <RouteWorkbench
+            baseURL={baseURL}
+            apiKey={apiKey}
+            model={model}
+            routes={desk.routes}
+            tasks={desk.tasks}
+            habits={desk.habits}
+            onNeedSettings={() => setSettingsOpen(true)}
+            onSave={(route) => setDesk((current) => savePersonalRoute(current, route))}
+            onActivate={(routeId, phaseId, actionId) => setDesk((current) => activateRouteAction(current, routeId, phaseId, actionId))}
+            onCompletePhase={(routeId, phaseId) => setDesk((current) => completeRoutePhase(current, routeId, phaseId))}
+            onArchive={(routeId) => setDesk((current) => archivePersonalRoute(current, routeId))}
+          />
         )}
 
         {activeView === "inbox" && (

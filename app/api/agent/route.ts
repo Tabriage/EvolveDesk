@@ -43,6 +43,12 @@ const workPlanSchema = z.object({
       type: z.literal("add_habit"),
       name: z.string().min(1).max(50),
     }),
+    z.object({
+      type: z.literal("activate_route_action"),
+      routeId: z.string().min(1).max(100),
+      phaseId: z.string().min(1).max(100),
+      actionId: z.string().min(1).max(100),
+    }),
   ])).min(1).max(6),
 });
 
@@ -105,6 +111,26 @@ const weeklyReviewSchema = z.object({
     title: z.string().min(1).max(120),
     note: z.string().max(320),
   })).min(1).max(4),
+});
+
+const personalRouteSchema = z.object({
+  name: z.string().min(2).max(40),
+  purpose: z.string().min(10).max(360),
+  category: z.enum(["create", "learn", "practice", "manage"]),
+  accent: z.enum(["blue", "coral", "violet", "green", "amber"]),
+  cadence: z.string().min(2).max(100),
+  successMetric: z.string().min(4).max(220),
+  reflection: z.string().min(10).max(500),
+  phases: z.array(z.object({
+    title: z.string().min(2).max(80),
+    outcome: z.string().min(4).max(260),
+    completionRule: z.string().min(4).max(220),
+    actions: z.array(z.object({
+      title: z.string().min(1).max(120),
+      note: z.string().max(320),
+      mode: z.enum(["task", "habit"]),
+    })).min(1).max(5),
+  })).min(2).max(6),
 });
 
 function compactText(value: unknown, limit: number) {
@@ -182,7 +208,7 @@ export async function POST(request: Request) {
       return Response.json({ models });
     }
 
-    if (body.action !== "propose" && body.action !== "plan" && body.action !== "summarize-video" && body.action !== "ask-video" && body.action !== "ask-knowledge" && body.action !== "weekly-review") {
+    if (body.action !== "propose" && body.action !== "plan" && body.action !== "design-route" && body.action !== "summarize-video" && body.action !== "ask-video" && body.action !== "ask-knowledge" && body.action !== "weekly-review") {
       return Response.json({ error: "未知的 Agent 动作" }, { status: 400 });
     }
 
@@ -194,6 +220,35 @@ export async function POST(request: Request) {
     if (!modelId) return Response.json({ error: "没有发现可用模型" }, { status: 400 });
 
     const openai = createOpenAI({ apiKey, baseURL, name: "local-workbench" });
+
+    if (body.action === "design-route") {
+      const goal = compactText(body.prompt, 1_200);
+      if (goal.length < 4) {
+        return Response.json({ error: "请用至少 4 个字符描述你想持续推进的方向" }, { status: 400 });
+      }
+      const workspace = body.workspace && typeof body.workspace === "object"
+        ? JSON.stringify(body.workspace).slice(0, 12_000)
+        : "{}";
+      const agent = new ToolLoopAgent({
+        model: openai.chat(modelId),
+        output: Output.object({ schema: personalRouteSchema }),
+        instructions: `你是 Evolve Desk 的个人路线设计 Agent。你把一个长期方向设计成可编辑、可观察、能逐步接入任务与习惯的路线草案，而不是写一篇建议文章。
+
+路线规则：
+- 生成 2–6 个有先后依赖的阶段；每个阶段都有一个可观察结果、完成判断和 1–5 个动作。
+- mode=task 表示一次性行动，mode=habit 表示需要重复的轻量节律。习惯标题必须足够短，能每天明确打卡。
+- 不得编造用户已有经历、能力水平、资源、日期或截止时间。用户未提供周期时，cadence 只能描述节奏，不能虚构天数。
+- successMetric 必须是用户能够自己观察或记录的证据，不能使用虚假精确数字。
+- 不要重复工作台已有路线；可以复用已有任务或习惯的语义，但不要声称已经建立关联。
+- reflection 说明路线如何贴合目标、哪些假设仍需用户编辑。草案保存前仍由用户逐项确认。
+- 所有面向用户的文字使用具体、自然的中文。`,
+      });
+      const result = await agent.generate({
+        prompt: `用户想建立的个人路线：${goal}\n\n当前工作台的有限快照：${workspace}\n\n请生成一份可编辑的路线蓝图。`,
+      });
+      if (!result.output) return Response.json({ error: "模型没有返回路线蓝图" }, { status: 502 });
+      return Response.json({ route: result.output, model: modelId });
+    }
 
     if (body.action === "ask-video") {
       const question = compactText(body.question, 600);
@@ -435,11 +490,12 @@ export async function POST(request: Request) {
         output: Output.object({ schema: workPlanSchema }),
         instructions: `你是 Evolve Desk 的行动 Agent。你把用户想要的结果转成一组可审阅、可撤销的本地工作台动作，而不是泛泛聊天。
 
-你只能使用四种动作：
+你只能使用五种动作：
 - add_task：新增明确、可完成的任务。
 - set_focus：选定今天唯一优先推进的任务；没有同名任务时系统会创建它。
 - save_inbox：把还不适合变成任务的材料或想法保存到收件箱。
 - add_habit：增加一个短小、可每日打卡的习惯。
+- activate_route_action：把已有个人路线当前阶段中的一个动作接入任务或习惯；只能使用快照中真实出现的 routeId、phaseId 与 actionId。
 
 设计原则：
 - 一次最多 6 个动作，能少则少，不制造忙碌感。
