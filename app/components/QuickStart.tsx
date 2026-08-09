@@ -67,6 +67,7 @@ export function QuickStart({ connected, onClose, onOpenSettings, onCreateTask }:
               <li><i>3</i><div><strong>需要时再让 Agent 整理</strong><small>动作清单必须由你确认后执行。</small></div></li>
               <li><i>4</i><div><strong>重复流程再做成个人业务台</strong><small>从内容、学习或订单模板开始，不必自己设计系统。</small></div></li>
               <li><i>5</i><div><strong>有内容目标再打开创作工作室</strong><small>从真实素材形成选题，发布后再用数据复盘。</small></div></li>
+              <li><i>6</i><div><strong>想真正记住再进入记忆复习</strong><small>从知识卡生成闪卡和测验，按到期时间主动回忆。</small></div></li>
             </ol>
             <div className={`connection-check ${connected ? "ready" : ""}`}>
               <i>{connected ? "✓" : "可选"}</i>

@@ -7,6 +7,7 @@ import { EvolutionLab } from "./components/EvolutionLab";
 import { KnowledgeWorkbench } from "./components/KnowledgeWorkbench";
 import { QuickStart } from "./components/QuickStart";
 import { RouteWorkbench } from "./components/RouteWorkbench";
+import { StudyStudio } from "./components/StudyStudio";
 import { VideoWorkbench } from "./components/VideoWorkbench";
 import { WeeklyReview } from "./components/WeeklyReview";
 import { WorkAgent } from "./components/WorkAgent";
@@ -25,13 +26,17 @@ import {
   createBoardRecordTask,
   createCreatorIdeaTask,
   createInitialWorkbench,
+  createStudyReviewTask,
+  getDueStudyCards,
   getTodayKey,
   parseWorkbenchState,
   removeCreatorIdea,
   removeCreatorReview,
   removeCreatorSignal,
+  removeStudyCard,
   removeBoardRecord,
   saveKnowledgeInquiry,
+  saveStudyCards,
   saveCreatorIdea,
   saveCreatorProfile,
   saveCreatorReview,
@@ -41,6 +46,8 @@ import {
   saveVideoSummary,
   updateBoardRecord,
   updateCreatorIdea,
+  rateStudyCard,
+  toggleStudyCardSuspended,
 } from "./features/workbench-core.mjs";
 import type {
   Activity,
@@ -48,7 +55,7 @@ import type {
   WorkbenchState,
 } from "./features/workbench-core.mjs";
 
-type ActiveView = "today" | "routes" | "boards" | "creator" | "inbox" | "video" | "knowledge" | "review" | "memory" | "lab";
+type ActiveView = "today" | "routes" | "boards" | "creator" | "inbox" | "video" | "knowledge" | "study" | "review" | "memory" | "lab";
 
 type WorkPlan = {
   title: string;
@@ -136,6 +143,7 @@ export default function Home() {
   const habitsDone = desk.habits.filter((habit) => habit.completedDates.includes(todayKey)).length;
   const activeRoutes = desk.routes.filter((route) => !route.archivedAt);
   const activeBoards = desk.boards.filter((board) => !board.archivedAt);
+  const dueStudyCards = getDueStudyCards(desk);
   function finishOnboarding() {
     window.localStorage.setItem("evolve-desk.onboarding.v2", "complete");
     setStarterOpen(false);
@@ -145,7 +153,7 @@ export default function Home() {
     setDesk((current) => {
       const next = addTask(current, { title, note, source });
       if (next === current) return current;
-      const label = source === "inbox" ? "从收件箱生成任务" : source === "agent" ? "从知识问答生成任务" : "添加今日任务";
+      const label = source === "inbox" ? "从收件箱生成任务" : source === "agent" ? "由 Agent 加入任务" : "添加今日任务";
       return appendActivity(next, newActivity(label, title, source === "agent" ? "agent" : "human"));
     });
   }
@@ -302,6 +310,7 @@ export default function Home() {
         <button className={activeView === "inbox" ? "active" : ""} onClick={() => setActiveView("inbox")}><span>↘</span> 收件箱<small>{newInbox.length}</small></button>
         <button className={activeView === "video" ? "active" : ""} onClick={() => setActiveView("video")}><span>▷</span> 视频总结<small>{desk.videos.length}</small></button>
         <button className={activeView === "knowledge" ? "active" : ""} onClick={() => setActiveView("knowledge")}><span>◇</span> 知识库<small>{desk.knowledge.length}</small></button>
+        <button className={activeView === "study" ? "active" : ""} onClick={() => setActiveView("study")}><span>◈</span> 记忆复习<small>{dueStudyCards.length}</small></button>
         <button className={activeView === "review" ? "active" : ""} onClick={() => setActiveView("review")}><span>↺</span> 周回顾<small>{desk.weeklyReviews.length}</small></button>
         <button className={activeView === "memory" ? "active" : ""} onClick={() => setActiveView("memory")}><span>◎</span> 自省记忆</button>
         <button className={activeView === "lab" ? "active" : ""} onClick={() => setActiveView("lab")}><span>⌘</span> 进化实验室</button>
@@ -313,6 +322,7 @@ export default function Home() {
         <div className="rail-capability"><i style={{ background: "#7657d6" }} /><span>视频理解</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#ff6d5a" }} /><span>创作闭环</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>知识再利用</span><b>运行中</b></div>
+        <div className="rail-capability"><i style={{ background: "#7657d6" }} /><span>间隔复习</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#d39a2c" }} /><span>周度回顾</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#1f9d6a" }} /><span>本地记忆</span><b>运行中</b></div>
         <div className="rail-footer"><span>{openTasks.length}</span><p>件事仍在等待推进<br />{newInbox.length} 条输入待整理</p></div>
@@ -331,6 +341,8 @@ export default function Home() {
               <div className={openTasks.length ? "active" : ""}><i>2</i><span><strong>再推进</strong><small>{openTasks.length} 个进行中</small></span></div><b />
               <div className={completedTasks.length ? "active" : ""}><i>3</i><span><strong>有完成</strong><small>{completedTasks.length} 个已完成</small></span></div>
             </div>
+
+            {dueStudyCards.length > 0 && <button className="today-study-callout" onClick={() => setActiveView("study")}><span>◈</span><div><small>今日到期复习</small><strong>{dueStudyCards.length} 张卡片正在等待主动回忆</strong><p>一次答对不等于学会；先完成一轮，再让间隔决定下次出现。</p></div><b>开始复习 →</b></button>}
 
             <div className="today-grid">
               <article className="focus-card day-focus-card">
@@ -500,6 +512,24 @@ export default function Home() {
             onOpenVideo={() => setActiveView("video")}
             onSave={(inquiry) => setDesk((current) => saveKnowledgeInquiry(current, inquiry))}
             onCreateTask={(task) => createTask(task.title, "agent", task.note)}
+          />
+        )}
+
+        {activeView === "study" && hydrated && (
+          <StudyStudio
+            baseURL={baseURL}
+            apiKey={apiKey}
+            model={model}
+            knowledge={desk.knowledge}
+            cards={desk.study.cards}
+            attempts={desk.study.attempts}
+            onNeedSettings={() => setSettingsOpen(true)}
+            onOpenKnowledge={() => setActiveView("knowledge")}
+            onSaveCards={(cards, actor) => setDesk((current) => saveStudyCards(current, cards, actor))}
+            onRate={(cardId, rating, selectedAnswer) => setDesk((current) => rateStudyCard(current, cardId, rating, selectedAnswer))}
+            onRemove={(cardId) => setDesk((current) => removeStudyCard(current, cardId))}
+            onToggleSuspended={(cardId) => setDesk((current) => toggleStudyCardSuspended(current, cardId))}
+            onCreateTask={(cardIds) => setDesk((current) => createStudyReviewTask(current, cardIds))}
           />
         )}
 

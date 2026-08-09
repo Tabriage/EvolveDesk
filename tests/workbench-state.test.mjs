@@ -15,7 +15,9 @@ import {
   createBoardRecordTask,
   createCreatorIdeaTask,
   createInitialWorkbench,
+  createStudyReviewTask,
   findKnowledgeRelations,
+  getDueStudyCards,
   getTodayKey,
   inboxKind,
   parseWorkbenchState,
@@ -23,16 +25,20 @@ import {
   removeCreatorIdea,
   removeCreatorReview,
   removeCreatorSignal,
+  removeStudyCard,
   saveCreatorIdea,
   saveCreatorProfile,
   saveCreatorReview,
   saveKnowledgeInquiry,
+  saveStudyCards,
   savePersonalBoard,
   savePersonalRoute,
   saveWeeklyReview,
   saveVideoSummary,
   updateBoardRecord,
   updateCreatorIdea,
+  rateStudyCard,
+  toggleStudyCardSuspended,
 } from "../app/features/workbench-core.mjs";
 
 test("workbench state safely recovers and classifies captured links", () => {
@@ -97,7 +103,7 @@ test("video summaries become durable knowledge and optional tasks", () => {
     },
   }, true);
 
-  assert.equal(saved.version, 8);
+  assert.equal(saved.version, 9);
   assert.equal(saved.videos.length, 1);
   assert.equal(saved.videos[0].transcriptSource, "local-whisper");
   assert.equal(saved.knowledge.length, 1);
@@ -132,7 +138,7 @@ test("grounded knowledge answers persist with citations and remain actionable", 
     suggestedTask: { title: "整理最近三条学习输入", note: "只做归入口，不做复杂分类" },
   });
 
-  assert.equal(answered.version, 8);
+  assert.equal(answered.version, 9);
   assert.equal(answered.knowledgeInquiries.length, 1);
   assert.equal(answered.knowledgeInquiries[0].sources[0].cardTitle, "渐进整理");
   assert.equal(answered.activity.at(-1)?.label, "保存一次知识问答");
@@ -187,7 +193,7 @@ test("weekly reviews upsert by week and survive local state migration", () => {
   assert.equal(updated.weeklyReviews[0].headline, "一周只有一个方向");
   assert.equal(updated.activity.at(-1)?.label, "更新本周回顾");
   const restored = parseWorkbenchState(JSON.stringify(updated));
-  assert.equal(restored.version, 8);
+  assert.equal(restored.version, 9);
   assert.equal(restored.weeklyReviews[0].suggestedActions[0].title, "完成一个未完成任务");
 });
 
@@ -202,6 +208,79 @@ test("knowledge relations expose cross-source shared evidence and ignore same-so
   assert.ok(relations.some((relation) => relation.leftId === "a" && relation.rightId === "b"));
   assert.ok(relations.every((relation) => !(relation.leftId === "a" && relation.rightId === "c")));
   assert.deepEqual(relations.find((relation) => relation.leftId === "a" && relation.rightId === "b")?.sharedTags, ["学习系统"]);
+});
+
+test("study cards stay grounded, schedule real reviews, and survive migration", () => {
+  const today = new Date();
+  const withKnowledge = {
+    ...createInitialWorkbench(),
+    knowledge: [{
+      id: "knowledge-active-recall",
+      title: "主动回忆",
+      content: "主动回忆要求学习者先尝试从记忆中提取答案，再查看材料核对。",
+      tags: ["学习方法"],
+      sourceUrl: "https://example.com/active-recall",
+      sourceTitle: "学习方法资料",
+      createdAt: today.toISOString(),
+    }],
+  };
+  const source = withKnowledge.knowledge[0];
+  const saved = saveStudyCards(withKnowledge, [{
+    kind: "recall",
+    prompt: "主动回忆的关键顺序是什么？",
+    answer: "先从记忆中提取答案，再查看材料核对。",
+    explanation: "先提取再核对，才能观察自己是否真的记住。",
+    options: [],
+    tags: ["学习方法"],
+    sources: [{ cardId: source.id, cardTitle: "伪造标题", sourceTitle: "伪造来源", sourceUrl: "https://forged.example" }],
+  }, {
+    kind: "multiple_choice",
+    prompt: "主动回忆时，应该先做哪一步？",
+    answer: "尝试从记忆中回答",
+    explanation: "资料明确要求先提取答案，再进行核对。",
+    options: ["尝试从记忆中回答", "先完整重读材料", "只收藏资料"],
+    tags: ["主动回忆"],
+    sources: [{ cardId: source.id, cardTitle: source.title, sourceTitle: source.sourceTitle, sourceUrl: source.sourceUrl }],
+  }]);
+
+  assert.equal(saved.version, 9);
+  assert.equal(saved.study.cards.length, 2);
+  assert.equal(saved.study.cards[0].sources[0].cardTitle, source.title);
+  assert.equal(saved.study.cards[0].sources[0].sourceUrl, source.sourceUrl);
+  const reviewTime = new Date(new Date(saved.study.cards[0].dueAt).getTime() + 1_000);
+  assert.equal(getDueStudyCards(saved, reviewTime).length, 2);
+
+  const cardIds = saved.study.cards.map((card) => card.id);
+  const planned = applyAgentActions(saved, [{ type: "create_study_task", cardIds: [cardIds[0], "missing-card"] }], "安排到期复习");
+  assert.equal(planned.tasks.length, 1);
+  assert.match(planned.tasks[0].title, /复习 1 张到期卡片/);
+  const rejected = applyAgentActions(planned, [{ type: "create_study_task", cardIds: ["missing-card"] }], "拒绝未知复习卡");
+  assert.equal(rejected.tasks.length, 1);
+
+  const afterAgain = rateStudyCard(saved, cardIds[0], "again", "", reviewTime);
+  assert.equal(afterAgain.study.attempts[0].rating, "again");
+  assert.equal(new Date(afterAgain.study.cards[0].dueAt).getTime() - reviewTime.getTime(), 10 * 60 * 1_000);
+  assert.equal(afterAgain.study.cards[0].lapseCount, 1);
+
+  const afterGood = rateStudyCard(afterAgain, cardIds[1], "good", "尝试从记忆中回答", reviewTime);
+  assert.equal(afterGood.study.attempts[1].correct, true);
+  assert.equal(afterGood.study.cards[1].intervalDays, 1);
+  const weekly = buildWeeklySnapshot(afterGood, reviewTime);
+  assert.equal(weekly.sourceStats.studyCardsCreated, 2);
+  assert.equal(weekly.sourceStats.studyReviews, 2);
+
+  const suspended = toggleStudyCardSuspended(afterGood, cardIds[0]);
+  assert.equal(suspended.study.cards.find((card) => card.id === cardIds[0])?.suspended, true);
+  const restored = parseWorkbenchState(JSON.stringify(suspended));
+  assert.equal(restored.version, 9);
+  assert.equal(restored.study.attempts.length, 2);
+  assert.equal(restored.study.cards[0].sources[0].cardTitle, source.title);
+
+  const removed = removeStudyCard(restored, cardIds[0]);
+  assert.equal(removed.study.cards.length, 1);
+  assert.equal(removed.study.attempts.some((attempt) => attempt.cardId === cardIds[0]), false);
+  const directlyPlanned = createStudyReviewTask(saved, cardIds, true, reviewTime);
+  assert.equal(directlyPlanned.tasks.length, 1);
 });
 
 test("personal routes turn confirmed phase actions into tasks or habits", () => {
@@ -232,7 +311,7 @@ test("personal routes turn confirmed phase actions into tasks or habits", () => 
     ],
   });
 
-  assert.equal(saved.version, 8);
+  assert.equal(saved.version, 9);
   assert.equal(saved.routes.length, 1);
   const route = saved.routes[0];
   const [taskAction, habitAction] = route.phases[0].actions;
@@ -328,7 +407,7 @@ test("personal business boards preserve typed records across schema edits and mi
     ],
   });
 
-  assert.equal(saved.version, 8);
+  assert.equal(saved.version, 9);
   assert.equal(saved.boards.length, 1);
   assert.equal(saved.boards[0].linkedRouteId, routeId);
   const board = saved.boards[0];
@@ -359,7 +438,7 @@ test("personal business boards preserve typed records across schema edits and mi
   assert.equal(edited.boards[0].records.length, 1);
   assert.equal(edited.boards[0].records[0].title, "工作台路线介绍");
   const restored = parseWorkbenchState(JSON.stringify(edited));
-  assert.equal(restored.version, 8);
+  assert.equal(restored.version, 9);
   assert.equal(restored.boards[0].records[0].values[platformField.id], "B站");
 
   const withTask = createBoardRecordTask(restored, board.id, record.id);
@@ -516,7 +595,7 @@ test("creator studio keeps inspiration grounded and closes the loop through task
   assert.equal(weekly.sourceStats.creatorIdeas, 1);
   assert.equal(weekly.sourceStats.creatorReviews, 1);
   const restored = parseWorkbenchState(JSON.stringify(reviewed));
-  assert.equal(restored.version, 8);
+  assert.equal(restored.version, 9);
   assert.equal(restored.creator.ideas[0].linkedTaskId, tasked.tasks.at(-1)?.id);
   assert.equal(restored.creator.reviews[0].ideaId, idea.id);
 

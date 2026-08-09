@@ -80,6 +80,58 @@ export type KnowledgeInquiry = {
   createdAt: string;
 };
 
+export type StudySourceRef = {
+  cardId: string;
+  cardTitle: string;
+  sourceTitle: string;
+  sourceUrl: string;
+};
+
+export type StudyCardKind = "recall" | "multiple_choice";
+export type StudyRating = "again" | "hard" | "good" | "easy";
+
+export type StudyCard = {
+  id: string;
+  kind: StudyCardKind;
+  prompt: string;
+  answer: string;
+  explanation: string;
+  options: string[];
+  tags: string[];
+  sources: StudySourceRef[];
+  dueAt: string;
+  intervalDays: number;
+  easeFactor: number;
+  reviewCount: number;
+  lapseCount: number;
+  suspended: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastReviewedAt: string | null;
+};
+
+export type StudyCardDraft = Pick<StudyCard, "kind" | "prompt" | "answer" | "explanation" | "options" | "tags" | "sources"> & {
+  id?: string;
+};
+
+export type StudyAttempt = {
+  id: string;
+  cardId: string;
+  cardPrompt: string;
+  rating: StudyRating;
+  selectedAnswer: string;
+  correct: boolean | null;
+  previousIntervalDays: number;
+  nextIntervalDays: number;
+  reviewedAt: string;
+  nextDueAt: string;
+};
+
+export type StudyState = {
+  cards: StudyCard[];
+  attempts: StudyAttempt[];
+};
+
 export type WeeklyReviewSourceStats = {
   completedTasks: number;
   createdTasks: number;
@@ -91,6 +143,8 @@ export type WeeklyReviewSourceStats = {
   knowledgeInquiries: number;
   creatorIdeas: number;
   creatorReviews: number;
+  studyCardsCreated: number;
+  studyReviews: number;
 };
 
 export type WeeklyReview = {
@@ -121,6 +175,8 @@ export type WeeklyDaySnapshot = {
   inquiries: number;
   creatorIdeas: number;
   creatorReviews: number;
+  studyCardsCreated: number;
+  studyReviews: number;
   activityCount: number;
   total: number;
 };
@@ -140,6 +196,8 @@ export type WeeklySnapshot = {
   inquiries: Array<{ id: string; question: string; answerable: boolean; sourceCount: number; createdAt: string }>;
   creatorIdeas: Array<Pick<CreatorIdea, "id" | "title" | "platform" | "status" | "createdAt">>;
   creatorReviews: Array<Pick<CreatorReview, "id" | "title" | "platform" | "publishedAt" | "createdAt">>;
+  studyCards: Array<Pick<StudyCard, "id" | "kind" | "prompt" | "createdAt">>;
+  studyAttempts: Array<Pick<StudyAttempt, "id" | "cardId" | "cardPrompt" | "rating" | "correct" | "reviewedAt">>;
   activity: Array<Pick<Activity, "label" | "detail" | "source" | "createdAt">>;
   sourceStats: WeeklyReviewSourceStats;
   hasEvidence: boolean;
@@ -354,7 +412,7 @@ export type CreatorStudioState = {
 };
 
 export type WorkbenchState = {
-  version: 8;
+  version: 9;
   focusTaskId: string | null;
   tasks: WorkTask[];
   inbox: InboxItem[];
@@ -367,6 +425,7 @@ export type WorkbenchState = {
   routes: PersonalRoute[];
   boards: PersonalBoard[];
   creator: CreatorStudioState;
+  study: StudyState;
 };
 
 export type AgentAction =
@@ -379,7 +438,8 @@ export type AgentAction =
   | { type: "advance_board_record"; boardId: string; recordId: string; statusId: string }
   | { type: "create_board_task"; boardId: string; recordId: string }
   | { type: "advance_creator_idea"; ideaId: string; status: CreatorIdea["status"] }
-  | { type: "create_creator_task"; ideaId: string };
+  | { type: "create_creator_task"; ideaId: string }
+  | { type: "create_study_task"; cardIds: string[] };
 
 export function getTodayKey(date?: Date): string;
 export function getWeekKey(date?: Date): string;
@@ -401,6 +461,18 @@ export function saveKnowledgeInquiry(
   state: WorkbenchState,
   input: Omit<KnowledgeInquiry, "id" | "createdAt">,
 ): WorkbenchState;
+export function saveStudyCards(state: WorkbenchState, cards: StudyCardDraft[], actor?: "agent" | "human"): WorkbenchState;
+export function rateStudyCard(
+  state: WorkbenchState,
+  cardId: string,
+  rating: StudyRating,
+  selectedAnswer?: string,
+  reviewedAt?: Date,
+): WorkbenchState;
+export function removeStudyCard(state: WorkbenchState, cardId: string): WorkbenchState;
+export function toggleStudyCardSuspended(state: WorkbenchState, cardId: string): WorkbenchState;
+export function createStudyReviewTask(state: WorkbenchState, cardIds: string[], recordActivity?: boolean, now?: Date): WorkbenchState;
+export function getDueStudyCards(state: WorkbenchState, now?: Date): StudyCard[];
 export function buildWeeklySnapshot(state: WorkbenchState, anchorDate?: Date): WeeklySnapshot;
 export function saveWeeklyReview(
   state: WorkbenchState,

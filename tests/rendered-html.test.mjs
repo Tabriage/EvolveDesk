@@ -39,6 +39,7 @@ test("server-renders the Evolve Desk product", async () => {
   assert.match(html, /统一收件箱/);
   assert.match(html, /视频总结/);
   assert.match(html, /知识库/);
+  assert.match(html, /记忆复习/);
   assert.match(html, /周回顾/);
   assert.match(html, /进化实验室/);
   assert.match(html, /工作台数据不会因为一次对话就被悄悄改掉/);
@@ -186,6 +187,29 @@ test("knowledge Q&A requires selected local evidence before calling a model", as
 
   assert.equal(response.status, 400);
   assert.match((await response.json()).error, /至少选择一张/);
+});
+
+test("study card generator requires selected knowledge before calling a model", async () => {
+  const worker = await createWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/agent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "generate-study-cards",
+        baseURL: "http://localhost:62783/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        focus: "记住核心方法",
+        knowledge: [],
+      }),
+    }),
+    env,
+    context,
+  );
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /至少选择一张有内容的知识卡片/);
 });
 
 test("video summary endpoint refuses to infer from title without transcript evidence", async () => {
