@@ -2,21 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   activateRouteAction,
+  addBoardRecord,
   addInboxItem,
   addTask,
   applyAgentActions,
+  archivePersonalBoard,
   archivePersonalRoute,
   buildWeeklySnapshot,
   completeRoutePhase,
+  createBoardRecordTask,
   createInitialWorkbench,
   findKnowledgeRelations,
   getTodayKey,
   inboxKind,
   parseWorkbenchState,
+  removeBoardRecord,
   saveKnowledgeInquiry,
+  savePersonalBoard,
   savePersonalRoute,
   saveWeeklyReview,
   saveVideoSummary,
+  updateBoardRecord,
 } from "../app/features/workbench-core.mjs";
 
 test("workbench state safely recovers and classifies captured links", () => {
@@ -81,7 +87,7 @@ test("video summaries become durable knowledge and optional tasks", () => {
     },
   }, true);
 
-  assert.equal(saved.version, 6);
+  assert.equal(saved.version, 7);
   assert.equal(saved.videos.length, 1);
   assert.equal(saved.videos[0].transcriptSource, "local-whisper");
   assert.equal(saved.knowledge.length, 1);
@@ -116,7 +122,7 @@ test("grounded knowledge answers persist with citations and remain actionable", 
     suggestedTask: { title: "整理最近三条学习输入", note: "只做归入口，不做复杂分类" },
   });
 
-  assert.equal(answered.version, 6);
+  assert.equal(answered.version, 7);
   assert.equal(answered.knowledgeInquiries.length, 1);
   assert.equal(answered.knowledgeInquiries[0].sources[0].cardTitle, "渐进整理");
   assert.equal(answered.activity.at(-1)?.label, "保存一次知识问答");
@@ -171,7 +177,7 @@ test("weekly reviews upsert by week and survive local state migration", () => {
   assert.equal(updated.weeklyReviews[0].headline, "一周只有一个方向");
   assert.equal(updated.activity.at(-1)?.label, "更新本周回顾");
   const restored = parseWorkbenchState(JSON.stringify(updated));
-  assert.equal(restored.version, 6);
+  assert.equal(restored.version, 7);
   assert.equal(restored.weeklyReviews[0].suggestedActions[0].title, "完成一个未完成任务");
 });
 
@@ -216,7 +222,7 @@ test("personal routes turn confirmed phase actions into tasks or habits", () => 
     ],
   });
 
-  assert.equal(saved.version, 6);
+  assert.equal(saved.version, 7);
   assert.equal(saved.routes.length, 1);
   const route = saved.routes[0];
   const [taskAction, habitAction] = route.phases[0].actions;
@@ -273,4 +279,134 @@ test("action agent can only activate route actions by real identifiers", () => {
     actionId: "missing",
   }], "拒绝未知路线动作");
   assert.equal(rejected.habits.length, 1);
+});
+
+test("personal business boards preserve typed records across schema edits and migration", () => {
+  const withRoute = savePersonalRoute(createInitialWorkbench(), {
+    name: "稳定内容输出",
+    purpose: "把选题推进到真实发布和复盘。",
+    category: "create",
+    accent: "coral",
+    cadence: "每次推进当前阶段",
+    successMetric: "留下发布链接和复盘",
+    reflection: "需要用户确认平台与频率。",
+    phases: [{
+      title: "发布内容",
+      outcome: "完成一次真实发布",
+      completionRule: "保存可打开的发布链接",
+      actions: [{ title: "完成一次发布", note: "", mode: "task" }],
+    }],
+  });
+  const routeId = withRoute.routes[0].id;
+  const saved = savePersonalBoard(withRoute, {
+    name: "内容创作台",
+    purpose: "让每个选题从灵感进入制作，发布后留下真实复盘。",
+    itemLabel: "选题",
+    accent: "coral",
+    defaultView: "board",
+    reflection: "没有预设用户平台、日期或创作结果。",
+    linkedRouteId: routeId,
+    statuses: [
+      { label: "灵感", tone: "slate", done: false },
+      { label: "制作中", tone: "blue", done: false },
+      { label: "已发布", tone: "green", done: true },
+    ],
+    fields: [
+      { name: "平台", type: "select", required: true, options: ["B站", "小红书"] },
+      { name: "发布日期", type: "date", required: false, options: [] },
+      { name: "复盘", type: "text", required: false, options: [] },
+    ],
+  });
+
+  assert.equal(saved.version, 7);
+  assert.equal(saved.boards.length, 1);
+  assert.equal(saved.boards[0].linkedRouteId, routeId);
+  const board = saved.boards[0];
+  const [platformField, dateField] = board.fields;
+  const withRecord = addBoardRecord(saved, board.id, {
+    title: "工作台路线介绍",
+    statusId: board.statuses[0].id,
+    values: {
+      [platformField.id]: "B站",
+      [dateField.id]: "not-a-date",
+    },
+  });
+  const record = withRecord.boards[0].records[0];
+  assert.equal(record.values[platformField.id], "B站");
+  assert.equal(record.values[dateField.id], "");
+
+  const progressed = updateBoardRecord(withRecord, board.id, record.id, {
+    statusId: board.statuses[1].id,
+    values: { [dateField.id]: "2026-08-10" },
+  });
+  assert.equal(progressed.boards[0].records[0].statusId, board.statuses[1].id);
+  assert.equal(progressed.boards[0].records[0].values[dateField.id], "2026-08-10");
+
+  const edited = savePersonalBoard(progressed, {
+    ...saved.boards[0],
+    purpose: "把真实选题推进到制作、发布和复盘，同时保留原始记录。",
+  });
+  assert.equal(edited.boards[0].records.length, 1);
+  assert.equal(edited.boards[0].records[0].title, "工作台路线介绍");
+  const restored = parseWorkbenchState(JSON.stringify(edited));
+  assert.equal(restored.version, 7);
+  assert.equal(restored.boards[0].records[0].values[platformField.id], "B站");
+
+  const withTask = createBoardRecordTask(restored, board.id, record.id);
+  assert.equal(withTask.tasks.at(-1)?.title, "工作台路线介绍");
+  assert.match(withTask.tasks.at(-1)?.note ?? "", /内容创作台/);
+  assert.ok(withTask.boards[0].records[0].linkedTaskId);
+
+  const removed = removeBoardRecord(withTask, board.id, record.id);
+  assert.equal(removed.boards[0].records.length, 0);
+  const archived = archivePersonalBoard(removed, board.id);
+  assert.ok(archived.boards[0].archivedAt);
+});
+
+test("action agent board actions require identifiers from the current workspace", () => {
+  const saved = savePersonalBoard(createInitialWorkbench(), {
+    name: "学习材料台",
+    purpose: "记录学习材料并推进学习和复习状态。",
+    itemLabel: "学习材料",
+    accent: "blue",
+    defaultView: "table",
+    reflection: "没有假定学习内容与完成情况。",
+    linkedRouteId: null,
+    statuses: [
+      { label: "待学习", tone: "slate", done: false },
+      { label: "学习中", tone: "blue", done: false },
+      { label: "已掌握", tone: "green", done: true },
+    ],
+    fields: [{ name: "来源", type: "text", required: false, options: [] }],
+  });
+  const board = saved.boards[0];
+  const added = applyAgentActions(saved, [{
+    type: "add_board_record",
+    boardId: board.id,
+    statusId: board.statuses[0].id,
+    title: "BBC Learning English",
+  }], "加入明确的学习材料");
+  assert.equal(added.boards[0].records.length, 1);
+
+  const record = added.boards[0].records[0];
+  const progressed = applyAgentActions(added, [{
+    type: "advance_board_record",
+    boardId: board.id,
+    recordId: record.id,
+    statusId: board.statuses[1].id,
+  }, {
+    type: "create_board_task",
+    boardId: board.id,
+    recordId: record.id,
+  }], "开始学习这份材料");
+  assert.equal(progressed.boards[0].records[0].statusId, board.statuses[1].id);
+  assert.equal(progressed.tasks.at(-1)?.title, "BBC Learning English");
+
+  const rejected = applyAgentActions(progressed, [{
+    type: "advance_board_record",
+    boardId: "missing-board",
+    recordId: "missing-record",
+    statusId: "missing-status",
+  }], "拒绝未知业务记录");
+  assert.equal(rejected.boards[0].records[0].statusId, board.statuses[1].id);
 });

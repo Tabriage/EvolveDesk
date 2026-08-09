@@ -49,6 +49,23 @@ const workPlanSchema = z.object({
       phaseId: z.string().min(1).max(100),
       actionId: z.string().min(1).max(100),
     }),
+    z.object({
+      type: z.literal("add_board_record"),
+      boardId: z.string().min(1).max(100),
+      statusId: z.string().min(1).max(100),
+      title: z.string().min(1).max(120),
+    }),
+    z.object({
+      type: z.literal("advance_board_record"),
+      boardId: z.string().min(1).max(100),
+      recordId: z.string().min(1).max(100),
+      statusId: z.string().min(1).max(100),
+    }),
+    z.object({
+      type: z.literal("create_board_task"),
+      boardId: z.string().min(1).max(100),
+      recordId: z.string().min(1).max(100),
+    }),
   ])).min(1).max(6),
 });
 
@@ -133,6 +150,26 @@ const personalRouteSchema = z.object({
   })).min(2).max(6),
 });
 
+const personalBoardSchema = z.object({
+  name: z.string().min(2).max(40),
+  purpose: z.string().min(10).max(360),
+  itemLabel: z.string().min(1).max(20),
+  accent: z.enum(["blue", "coral", "violet", "green", "amber"]),
+  defaultView: z.enum(["board", "table"]),
+  reflection: z.string().min(10).max(500),
+  statuses: z.array(z.object({
+    label: z.string().min(1).max(20),
+    tone: z.enum(["blue", "coral", "violet", "green", "amber", "slate"]),
+    done: z.boolean(),
+  })).min(2).max(6),
+  fields: z.array(z.object({
+    name: z.string().min(1).max(30),
+    type: z.enum(["text", "number", "date", "select", "checkbox"]),
+    required: z.boolean(),
+    options: z.array(z.string().min(1).max(30)).max(8),
+  })).min(1).max(6),
+});
+
 function compactText(value: unknown, limit: number) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
 }
@@ -208,7 +245,7 @@ export async function POST(request: Request) {
       return Response.json({ models });
     }
 
-    if (body.action !== "propose" && body.action !== "plan" && body.action !== "design-route" && body.action !== "summarize-video" && body.action !== "ask-video" && body.action !== "ask-knowledge" && body.action !== "weekly-review") {
+    if (body.action !== "propose" && body.action !== "plan" && body.action !== "design-route" && body.action !== "design-board" && body.action !== "summarize-video" && body.action !== "ask-video" && body.action !== "ask-knowledge" && body.action !== "weekly-review") {
       return Response.json({ error: "未知的 Agent 动作" }, { status: 400 });
     }
 
@@ -248,6 +285,36 @@ export async function POST(request: Request) {
       });
       if (!result.output) return Response.json({ error: "模型没有返回路线蓝图" }, { status: 502 });
       return Response.json({ route: result.output, model: modelId });
+    }
+
+    if (body.action === "design-board") {
+      const goal = compactText(body.prompt, 1_200);
+      if (goal.length < 4) {
+        return Response.json({ error: "请用至少 4 个字符描述你想记录和推进的对象" }, { status: 400 });
+      }
+      const workspace = body.workspace && typeof body.workspace === "object"
+        ? JSON.stringify(body.workspace).slice(0, 12_000)
+        : "{}";
+      const agent = new ToolLoopAgent({
+        model: openai.chat(modelId),
+        output: Output.object({ schema: personalBoardSchema }),
+        instructions: `你是 Evolve Desk 的个人业务台设计 Agent。你把用户反复记录和推进的对象，设计成一份可编辑的数据结构与状态流程；不是写建议文章，也不生成虚构记录。
+
+业务台规则：
+- 用 2–6 个互不重复的状态表达对象真实经过的流程，顺序从起点到终点；至少一个末端状态 done=true，进行中状态 done=false。
+- 用 1–6 个字段记录真正影响判断或推进的信息。type 只能是 text、number、date、select、checkbox。
+- select 字段必须提供 2–8 个短选项；其他字段的 options 必须为空数组。
+- itemLabel 使用用户认识的对象名，例如“选题”“订单”“学习材料”“练习记录”，不要写“数据”或“项目”。
+- defaultView：状态推进明显时选 board；需要横向比较字段时选 table。
+- 不得生成任何用户记录、客户姓名、金额、日期、学习成果或业务事实。不得声称已与路线、任务或外部服务连接。
+- 不重复已有业务台。reflection 说明结构为何适合目标，以及仍需用户确认的假设。
+- 所有面向用户的文字使用具体、自然的中文。`,
+      });
+      const result = await agent.generate({
+        prompt: `用户想建立的个人业务台：${goal}\n\n当前工作台的有限快照：${workspace}\n\n请只生成可编辑的业务台结构，不要生成用户记录。`,
+      });
+      if (!result.output) return Response.json({ error: "模型没有返回业务台结构" }, { status: 502 });
+      return Response.json({ board: result.output, model: modelId });
     }
 
     if (body.action === "ask-video") {
@@ -490,12 +557,15 @@ export async function POST(request: Request) {
         output: Output.object({ schema: workPlanSchema }),
         instructions: `你是 Evolve Desk 的行动 Agent。你把用户想要的结果转成一组可审阅、可撤销的本地工作台动作，而不是泛泛聊天。
 
-你只能使用五种动作：
+你只能使用八种动作：
 - add_task：新增明确、可完成的任务。
 - set_focus：选定今天唯一优先推进的任务；没有同名任务时系统会创建它。
 - save_inbox：把还不适合变成任务的材料或想法保存到收件箱。
 - add_habit：增加一个短小、可每日打卡的习惯。
 - activate_route_action：把已有个人路线当前阶段中的一个动作接入任务或习惯；只能使用快照中真实出现的 routeId、phaseId 与 actionId。
+- add_board_record：把用户明确给出的对象加入已有业务台；boardId 与 statusId 必须来自快照，不能虚构记录内容。
+- advance_board_record：把已有业务记录推进到另一个真实状态；boardId、recordId 与 statusId 必须来自快照，只有用户明确表达状态变化时才能使用。
+- create_board_task：把已有业务记录接入今日任务；boardId 与 recordId 必须来自快照。
 
 设计原则：
 - 一次最多 6 个动作，能少则少，不制造忙碌感。

@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
+import { BoardWorkbench } from "./components/BoardWorkbench";
 import { EvolutionLab } from "./components/EvolutionLab";
 import { KnowledgeWorkbench } from "./components/KnowledgeWorkbench";
 import { QuickStart } from "./components/QuickStart";
@@ -11,18 +12,24 @@ import { WorkAgent } from "./components/WorkAgent";
 import {
   WORKBENCH_STORAGE_KEY,
   activateRouteAction,
+  addBoardRecord,
   addInboxItem,
   addTask,
   applyAgentActions,
+  archivePersonalBoard,
   archivePersonalRoute,
   completeRoutePhase,
+  createBoardRecordTask,
   createInitialWorkbench,
   getTodayKey,
   parseWorkbenchState,
+  removeBoardRecord,
   saveKnowledgeInquiry,
+  savePersonalBoard,
   savePersonalRoute,
   saveWeeklyReview,
   saveVideoSummary,
+  updateBoardRecord,
 } from "./features/workbench-core.mjs";
 import type {
   Activity,
@@ -30,7 +37,7 @@ import type {
   WorkbenchState,
 } from "./features/workbench-core.mjs";
 
-type ActiveView = "today" | "routes" | "inbox" | "video" | "knowledge" | "review" | "memory" | "lab";
+type ActiveView = "today" | "routes" | "boards" | "inbox" | "video" | "knowledge" | "review" | "memory" | "lab";
 
 type WorkPlan = {
   title: string;
@@ -117,6 +124,7 @@ export default function Home() {
   const focusTask = desk.tasks.find((task) => task.id === desk.focusTaskId && !task.done) || openTasks[0] || null;
   const habitsDone = desk.habits.filter((habit) => habit.completedDates.includes(todayKey)).length;
   const activeRoutes = desk.routes.filter((route) => !route.archivedAt);
+  const activeBoards = desk.boards.filter((board) => !board.archivedAt);
   function finishOnboarding() {
     window.localStorage.setItem("evolve-desk.onboarding.v2", "complete");
     setStarterOpen(false);
@@ -278,6 +286,7 @@ export default function Home() {
       <aside className="rail" aria-label="工作台导航">
         <button className={activeView === "today" ? "active" : ""} onClick={() => setActiveView("today")}><span>◫</span> 今日</button>
         <button className={activeView === "routes" ? "active" : ""} onClick={() => setActiveView("routes")}><span>⌁</span> 我的路线<small>{activeRoutes.length}</small></button>
+        <button className={activeView === "boards" ? "active" : ""} onClick={() => setActiveView("boards")}><span>▦</span> 个人业务台<small>{activeBoards.length}</small></button>
         <button className={activeView === "inbox" ? "active" : ""} onClick={() => setActiveView("inbox")}><span>↘</span> 收件箱<small>{newInbox.length}</small></button>
         <button className={activeView === "video" ? "active" : ""} onClick={() => setActiveView("video")}><span>▷</span> 视频总结<small>{desk.videos.length}</small></button>
         <button className={activeView === "knowledge" ? "active" : ""} onClick={() => setActiveView("knowledge")}><span>◇</span> 知识库<small>{desk.knowledge.length}</small></button>
@@ -285,6 +294,7 @@ export default function Home() {
         <button className={activeView === "memory" ? "active" : ""} onClick={() => setActiveView("memory")}><span>◎</span> 自省记忆</button>
         <button className={activeView === "lab" ? "active" : ""} onClick={() => setActiveView("lab")}><span>⌘</span> 进化实验室</button>
         <div className="rail-label">能力底座</div>
+        <div className="rail-capability"><i style={{ background: "#ff6d5a" }} /><span>对象与流程</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>可配置路线</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>任务与焦点</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#ff6d5a" }} /><span>统一收件箱</span><b>运行中</b></div>
@@ -375,6 +385,25 @@ export default function Home() {
             onActivate={(routeId, phaseId, actionId) => setDesk((current) => activateRouteAction(current, routeId, phaseId, actionId))}
             onCompletePhase={(routeId, phaseId) => setDesk((current) => completeRoutePhase(current, routeId, phaseId))}
             onArchive={(routeId) => setDesk((current) => archivePersonalRoute(current, routeId))}
+          />
+        )}
+
+        {activeView === "boards" && hydrated && (
+          <BoardWorkbench
+            baseURL={baseURL}
+            apiKey={apiKey}
+            model={model}
+            boards={desk.boards}
+            routes={desk.routes}
+            tasks={desk.tasks}
+            onNeedSettings={() => setSettingsOpen(true)}
+            onOpenRoutes={() => setActiveView("routes")}
+            onSave={(board) => setDesk((current) => savePersonalBoard(current, board))}
+            onAddRecord={(boardId, input) => setDesk((current) => addBoardRecord(current, boardId, input))}
+            onUpdateRecord={(boardId, recordId, input) => setDesk((current) => updateBoardRecord(current, boardId, recordId, input))}
+            onRemoveRecord={(boardId, recordId) => setDesk((current) => removeBoardRecord(current, boardId, recordId))}
+            onCreateTask={(boardId, recordId) => setDesk((current) => createBoardRecordTask(current, boardId, recordId))}
+            onArchive={(boardId) => setDesk((current) => archivePersonalBoard(current, boardId))}
           />
         )}
 

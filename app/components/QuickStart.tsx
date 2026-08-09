@@ -43,7 +43,7 @@ export function QuickStart({ connected, onClose, onOpenSettings, onCreateTask }:
             <div className="welcome-orbit" aria-hidden="true"><i /><i /><span>从今天开始</span></div>
             <p className="eyebrow">欢迎来到 Evolve Desk</p>
             <h2 id="quick-start-title">先别配置工作台。<br /><em>写下今天唯一要推进的事。</em></h2>
-            <p>这一步不需要模型，也不会上传数据。写下之后，任务、收件箱和习惯会围绕真实使用慢慢长出来。</p>
+            <p>这一步不需要模型，也不会上传数据。先从真实行动开始；当一类事情反复出现时，再用路线或业务台把它固定下来。</p>
             <form className="starter-task-entry" onSubmit={createFirstTask}>
               <label htmlFor="first-task">今天的第一件事</label>
               <div><input id="first-task" autoFocus value={firstTask} onChange={(event) => setFirstTask(event.target.value)} placeholder="例如：完成工作台首页的可用版本" /><button disabled={!firstTask.trim()}>放到今天 <span>→</span></button></div>
@@ -65,6 +65,7 @@ export function QuickStart({ connected, onClose, onOpenSettings, onCreateTask }:
               <li><i>1</i><div><strong>任务留在当前浏览器</strong><small>刷新页面也不会消失。</small></div></li>
               <li><i>2</i><div><strong>想法和链接先扔进收件箱</strong><small>不用马上决定放在哪里。</small></div></li>
               <li><i>3</i><div><strong>需要时再让 Agent 整理</strong><small>动作清单必须由你确认后执行。</small></div></li>
+              <li><i>4</i><div><strong>重复流程再做成个人业务台</strong><small>从内容、学习或订单模板开始，不必自己设计系统。</small></div></li>
             </ol>
             <div className={`connection-check ${connected ? "ready" : ""}`}>
               <i>{connected ? "✓" : "可选"}</i>

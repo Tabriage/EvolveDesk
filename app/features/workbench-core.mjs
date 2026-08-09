@@ -11,6 +11,10 @@ const MAX_WEEKLY_REVIEWS = 24;
 const MAX_PERSONAL_ROUTES = 12;
 const MAX_ROUTE_PHASES = 6;
 const MAX_ROUTE_ACTIONS = 5;
+const MAX_PERSONAL_BOARDS = 10;
+const MAX_BOARD_STATUSES = 6;
+const MAX_BOARD_FIELDS = 6;
+const MAX_BOARD_RECORDS = 80;
 
 function cleanText(value, limit = 240) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
@@ -61,7 +65,7 @@ export function inboxKind(content) {
 
 export function createInitialWorkbench() {
   return {
-    version: 6,
+    version: 7,
     focusTaskId: null,
     tasks: [],
     inbox: [],
@@ -72,6 +76,7 @@ export function createInitialWorkbench() {
     knowledgeInquiries: [],
     weeklyReviews: [],
     routes: [],
+    boards: [],
   };
 }
 
@@ -220,6 +225,96 @@ function sanitizePersonalRoute(route) {
   };
 }
 
+function sanitizeBoardField(field, seenIds) {
+  let id = cleanText(field?.id, 100) || createId("board-field");
+  if (seenIds.has(id)) id = createId("board-field");
+  seenIds.add(id);
+  const type = ["text", "number", "date", "select", "checkbox"].includes(field?.type) ? field.type : "text";
+  return {
+    id,
+    name: cleanText(field?.name, 30),
+    type,
+    required: Boolean(field?.required),
+    options: type === "select"
+      ? [...new Set(validArray(field?.options).slice(0, 8).map((option) => cleanText(option, 30)).filter(Boolean))]
+      : [],
+  };
+}
+
+function sanitizeBoardValues(fields, values) {
+  const source = values && typeof values === "object" ? values : {};
+  return Object.fromEntries(fields.map((field) => {
+    const value = source[field.id];
+    if (field.type === "checkbox") return [field.id, Boolean(value)];
+    if (field.type === "number") {
+      const number = typeof value === "number" ? value : Number(value);
+      return [field.id, Number.isFinite(number) ? number : 0];
+    }
+    const text = cleanText(value, field.type === "text" ? 500 : 80);
+    if (field.type === "date") return [field.id, /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : ""];
+    if (field.type === "select") return [field.id, field.options.includes(text) ? text : ""];
+    return [field.id, text];
+  }));
+}
+
+function sanitizePersonalBoard(board) {
+  const value = board && typeof board === "object" ? board : {};
+  const seenStatusIds = new Set();
+  let statuses = validArray(value.statuses).slice(0, MAX_BOARD_STATUSES).map((status) => {
+    let id = cleanText(status?.id, 100) || createId("board-status");
+    if (seenStatusIds.has(id)) id = createId("board-status");
+    seenStatusIds.add(id);
+    return {
+      id,
+      label: cleanText(status?.label, 20),
+      tone: ["blue", "coral", "violet", "green", "amber", "slate"].includes(status?.tone) ? status.tone : "slate",
+      done: Boolean(status?.done),
+    };
+  }).filter((status) => status.label);
+  if (statuses.length && !statuses.some((status) => status.done)) {
+    statuses = statuses.map((status, index) => index === statuses.length - 1 ? { ...status, done: true } : status);
+  }
+  const seenFieldIds = new Set();
+  const fields = validArray(value.fields).slice(0, MAX_BOARD_FIELDS)
+    .map((field) => sanitizeBoardField(field, seenFieldIds))
+    .filter((field) => field.name && (field.type !== "select" || field.options.length));
+  const firstStatusId = statuses[0]?.id || "";
+  const statusIds = new Set(statuses.map((status) => status.id));
+  const seenRecordIds = new Set();
+  const records = validArray(value.records).slice(-MAX_BOARD_RECORDS).map((record) => {
+    let id = cleanText(record?.id, 100) || createId("board-record");
+    if (seenRecordIds.has(id)) id = createId("board-record");
+    seenRecordIds.add(id);
+    return {
+      id,
+      title: cleanText(record?.title, 120),
+      statusId: statusIds.has(record?.statusId) ? record.statusId : firstStatusId,
+      values: sanitizeBoardValues(fields, record?.values),
+      linkedTaskId: record?.linkedTaskId ? cleanText(record.linkedTaskId, 100) : null,
+      createdAt: cleanText(record?.createdAt, 40) || new Date().toISOString(),
+      updatedAt: cleanText(record?.updatedAt, 40) || new Date().toISOString(),
+    };
+  }).filter((record) => record.title && record.statusId);
+  const linkedRouteId = value.linkedRouteId ? cleanText(value.linkedRouteId, 100) : null;
+  const now = new Date().toISOString();
+  return {
+    id: cleanText(value.id, 100) || createId("board"),
+    name: cleanText(value.name, 40),
+    purpose: cleanText(value.purpose, 360),
+    itemLabel: cleanText(value.itemLabel, 20) || "记录",
+    accent: ["blue", "coral", "violet", "green", "amber"].includes(value.accent) ? value.accent : "blue",
+    defaultView: value.defaultView === "table" ? "table" : "board",
+    reflection: cleanText(value.reflection, 500),
+    linkedRouteId,
+    statuses,
+    fields,
+    records,
+    createdAt: cleanText(value.createdAt, 40) || now,
+    updatedAt: cleanText(value.updatedAt, 40) || now,
+    archivedAt: value.archivedAt ? cleanText(value.archivedAt, 40) : null,
+  };
+}
+
 export function parseWorkbenchState(raw) {
   if (!raw) return createInitialWorkbench();
   try {
@@ -292,8 +387,19 @@ export function parseWorkbenchState(raw) {
       .slice(-MAX_PERSONAL_ROUTES)
       .map(sanitizePersonalRoute)
       .filter((route) => route.name && route.purpose && route.phases.length);
+    const routeIds = new Set(routes.map((route) => route.id));
+    const taskIds = new Set(tasks.map((task) => task.id));
+    const boards = validArray(parsed.boards)
+      .slice(-MAX_PERSONAL_BOARDS)
+      .map(sanitizePersonalBoard)
+      .map((board) => board.linkedRouteId && !routeIds.has(board.linkedRouteId) ? { ...board, linkedRouteId: null } : board)
+      .map((board) => ({
+        ...board,
+        records: board.records.map((record) => record.linkedTaskId && !taskIds.has(record.linkedTaskId) ? { ...record, linkedTaskId: null } : record),
+      }))
+      .filter((board) => board.name && board.purpose && board.statuses.length >= 2 && board.fields.length);
     const focusTaskId = tasks.some((task) => task.id === parsed.focusTaskId) ? parsed.focusTaskId : null;
-    return { version: 6, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries, weeklyReviews, routes };
+    return { version: 7, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries, weeklyReviews, routes, boards };
   } catch {
     return createInitialWorkbench();
   }
@@ -365,6 +471,17 @@ export function applyAgentActions(state, actions, planTitle = "Agent 整理工�
       }
     } else if (rawAction?.type === "activate_route_action") {
       next = activateRouteAction(next, rawAction.routeId, rawAction.phaseId, rawAction.actionId, false);
+    } else if (rawAction?.type === "add_board_record") {
+      next = addBoardRecord(next, rawAction.boardId, {
+        title: rawAction.title,
+        statusId: rawAction.statusId,
+      }, false);
+    } else if (rawAction?.type === "advance_board_record") {
+      next = updateBoardRecord(next, rawAction.boardId, rawAction.recordId, {
+        statusId: rawAction.statusId,
+      }, false);
+    } else if (rawAction?.type === "create_board_task") {
+      next = createBoardRecordTask(next, rawAction.boardId, rawAction.recordId, false);
     }
   }
   const now = new Date().toISOString();
@@ -406,7 +523,7 @@ export function saveVideoSummary(state, input, createTasks = false) {
   };
   let next = {
     ...state,
-    version: 6,
+    version: 7,
     videos: [...state.videos.filter((item) => item.url !== url), video].slice(-MAX_VIDEOS),
     inbox: state.inbox.map((item) => item.content === url || item.content === cleanText(input?.capturedUrl, 2_000) ? { ...item, status: "planned" } : item),
   };
@@ -448,7 +565,7 @@ export function saveKnowledgeInquiry(state, input) {
   if (!inquiry.question || !inquiry.answer) return state;
   return {
     ...state,
-    version: 6,
+    version: 7,
     knowledgeInquiries: [...validArray(state.knowledgeInquiries), inquiry].slice(-MAX_KNOWLEDGE_INQUIRIES),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -562,7 +679,7 @@ export function saveWeeklyReview(state, input) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 6,
+    version: 7,
     weeklyReviews: [
       ...validArray(state.weeklyReviews).filter((item) => item.weekKey !== review.weekKey),
       review,
@@ -591,7 +708,7 @@ export function savePersonalRoute(state, input) {
   const isUpdate = Boolean(existing);
   return {
     ...state,
-    version: 6,
+    version: 7,
     routes: [...validArray(state.routes).filter((item) => item.id !== route.id), route].slice(-MAX_PERSONAL_ROUTES),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -651,7 +768,7 @@ export function activateRouteAction(state, routeId, phaseId, actionId, recordAct
     createdAt: updatedAt,
     source: "agent",
   }].slice(-MAX_ACTIVITY) : next.activity;
-  return { ...next, version: 6, routes, activity };
+  return { ...next, version: 7, routes, activity };
 }
 
 export function completeRoutePhase(state, routeId, phaseId) {
@@ -661,7 +778,7 @@ export function completeRoutePhase(state, routeId, phaseId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 6,
+    version: 7,
     routes: state.routes.map((item) => item.id !== route.id ? item : {
       ...item,
       updatedAt: now,
@@ -683,12 +800,187 @@ export function archivePersonalRoute(state, routeId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 6,
+    version: 7,
     routes: state.routes.map((item) => item.id === routeId ? { ...item, archivedAt: now, updatedAt: now } : item),
     activity: [...state.activity, {
       id: createId("activity"),
       label: "归档一条个人路线",
       detail: route.name,
+      createdAt: now,
+      source: "human",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function savePersonalBoard(state, input) {
+  const now = new Date().toISOString();
+  const existing = validArray(state.boards).find((board) => board.id === input?.id);
+  if (!existing && validArray(state.boards).length >= MAX_PERSONAL_BOARDS) return state;
+  const linkedRouteId = input?.linkedRouteId && validArray(state.routes).some((route) => route.id === input.linkedRouteId && !route.archivedAt)
+    ? input.linkedRouteId
+    : null;
+  const board = sanitizePersonalBoard({
+    ...input,
+    id: existing?.id || input?.id,
+    linkedRouteId,
+    records: existing?.records || input?.records || [],
+    createdAt: existing?.createdAt || input?.createdAt || now,
+    updatedAt: now,
+    archivedAt: null,
+  });
+  if (!board.name || !board.purpose || board.statuses.length < 2 || !board.fields.length) return state;
+  return {
+    ...state,
+    version: 7,
+    boards: [...validArray(state.boards).filter((item) => item.id !== board.id), board].slice(-MAX_PERSONAL_BOARDS),
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: existing ? "调整一个个人业务台" : "建立一个个人业务台",
+      detail: `${board.name} · ${board.statuses.length} 个状态 · ${board.fields.length} 个字段`,
+      createdAt: now,
+      source: "agent",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function addBoardRecord(state, boardId, input, recordActivity = true) {
+  const board = validArray(state.boards).find((item) => item.id === boardId && !item.archivedAt);
+  const title = cleanText(input?.title, 120);
+  if (!board || !title || board.records.length >= MAX_BOARD_RECORDS) return state;
+  const statusId = board.statuses.some((status) => status.id === input?.statusId) ? input.statusId : board.statuses[0]?.id;
+  if (!statusId) return state;
+  const now = new Date().toISOString();
+  const record = {
+    id: createId("board-record"),
+    title,
+    statusId,
+    values: sanitizeBoardValues(board.fields, input?.values),
+    linkedTaskId: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  return {
+    ...state,
+    version: 7,
+    boards: state.boards.map((item) => item.id === board.id ? { ...item, updatedAt: now, records: [...item.records, record] } : item),
+    activity: recordActivity ? [...state.activity, {
+      id: createId("activity"),
+      label: "新增一条业务记录",
+      detail: `${board.name} · ${record.title}`,
+      createdAt: now,
+      source: "human",
+    }].slice(-MAX_ACTIVITY) : state.activity,
+  };
+}
+
+export function updateBoardRecord(state, boardId, recordId, input, recordActivity = true) {
+  const board = validArray(state.boards).find((item) => item.id === boardId && !item.archivedAt);
+  const record = board?.records.find((item) => item.id === recordId);
+  if (!board || !record) return state;
+  const title = input?.title === undefined ? record.title : cleanText(input.title, 120);
+  if (!title) return state;
+  const statusId = board.statuses.some((status) => status.id === input?.statusId) ? input.statusId : record.statusId;
+  const now = new Date().toISOString();
+  const nextRecord = {
+    ...record,
+    title,
+    statusId,
+    values: sanitizeBoardValues(board.fields, { ...record.values, ...(input?.values || {}) }),
+    updatedAt: now,
+  };
+  return {
+    ...state,
+    version: 7,
+    boards: state.boards.map((item) => item.id === board.id ? {
+      ...item,
+      updatedAt: now,
+      records: item.records.map((entry) => entry.id === record.id ? nextRecord : entry),
+    } : item),
+    activity: recordActivity ? [...state.activity, {
+      id: createId("activity"),
+      label: statusId !== record.statusId ? "推进一条业务记录" : "更新一条业务记录",
+      detail: `${board.name} · ${nextRecord.title}`,
+      createdAt: now,
+      source: "human",
+    }].slice(-MAX_ACTIVITY) : state.activity,
+  };
+}
+
+export function removeBoardRecord(state, boardId, recordId) {
+  const board = validArray(state.boards).find((item) => item.id === boardId && !item.archivedAt);
+  const record = board?.records.find((item) => item.id === recordId);
+  if (!board || !record) return state;
+  const now = new Date().toISOString();
+  return {
+    ...state,
+    version: 7,
+    boards: state.boards.map((item) => item.id === board.id ? {
+      ...item,
+      updatedAt: now,
+      records: item.records.filter((entry) => entry.id !== recordId),
+    } : item),
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: "移除一条业务记录",
+      detail: `${board.name} · ${record.title}`,
+      createdAt: now,
+      source: "human",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function createBoardRecordTask(state, boardId, recordId, recordActivity = true) {
+  const board = validArray(state.boards).find((item) => item.id === boardId && !item.archivedAt);
+  const record = board?.records.find((item) => item.id === recordId);
+  if (!board || !record) return state;
+  if (record.linkedTaskId && state.tasks.some((task) => task.id === record.linkedTaskId)) return state;
+  const details = board.fields.map((field) => {
+    const value = record.values[field.id];
+    if (field.type === "checkbox") return value ? `${field.name}：是` : "";
+    return value !== "" && value !== 0 ? `${field.name}：${value}` : "";
+  }).filter(Boolean);
+  let next = addTask(state, {
+    title: record.title,
+    note: [`来自业务台「${board.name}」`, ...details].join(" · "),
+    source: "agent",
+  });
+  const linkedTaskId = next.tasks.at(-1)?.id || null;
+  if (!linkedTaskId) return state;
+  const now = new Date().toISOString();
+  next = {
+    ...next,
+    version: 7,
+    boards: next.boards.map((item) => item.id === board.id ? {
+      ...item,
+      updatedAt: now,
+      records: item.records.map((entry) => entry.id === record.id ? { ...entry, linkedTaskId, updatedAt: now } : entry),
+    } : item),
+  };
+  if (!recordActivity) return next;
+  return {
+    ...next,
+    activity: [...next.activity, {
+      id: createId("activity"),
+      label: "从业务台加入任务",
+      detail: `${board.name} · ${record.title}`,
+      createdAt: now,
+      source: "agent",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function archivePersonalBoard(state, boardId) {
+  const board = validArray(state.boards).find((item) => item.id === boardId && !item.archivedAt);
+  if (!board) return state;
+  const now = new Date().toISOString();
+  return {
+    ...state,
+    version: 7,
+    boards: state.boards.map((item) => item.id === boardId ? { ...item, archivedAt: now, updatedAt: now } : item),
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: "归档一个个人业务台",
+      detail: board.name,
       createdAt: now,
       source: "human",
     }].slice(-MAX_ACTIVITY),

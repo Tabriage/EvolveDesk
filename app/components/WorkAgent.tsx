@@ -25,6 +25,7 @@ const suggestions = [
   "把收件箱里的内容整理成今天三件事",
   "帮我选出今天唯一的焦点",
   "从我的个人路线里挑一个当前动作",
+  "把一个新想法加入合适的业务台",
   "为学习和输出设计两个轻量习惯",
 ];
 
@@ -33,6 +34,9 @@ function actionLabel(action: AgentAction) {
   if (action.type === "set_focus") return `设为焦点 · ${action.title}`;
   if (action.type === "add_habit") return `新增习惯 · ${action.name}`;
   if (action.type === "activate_route_action") return "接入个人路线中的一个动作";
+  if (action.type === "add_board_record") return `新增业务记录 · ${action.title}`;
+  if (action.type === "advance_board_record") return "推进一条业务记录";
+  if (action.type === "create_board_task") return "把业务记录加入今日任务";
   return `保存到收件箱 · ${action.content}`;
 }
 
@@ -93,6 +97,22 @@ export function WorkAgent({
                 } : null,
               };
             }),
+            boards: state.boards.filter((board) => !board.archivedAt).slice(-6).map((board) => ({
+              boardId: board.id,
+              name: board.name,
+              itemLabel: board.itemLabel,
+              statuses: board.statuses.map((status) => ({
+                statusId: status.id,
+                label: status.label,
+                done: status.done,
+              })),
+              records: board.records.slice(-12).map((record) => ({
+                recordId: record.id,
+                title: record.title,
+                statusId: record.statusId,
+                linkedTaskId: record.linkedTaskId,
+              })),
+            })),
           },
         }),
       });
@@ -129,7 +149,7 @@ export function WorkAgent({
       <div className="work-agent-intro">
         <span>先计划，后执行</span>
         <h3>告诉我你想得到什么，<br />我把它变成工作台动作。</h3>
-        <p>我可以新增任务、选择焦点、保存材料、建立习惯，也能把个人路线的当前动作接进今天。每次都先给你看清单。</p>
+        <p>我可以新增任务、选择焦点、保存材料、建立习惯，也能连接个人路线与业务台。每次都先给你看清单。</p>
       </div>
 
       {plan ? (

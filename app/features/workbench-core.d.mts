@@ -199,8 +199,59 @@ export type PersonalRouteBlueprint = Omit<PersonalRoute, "id" | "createdAt" | "u
   }>;
 };
 
+export type PersonalBoardStatus = {
+  id: string;
+  label: string;
+  tone: "blue" | "coral" | "violet" | "green" | "amber" | "slate";
+  done: boolean;
+};
+
+export type PersonalBoardField = {
+  id: string;
+  name: string;
+  type: "text" | "number" | "date" | "select" | "checkbox";
+  required: boolean;
+  options: string[];
+};
+
+export type PersonalBoardValue = string | number | boolean;
+
+export type PersonalBoardRecord = {
+  id: string;
+  title: string;
+  statusId: string;
+  values: Record<string, PersonalBoardValue>;
+  linkedTaskId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PersonalBoard = {
+  id: string;
+  name: string;
+  purpose: string;
+  itemLabel: string;
+  accent: "blue" | "coral" | "violet" | "green" | "amber";
+  defaultView: "board" | "table";
+  reflection: string;
+  linkedRouteId: string | null;
+  statuses: PersonalBoardStatus[];
+  fields: PersonalBoardField[];
+  records: PersonalBoardRecord[];
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+};
+
+export type PersonalBoardBlueprint = Omit<PersonalBoard, "id" | "createdAt" | "updatedAt" | "archivedAt" | "records" | "statuses" | "fields"> & {
+  id?: string;
+  createdAt?: string;
+  statuses: Array<Omit<PersonalBoardStatus, "id"> & { id?: string }>;
+  fields: Array<Omit<PersonalBoardField, "id"> & { id?: string }>;
+};
+
 export type WorkbenchState = {
-  version: 6;
+  version: 7;
   focusTaskId: string | null;
   tasks: WorkTask[];
   inbox: InboxItem[];
@@ -211,6 +262,7 @@ export type WorkbenchState = {
   knowledgeInquiries: KnowledgeInquiry[];
   weeklyReviews: WeeklyReview[];
   routes: PersonalRoute[];
+  boards: PersonalBoard[];
 };
 
 export type AgentAction =
@@ -218,7 +270,10 @@ export type AgentAction =
   | { type: "save_inbox"; content: string }
   | { type: "add_habit"; name: string }
   | { type: "set_focus"; title: string; note?: string }
-  | { type: "activate_route_action"; routeId: string; phaseId: string; actionId: string };
+  | { type: "activate_route_action"; routeId: string; phaseId: string; actionId: string }
+  | { type: "add_board_record"; boardId: string; statusId: string; title: string }
+  | { type: "advance_board_record"; boardId: string; recordId: string; statusId: string }
+  | { type: "create_board_task"; boardId: string; recordId: string };
 
 export function getTodayKey(date?: Date): string;
 export function getWeekKey(date?: Date): string;
@@ -255,4 +310,21 @@ export function activateRouteAction(
 ): WorkbenchState;
 export function completeRoutePhase(state: WorkbenchState, routeId: string, phaseId: string): WorkbenchState;
 export function archivePersonalRoute(state: WorkbenchState, routeId: string): WorkbenchState;
+export function savePersonalBoard(state: WorkbenchState, input: PersonalBoardBlueprint | PersonalBoard): WorkbenchState;
+export function addBoardRecord(
+  state: WorkbenchState,
+  boardId: string,
+  input: { title: string; statusId?: string; values?: Record<string, PersonalBoardValue> },
+  recordActivity?: boolean,
+): WorkbenchState;
+export function updateBoardRecord(
+  state: WorkbenchState,
+  boardId: string,
+  recordId: string,
+  input: { title?: string; statusId?: string; values?: Record<string, PersonalBoardValue> },
+  recordActivity?: boolean,
+): WorkbenchState;
+export function removeBoardRecord(state: WorkbenchState, boardId: string, recordId: string): WorkbenchState;
+export function createBoardRecordTask(state: WorkbenchState, boardId: string, recordId: string, recordActivity?: boolean): WorkbenchState;
+export function archivePersonalBoard(state: WorkbenchState, boardId: string): WorkbenchState;
 export function findKnowledgeRelations(cards: KnowledgeCard[], limit?: number): KnowledgeRelation[];
