@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import { BoardWorkbench } from "./components/BoardWorkbench";
+import { CreatorStudio } from "./components/CreatorStudio";
 import { EvolutionLab } from "./components/EvolutionLab";
 import { KnowledgeWorkbench } from "./components/KnowledgeWorkbench";
 import { QuickStart } from "./components/QuickStart";
@@ -12,6 +13,8 @@ import { WorkAgent } from "./components/WorkAgent";
 import {
   WORKBENCH_STORAGE_KEY,
   activateRouteAction,
+  addCreatorIdeaToBoard,
+  addCreatorSignal,
   addBoardRecord,
   addInboxItem,
   addTask,
@@ -20,16 +23,24 @@ import {
   archivePersonalRoute,
   completeRoutePhase,
   createBoardRecordTask,
+  createCreatorIdeaTask,
   createInitialWorkbench,
   getTodayKey,
   parseWorkbenchState,
+  removeCreatorIdea,
+  removeCreatorReview,
+  removeCreatorSignal,
   removeBoardRecord,
   saveKnowledgeInquiry,
+  saveCreatorIdea,
+  saveCreatorProfile,
+  saveCreatorReview,
   savePersonalBoard,
   savePersonalRoute,
   saveWeeklyReview,
   saveVideoSummary,
   updateBoardRecord,
+  updateCreatorIdea,
 } from "./features/workbench-core.mjs";
 import type {
   Activity,
@@ -37,7 +48,7 @@ import type {
   WorkbenchState,
 } from "./features/workbench-core.mjs";
 
-type ActiveView = "today" | "routes" | "boards" | "inbox" | "video" | "knowledge" | "review" | "memory" | "lab";
+type ActiveView = "today" | "routes" | "boards" | "creator" | "inbox" | "video" | "knowledge" | "review" | "memory" | "lab";
 
 type WorkPlan = {
   title: string;
@@ -287,6 +298,7 @@ export default function Home() {
         <button className={activeView === "today" ? "active" : ""} onClick={() => setActiveView("today")}><span>◫</span> 今日</button>
         <button className={activeView === "routes" ? "active" : ""} onClick={() => setActiveView("routes")}><span>⌁</span> 我的路线<small>{activeRoutes.length}</small></button>
         <button className={activeView === "boards" ? "active" : ""} onClick={() => setActiveView("boards")}><span>▦</span> 个人业务台<small>{activeBoards.length}</small></button>
+        <button className={activeView === "creator" ? "active" : ""} onClick={() => setActiveView("creator")}><span>◒</span> 创作工作室<small>{desk.creator.ideas.length}</small></button>
         <button className={activeView === "inbox" ? "active" : ""} onClick={() => setActiveView("inbox")}><span>↘</span> 收件箱<small>{newInbox.length}</small></button>
         <button className={activeView === "video" ? "active" : ""} onClick={() => setActiveView("video")}><span>▷</span> 视频总结<small>{desk.videos.length}</small></button>
         <button className={activeView === "knowledge" ? "active" : ""} onClick={() => setActiveView("knowledge")}><span>◇</span> 知识库<small>{desk.knowledge.length}</small></button>
@@ -299,6 +311,7 @@ export default function Home() {
         <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>任务与焦点</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#ff6d5a" }} /><span>统一收件箱</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#7657d6" }} /><span>视频理解</span><b>运行中</b></div>
+        <div className="rail-capability"><i style={{ background: "#ff6d5a" }} /><span>创作闭环</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>知识再利用</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#d39a2c" }} /><span>周度回顾</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#1f9d6a" }} /><span>本地记忆</span><b>运行中</b></div>
@@ -404,6 +417,35 @@ export default function Home() {
             onRemoveRecord={(boardId, recordId) => setDesk((current) => removeBoardRecord(current, boardId, recordId))}
             onCreateTask={(boardId, recordId) => setDesk((current) => createBoardRecordTask(current, boardId, recordId))}
             onArchive={(boardId) => setDesk((current) => archivePersonalBoard(current, boardId))}
+          />
+        )}
+
+        {activeView === "creator" && hydrated && (
+          <CreatorStudio
+            baseURL={baseURL}
+            apiKey={apiKey}
+            model={model}
+            profile={desk.creator.profile}
+            signals={desk.creator.signals}
+            ideas={desk.creator.ideas}
+            reviews={desk.creator.reviews}
+            videos={desk.videos}
+            knowledge={desk.knowledge}
+            boards={desk.boards}
+            tasks={desk.tasks}
+            onNeedSettings={() => setSettingsOpen(true)}
+            onOpenVideo={() => setActiveView("video")}
+            onOpenBoards={() => setActiveView("boards")}
+            onSaveProfile={(profile) => setDesk((current) => saveCreatorProfile(current, profile))}
+            onAddSignal={(signal) => setDesk((current) => addCreatorSignal(current, signal))}
+            onRemoveSignal={(signalId) => setDesk((current) => removeCreatorSignal(current, signalId))}
+            onSaveIdea={(idea) => setDesk((current) => saveCreatorIdea(current, idea))}
+            onUpdateIdea={(ideaId, input) => setDesk((current) => updateCreatorIdea(current, ideaId, input))}
+            onCreateIdeaTask={(ideaId) => setDesk((current) => createCreatorIdeaTask(current, ideaId))}
+            onAddIdeaToBoard={(ideaId, boardId) => setDesk((current) => addCreatorIdeaToBoard(current, ideaId, boardId))}
+            onRemoveIdea={(ideaId) => setDesk((current) => removeCreatorIdea(current, ideaId))}
+            onSaveReview={(review) => setDesk((current) => saveCreatorReview(current, review))}
+            onRemoveReview={(reviewId) => setDesk((current) => removeCreatorReview(current, reviewId))}
           />
         )}
 

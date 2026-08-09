@@ -35,6 +35,7 @@ test("server-renders the Evolve Desk product", async () => {
   assert.match(html, /今日唯一焦点/);
   assert.match(html, /我的路线/);
   assert.match(html, /个人业务台/);
+  assert.match(html, /创作工作室/);
   assert.match(html, /统一收件箱/);
   assert.match(html, /视频总结/);
   assert.match(html, /知识库/);
@@ -113,6 +114,55 @@ test("business board designer requires a concrete object before calling a model"
 
   assert.equal(response.status, 400);
   assert.match((await response.json()).error, /至少 4 个字符/);
+});
+
+test("creator remix refuses to invent a trend without selected evidence", async () => {
+  const worker = await createWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/agent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "creator-ideas",
+        baseURL: "http://localhost:62783/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        mode: "remix",
+        prompt: "把今天的热点改成我的内容",
+        sources: [],
+      }),
+    }),
+    env,
+    context,
+  );
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /至少需要选择一条真实/);
+});
+
+test("content review requires metrics or a real observation before calling a model", async () => {
+  const worker = await createWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/agent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "review-content",
+        baseURL: "http://localhost:62783/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        title: "一次真实发布",
+        platform: "B站",
+        metrics: {},
+        notes: "",
+      }),
+    }),
+    env,
+    context,
+  );
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /至少填写一项真实数据/);
 });
 
 test("knowledge Q&A requires selected local evidence before calling a model", async () => {

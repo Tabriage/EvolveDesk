@@ -26,6 +26,7 @@ const suggestions = [
   "帮我选出今天唯一的焦点",
   "从我的个人路线里挑一个当前动作",
   "把一个新想法加入合适的业务台",
+  "把一个已有选题推进到今天能做的动作",
   "为学习和输出设计两个轻量习惯",
 ];
 
@@ -37,6 +38,8 @@ function actionLabel(action: AgentAction) {
   if (action.type === "add_board_record") return `新增业务记录 · ${action.title}`;
   if (action.type === "advance_board_record") return "推进一条业务记录";
   if (action.type === "create_board_task") return "把业务记录加入今日任务";
+  if (action.type === "advance_creator_idea") return "推进一个创作选题";
+  if (action.type === "create_creator_task") return "把创作选题加入今日任务";
   return `保存到收件箱 · ${action.content}`;
 }
 
@@ -113,6 +116,15 @@ export function WorkAgent({
                 linkedTaskId: record.linkedTaskId,
               })),
             })),
+            creatorIdeas: state.creator.ideas.slice(-12).map((idea) => ({
+              ideaId: idea.id,
+              title: idea.title,
+              platform: idea.platform,
+              status: idea.status,
+              linkedTaskId: idea.linkedTaskId,
+              completedSteps: idea.steps.filter((step) => step.done).length,
+              totalSteps: idea.steps.length,
+            })),
           },
         }),
       });
@@ -149,7 +161,7 @@ export function WorkAgent({
       <div className="work-agent-intro">
         <span>先计划，后执行</span>
         <h3>告诉我你想得到什么，<br />我把它变成工作台动作。</h3>
-        <p>我可以新增任务、选择焦点、保存材料、建立习惯，也能连接个人路线与业务台。每次都先给你看清单。</p>
+        <p>我可以新增任务、选择焦点、保存材料、建立习惯，也能连接个人路线、业务台与创作选题。每次都先给你看清单。</p>
       </div>
 
       {plan ? (

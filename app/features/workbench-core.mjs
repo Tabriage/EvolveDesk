@@ -15,6 +15,10 @@ const MAX_PERSONAL_BOARDS = 10;
 const MAX_BOARD_STATUSES = 6;
 const MAX_BOARD_FIELDS = 6;
 const MAX_BOARD_RECORDS = 80;
+const MAX_CREATOR_SIGNALS = 40;
+const MAX_CREATOR_IDEAS = 80;
+const MAX_CREATOR_REVIEWS = 60;
+const MAX_CREATOR_STEPS = 6;
 
 function cleanText(value, limit = 240) {
   return String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
@@ -65,7 +69,7 @@ export function inboxKind(content) {
 
 export function createInitialWorkbench() {
   return {
-    version: 7,
+    version: 8,
     focusTaskId: null,
     tasks: [],
     inbox: [],
@@ -77,6 +81,12 @@ export function createInitialWorkbench() {
     weeklyReviews: [],
     routes: [],
     boards: [],
+    creator: {
+      profile: { niche: "", audience: "", voice: "", platforms: [], updatedAt: "" },
+      signals: [],
+      ideas: [],
+      reviews: [],
+    },
   };
 }
 
@@ -173,6 +183,8 @@ function sanitizeWeeklyReview(review) {
       videos: safeCount(stats.videos),
       knowledgeCards: safeCount(stats.knowledgeCards),
       knowledgeInquiries: safeCount(stats.knowledgeInquiries),
+      creatorIdeas: safeCount(stats.creatorIdeas),
+      creatorReviews: safeCount(stats.creatorReviews),
     },
     createdAt: cleanText(value.createdAt, 40) || new Date().toISOString(),
   };
@@ -315,6 +327,166 @@ function sanitizePersonalBoard(board) {
   };
 }
 
+function safeCreatorMetric(value) {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? Math.min(1_000_000_000_000, Math.max(0, Math.round(number))) : 0;
+}
+
+function sanitizeCreatorProfile(profile) {
+  const value = profile && typeof profile === "object" ? profile : {};
+  return {
+    niche: cleanText(value.niche, 120),
+    audience: cleanText(value.audience, 220),
+    voice: cleanText(value.voice, 220),
+    platforms: [...new Set(validArray(value.platforms).slice(0, 8).map((platform) => cleanText(platform, 30)).filter(Boolean))],
+    updatedAt: cleanText(value.updatedAt, 40),
+  };
+}
+
+function sanitizeCreatorSignal(signal) {
+  const value = signal && typeof signal === "object" ? signal : {};
+  const now = new Date().toISOString();
+  const observedAt = cleanText(value.observedAt, 10);
+  return {
+    id: cleanText(value.id, 100) || createId("creator-signal"),
+    title: cleanText(value.title, 120),
+    url: cleanText(value.url, 2_000),
+    note: cleanText(value.note, 600),
+    platform: cleanText(value.platform, 30),
+    observedAt: /^\d{4}-\d{2}-\d{2}$/.test(observedAt) ? observedAt : "",
+    createdAt: cleanText(value.createdAt, 40) || now,
+  };
+}
+
+function sanitizeCreatorSourceRef(source) {
+  const value = source && typeof source === "object" ? source : {};
+  return {
+    kind: ["video", "knowledge", "signal"].includes(value.kind) ? value.kind : "signal",
+    id: cleanText(value.id, 100),
+    title: cleanText(value.title, 180),
+    url: cleanText(value.url, 2_000),
+    evidence: cleanText(value.evidence, 1_000),
+  };
+}
+
+function sanitizeCreatorIdea(idea) {
+  const value = idea && typeof idea === "object" ? idea : {};
+  const now = new Date().toISOString();
+  const seenStepIds = new Set();
+  const steps = validArray(value.steps).slice(0, MAX_CREATOR_STEPS).map((step) => {
+    let id = cleanText(step?.id, 100) || createId("creator-step");
+    if (seenStepIds.has(id)) id = createId("creator-step");
+    seenStepIds.add(id);
+    return {
+      id,
+      title: cleanText(step?.title, 120),
+      note: cleanText(step?.note, 320),
+      done: Boolean(step?.done),
+    };
+  }).filter((step) => step.title);
+  const seenSourceRefs = new Set();
+  const sourceRefs = validArray(value.sourceRefs).slice(0, 8).map(sanitizeCreatorSourceRef).filter((source) => {
+    const key = `${source.kind}:${source.id}`;
+    if (!source.id || !source.title || !source.evidence || seenSourceRefs.has(key)) return false;
+    seenSourceRefs.add(key);
+    return true;
+  });
+  return {
+    id: cleanText(value.id, 100) || createId("creator-idea"),
+    title: cleanText(value.title, 120),
+    promise: cleanText(value.promise, 300),
+    hook: cleanText(value.hook, 300),
+    angle: cleanText(value.angle, 500),
+    format: ["video", "graphic", "article", "live"].includes(value.format) ? value.format : "video",
+    platform: cleanText(value.platform, 30),
+    sourceRefs,
+    originalityGuard: cleanText(value.originalityGuard, 500),
+    reflection: cleanText(value.reflection, 500),
+    steps,
+    status: ["idea", "drafting", "producing", "published"].includes(value.status) ? value.status : "idea",
+    linkedTaskId: value.linkedTaskId ? cleanText(value.linkedTaskId, 100) : null,
+    linkedBoardId: value.linkedBoardId ? cleanText(value.linkedBoardId, 100) : null,
+    linkedBoardRecordId: value.linkedBoardRecordId ? cleanText(value.linkedBoardRecordId, 100) : null,
+    createdAt: cleanText(value.createdAt, 40) || now,
+    updatedAt: cleanText(value.updatedAt, 40) || now,
+  };
+}
+
+function sanitizeCreatorReviewAnalysis(analysis) {
+  if (!analysis || typeof analysis !== "object") return null;
+  const metricKeys = new Set(["views", "likes", "comments", "saves", "shares", "follows"]);
+  const observations = validArray(analysis.observations).slice(0, 5).map((observation) => ({
+    claim: cleanText(observation?.claim, 420),
+    metricKeys: [...new Set(validArray(observation?.metricKeys).filter((key) => metricKeys.has(key)))].slice(0, 6),
+  })).filter((observation) => observation.claim && observation.metricKeys.length);
+  const hypotheses = validArray(analysis.hypotheses).slice(0, 4).map((hypothesis) => ({
+    idea: cleanText(hypothesis?.idea, 420),
+    confidence: hypothesis?.confidence === "medium" ? "medium" : "low",
+  })).filter((hypothesis) => hypothesis.idea);
+  const nextExperiment = analysis.nextExperiment && typeof analysis.nextExperiment === "object" ? {
+    change: cleanText(analysis.nextExperiment.change, 300),
+    reason: cleanText(analysis.nextExperiment.reason, 360),
+    successSignal: cleanText(analysis.nextExperiment.successSignal, 300),
+  } : { change: "", reason: "", successSignal: "" };
+  const value = {
+    headline: cleanText(analysis.headline, 120),
+    observations,
+    hypotheses,
+    gaps: validArray(analysis.gaps).slice(0, 5).map((gap) => cleanText(gap, 360)).filter(Boolean),
+    nextExperiment,
+    reflection: cleanText(analysis.reflection, 500),
+  };
+  return value.headline && value.nextExperiment.change ? value : null;
+}
+
+function sanitizeCreatorReview(review) {
+  const value = review && typeof review === "object" ? review : {};
+  const now = new Date().toISOString();
+  const publishedAt = cleanText(value.publishedAt, 10);
+  return {
+    id: cleanText(value.id, 100) || createId("creator-review"),
+    ideaId: value.ideaId ? cleanText(value.ideaId, 100) : null,
+    title: cleanText(value.title, 120),
+    platform: cleanText(value.platform, 30),
+    url: cleanText(value.url, 2_000),
+    publishedAt: /^\d{4}-\d{2}-\d{2}$/.test(publishedAt) ? publishedAt : "",
+    metrics: {
+      views: safeCreatorMetric(value.metrics?.views),
+      likes: safeCreatorMetric(value.metrics?.likes),
+      comments: safeCreatorMetric(value.metrics?.comments),
+      saves: safeCreatorMetric(value.metrics?.saves),
+      shares: safeCreatorMetric(value.metrics?.shares),
+      follows: safeCreatorMetric(value.metrics?.follows),
+    },
+    notes: cleanText(value.notes, 1_200),
+    analysis: sanitizeCreatorReviewAnalysis(value.analysis),
+    createdAt: cleanText(value.createdAt, 40) || now,
+    updatedAt: cleanText(value.updatedAt, 40) || now,
+  };
+}
+
+function sanitizeCreatorStudio(creator) {
+  const value = creator && typeof creator === "object" ? creator : {};
+  const dedupeIds = (items, prefix) => {
+    const seen = new Set();
+    return items.map((item) => {
+      if (!seen.has(item.id)) {
+        seen.add(item.id);
+        return item;
+      }
+      const id = createId(prefix);
+      seen.add(id);
+      return { ...item, id };
+    });
+  };
+  return {
+    profile: sanitizeCreatorProfile(value.profile),
+    signals: dedupeIds(validArray(value.signals).slice(-MAX_CREATOR_SIGNALS).map(sanitizeCreatorSignal).filter((signal) => signal.title && signal.note), "creator-signal"),
+    ideas: dedupeIds(validArray(value.ideas).slice(-MAX_CREATOR_IDEAS).map(sanitizeCreatorIdea).filter((idea) => idea.title && idea.promise && idea.hook && idea.steps.length), "creator-idea"),
+    reviews: dedupeIds(validArray(value.reviews).slice(-MAX_CREATOR_REVIEWS).map(sanitizeCreatorReview).filter((review) => review.title && review.platform), "creator-review"),
+  };
+}
+
 export function parseWorkbenchState(raw) {
   if (!raw) return createInitialWorkbench();
   try {
@@ -398,8 +570,24 @@ export function parseWorkbenchState(raw) {
         records: board.records.map((record) => record.linkedTaskId && !taskIds.has(record.linkedTaskId) ? { ...record, linkedTaskId: null } : record),
       }))
       .filter((board) => board.name && board.purpose && board.statuses.length >= 2 && board.fields.length);
+    const creatorBase = sanitizeCreatorStudio(parsed.creator);
+    const boardById = new Map(boards.map((board) => [board.id, board]));
+    const creator = {
+      ...creatorBase,
+      ideas: creatorBase.ideas.map((idea) => {
+        const linkedBoard = idea.linkedBoardId ? boardById.get(idea.linkedBoardId) : null;
+        const boardLinkValid = Boolean(linkedBoard && linkedBoard.records.some((record) => record.id === idea.linkedBoardRecordId));
+        return {
+          ...idea,
+          linkedTaskId: idea.linkedTaskId && taskIds.has(idea.linkedTaskId) ? idea.linkedTaskId : null,
+          linkedBoardId: boardLinkValid ? idea.linkedBoardId : null,
+          linkedBoardRecordId: boardLinkValid ? idea.linkedBoardRecordId : null,
+        };
+      }),
+      reviews: creatorBase.reviews.map((review) => creatorBase.ideas.some((idea) => idea.id === review.ideaId) ? review : { ...review, ideaId: null }),
+    };
     const focusTaskId = tasks.some((task) => task.id === parsed.focusTaskId) ? parsed.focusTaskId : null;
-    return { version: 7, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries, weeklyReviews, routes, boards };
+    return { version: 8, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries, weeklyReviews, routes, boards, creator };
   } catch {
     return createInitialWorkbench();
   }
@@ -482,6 +670,10 @@ export function applyAgentActions(state, actions, planTitle = "Agent 整理工�
       }, false);
     } else if (rawAction?.type === "create_board_task") {
       next = createBoardRecordTask(next, rawAction.boardId, rawAction.recordId, false);
+    } else if (rawAction?.type === "advance_creator_idea") {
+      next = updateCreatorIdea(next, rawAction.ideaId, { status: rawAction.status }, false);
+    } else if (rawAction?.type === "create_creator_task") {
+      next = createCreatorIdeaTask(next, rawAction.ideaId, false);
     }
   }
   const now = new Date().toISOString();
@@ -523,7 +715,7 @@ export function saveVideoSummary(state, input, createTasks = false) {
   };
   let next = {
     ...state,
-    version: 7,
+    version: 8,
     videos: [...state.videos.filter((item) => item.url !== url), video].slice(-MAX_VIDEOS),
     inbox: state.inbox.map((item) => item.content === url || item.content === cleanText(input?.capturedUrl, 2_000) ? { ...item, status: "planned" } : item),
   };
@@ -565,7 +757,7 @@ export function saveKnowledgeInquiry(state, input) {
   if (!inquiry.question || !inquiry.answer) return state;
   return {
     ...state,
-    version: 7,
+    version: 8,
     knowledgeInquiries: [...validArray(state.knowledgeInquiries), inquiry].slice(-MAX_KNOWLEDGE_INQUIRIES),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -595,6 +787,8 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
       videos: 0,
       knowledgeCards: 0,
       inquiries: 0,
+      creatorIdeas: 0,
+      creatorReviews: 0,
       activityCount: 0,
       total: 0,
     };
@@ -609,6 +803,9 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
   const videos = validArray(state.videos).filter((video) => dateInRange(video.createdAt, start, end));
   const knowledgeCards = validArray(state.knowledge).filter((card) => dateInRange(card.createdAt, start, end));
   const inquiries = validArray(state.knowledgeInquiries).filter((inquiry) => dateInRange(inquiry.createdAt, start, end));
+  const creator = sanitizeCreatorStudio(state.creator);
+  const creatorIdeas = creator.ideas.filter((idea) => dateInRange(idea.createdAt, start, end));
+  const creatorReviews = creator.reviews.filter((review) => dateInRange(review.createdAt, start, end));
   const activity = validArray(state.activity).filter((entry) => dateInRange(entry.createdAt, start, end));
 
   for (const task of tasksCreated) dayForTimestamp(task.createdAt).tasksCreated += 1;
@@ -617,6 +814,8 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
   for (const video of videos) dayForTimestamp(video.createdAt).videos += 1;
   for (const card of knowledgeCards) dayForTimestamp(card.createdAt).knowledgeCards += 1;
   for (const inquiry of inquiries) dayForTimestamp(inquiry.createdAt).inquiries += 1;
+  for (const idea of creatorIdeas) dayForTimestamp(idea.createdAt).creatorIdeas += 1;
+  for (const review of creatorReviews) dayForTimestamp(review.createdAt).creatorReviews += 1;
   for (const entry of activity) dayForTimestamp(entry.createdAt).activityCount += 1;
 
   let habitCheckins = 0;
@@ -630,7 +829,7 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
   }
   for (const day of days) {
     day.total = day.tasksCreated + day.tasksCompleted + day.inboxCaptured + day.habitCheckins
-      + day.videos + day.knowledgeCards + day.inquiries;
+      + day.videos + day.knowledgeCards + day.inquiries + day.creatorIdeas + day.creatorReviews;
   }
   const sourceStats = {
     completedTasks: completedTasks.length,
@@ -641,6 +840,8 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
     videos: videos.length,
     knowledgeCards: knowledgeCards.length,
     knowledgeInquiries: inquiries.length,
+    creatorIdeas: creatorIdeas.length,
+    creatorReviews: creatorReviews.length,
   };
   const evidenceTotal = Object.values(sourceStats).reduce((total, count) => total + count, 0);
   return {
@@ -662,6 +863,8 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
       sourceCount: validArray(sources).length,
       createdAt,
     })),
+    creatorIdeas: creatorIdeas.slice(-8).map(({ id, title, platform, status, createdAt }) => ({ id, title, platform, status, createdAt })),
+    creatorReviews: creatorReviews.slice(-8).map(({ id, title, platform, publishedAt, createdAt }) => ({ id, title, platform, publishedAt, createdAt })),
     activity: activity.slice(-16).map(({ label, detail, source, createdAt }) => ({ label, detail, source, createdAt })),
     sourceStats,
     hasEvidence: evidenceTotal > 0 || activity.length > 0,
@@ -679,7 +882,7 @@ export function saveWeeklyReview(state, input) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 7,
+    version: 8,
     weeklyReviews: [
       ...validArray(state.weeklyReviews).filter((item) => item.weekKey !== review.weekKey),
       review,
@@ -708,7 +911,7 @@ export function savePersonalRoute(state, input) {
   const isUpdate = Boolean(existing);
   return {
     ...state,
-    version: 7,
+    version: 8,
     routes: [...validArray(state.routes).filter((item) => item.id !== route.id), route].slice(-MAX_PERSONAL_ROUTES),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -768,7 +971,7 @@ export function activateRouteAction(state, routeId, phaseId, actionId, recordAct
     createdAt: updatedAt,
     source: "agent",
   }].slice(-MAX_ACTIVITY) : next.activity;
-  return { ...next, version: 7, routes, activity };
+  return { ...next, version: 8, routes, activity };
 }
 
 export function completeRoutePhase(state, routeId, phaseId) {
@@ -778,7 +981,7 @@ export function completeRoutePhase(state, routeId, phaseId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 7,
+    version: 8,
     routes: state.routes.map((item) => item.id !== route.id ? item : {
       ...item,
       updatedAt: now,
@@ -800,7 +1003,7 @@ export function archivePersonalRoute(state, routeId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 7,
+    version: 8,
     routes: state.routes.map((item) => item.id === routeId ? { ...item, archivedAt: now, updatedAt: now } : item),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -831,7 +1034,7 @@ export function savePersonalBoard(state, input) {
   if (!board.name || !board.purpose || board.statuses.length < 2 || !board.fields.length) return state;
   return {
     ...state,
-    version: 7,
+    version: 8,
     boards: [...validArray(state.boards).filter((item) => item.id !== board.id), board].slice(-MAX_PERSONAL_BOARDS),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -861,7 +1064,7 @@ export function addBoardRecord(state, boardId, input, recordActivity = true) {
   };
   return {
     ...state,
-    version: 7,
+    version: 8,
     boards: state.boards.map((item) => item.id === board.id ? { ...item, updatedAt: now, records: [...item.records, record] } : item),
     activity: recordActivity ? [...state.activity, {
       id: createId("activity"),
@@ -890,7 +1093,7 @@ export function updateBoardRecord(state, boardId, recordId, input, recordActivit
   };
   return {
     ...state,
-    version: 7,
+    version: 8,
     boards: state.boards.map((item) => item.id === board.id ? {
       ...item,
       updatedAt: now,
@@ -913,7 +1116,7 @@ export function removeBoardRecord(state, boardId, recordId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 7,
+    version: 8,
     boards: state.boards.map((item) => item.id === board.id ? {
       ...item,
       updatedAt: now,
@@ -949,7 +1152,7 @@ export function createBoardRecordTask(state, boardId, recordId, recordActivity =
   const now = new Date().toISOString();
   next = {
     ...next,
-    version: 7,
+    version: 8,
     boards: next.boards.map((item) => item.id === board.id ? {
       ...item,
       updatedAt: now,
@@ -975,12 +1178,328 @@ export function archivePersonalBoard(state, boardId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 7,
+    version: 8,
     boards: state.boards.map((item) => item.id === boardId ? { ...item, archivedAt: now, updatedAt: now } : item),
     activity: [...state.activity, {
       id: createId("activity"),
       label: "归档一个个人业务台",
       detail: board.name,
+      createdAt: now,
+      source: "human",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function saveCreatorProfile(state, input) {
+  const creator = sanitizeCreatorStudio(state.creator);
+  const profile = sanitizeCreatorProfile({ ...creator.profile, ...(input || {}), updatedAt: new Date().toISOString() });
+  if (!profile.niche && !profile.audience && !profile.voice && !profile.platforms.length) return state;
+  return {
+    ...state,
+    version: 8,
+    creator: { ...creator, profile },
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: "更新创作定位",
+      detail: [profile.niche, profile.audience].filter(Boolean).join(" · "),
+      createdAt: profile.updatedAt,
+      source: "human",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function addCreatorSignal(state, input) {
+  const creator = sanitizeCreatorStudio(state.creator);
+  if (creator.signals.length >= MAX_CREATOR_SIGNALS) return state;
+  const signal = sanitizeCreatorSignal({ ...input, id: createId("creator-signal"), createdAt: new Date().toISOString() });
+  if (!signal.title || !signal.note) return state;
+  return {
+    ...state,
+    version: 8,
+    creator: { ...creator, signals: [...creator.signals, signal].slice(-MAX_CREATOR_SIGNALS) },
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: "记录一个创作信号",
+      detail: `${signal.platform || "来源待定"} · ${signal.title}`,
+      createdAt: signal.createdAt,
+      source: "human",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function removeCreatorSignal(state, signalId) {
+  const creator = sanitizeCreatorStudio(state.creator);
+  const signal = creator.signals.find((item) => item.id === signalId);
+  if (!signal) return state;
+  const now = new Date().toISOString();
+  return {
+    ...state,
+    version: 8,
+    creator: { ...creator, signals: creator.signals.filter((item) => item.id !== signalId) },
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: "移除一个创作信号",
+      detail: signal.title,
+      createdAt: now,
+      source: "human",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+function creatorSourceIndex(state) {
+  const creator = sanitizeCreatorStudio(state.creator);
+  const index = new Map();
+  for (const video of validArray(state.videos)) {
+    index.set(`video:${video.id}`, sanitizeCreatorSourceRef({
+      kind: "video",
+      id: video.id,
+      title: video.title,
+      url: video.url,
+      evidence: [video.summary?.oneSentence, video.summary?.creatorInsights?.hook, video.summary?.creatorInsights?.structure].filter(Boolean).join("；"),
+    }));
+  }
+  for (const card of validArray(state.knowledge)) {
+    index.set(`knowledge:${card.id}`, sanitizeCreatorSourceRef({
+      kind: "knowledge",
+      id: card.id,
+      title: card.title,
+      url: card.sourceUrl,
+      evidence: card.content,
+    }));
+  }
+  for (const signal of creator.signals) {
+    index.set(`signal:${signal.id}`, sanitizeCreatorSourceRef({
+      kind: "signal",
+      id: signal.id,
+      title: signal.title,
+      url: signal.url,
+      evidence: signal.note,
+    }));
+  }
+  return index;
+}
+
+export function saveCreatorIdea(state, input) {
+  const creator = sanitizeCreatorStudio(state.creator);
+  const existing = creator.ideas.find((idea) => idea.id === input?.id);
+  if (!existing && creator.ideas.length >= MAX_CREATOR_IDEAS) return state;
+  const sourceIndex = creatorSourceIndex(state);
+  const sourceRefs = validArray(input?.sourceRefs).map((source) => sourceIndex.get(`${source?.kind}:${source?.id}`)).filter(Boolean);
+  const now = new Date().toISOString();
+  const idea = sanitizeCreatorIdea({
+    ...input,
+    id: existing?.id || input?.id,
+    sourceRefs,
+    linkedTaskId: existing?.linkedTaskId || input?.linkedTaskId || null,
+    linkedBoardId: existing?.linkedBoardId || input?.linkedBoardId || null,
+    linkedBoardRecordId: existing?.linkedBoardRecordId || input?.linkedBoardRecordId || null,
+    createdAt: existing?.createdAt || input?.createdAt || now,
+    updatedAt: now,
+  });
+  if (!idea.title || !idea.promise || !idea.hook || !idea.angle || !idea.steps.length) return state;
+  return {
+    ...state,
+    version: 8,
+    creator: { ...creator, ideas: [...creator.ideas.filter((item) => item.id !== idea.id), idea].slice(-MAX_CREATOR_IDEAS) },
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: existing ? "调整一个创作选题" : "保存一个创作选题",
+      detail: `${idea.platform || "平台待定"} · ${idea.title} · ${idea.sourceRefs.length} 条来源`,
+      createdAt: now,
+      source: "agent",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function updateCreatorIdea(state, ideaId, input, recordActivity = true) {
+  const creator = sanitizeCreatorStudio(state.creator);
+  const idea = creator.ideas.find((item) => item.id === ideaId);
+  if (!idea) return state;
+  const statusOrder = ["idea", "drafting", "producing", "published"];
+  const requestedStatus = statusOrder.includes(input?.status) ? input.status : idea.status;
+  const status = statusOrder.indexOf(requestedStatus) >= statusOrder.indexOf(idea.status) ? requestedStatus : idea.status;
+  const stepExists = input?.stepId && idea.steps.some((step) => step.id === input.stepId);
+  const now = new Date().toISOString();
+  const nextIdea = {
+    ...idea,
+    status,
+    steps: stepExists ? idea.steps.map((step) => step.id === input.stepId ? { ...step, done: Boolean(input.stepDone) } : step) : idea.steps,
+    updatedAt: now,
+  };
+  if (nextIdea.status === idea.status && nextIdea.steps.every((step, index) => step.done === idea.steps[index]?.done)) return state;
+  return {
+    ...state,
+    version: 8,
+    creator: { ...creator, ideas: creator.ideas.map((item) => item.id === idea.id ? nextIdea : item) },
+    activity: recordActivity ? [...state.activity, {
+      id: createId("activity"),
+      label: status !== idea.status ? "推进一个创作选题" : "更新创作步骤",
+      detail: idea.title,
+      createdAt: now,
+      source: "human",
+    }].slice(-MAX_ACTIVITY) : state.activity,
+  };
+}
+
+export function createCreatorIdeaTask(state, ideaId, recordActivity = true) {
+  const creator = sanitizeCreatorStudio(state.creator);
+  const idea = creator.ideas.find((item) => item.id === ideaId);
+  if (!idea) return state;
+  if (idea.linkedTaskId && state.tasks.some((task) => task.id === idea.linkedTaskId)) return state;
+  let next = addTask(state, {
+    title: idea.title,
+    note: [
+      "来自创作工作室",
+      idea.platform ? `平台：${idea.platform}` : "",
+      `开头：${idea.hook}`,
+      idea.sourceRefs.length ? `依据：${idea.sourceRefs.map((source) => source.title).join("、")}` : "原创命题，暂无外部来源",
+    ].filter(Boolean).join(" · "),
+    source: "agent",
+  });
+  const linkedTaskId = next.tasks.at(-1)?.id || null;
+  if (!linkedTaskId) return state;
+  const now = new Date().toISOString();
+  const nextCreator = sanitizeCreatorStudio(next.creator);
+  next = {
+    ...next,
+    version: 8,
+    creator: {
+      ...nextCreator,
+      ideas: nextCreator.ideas.map((item) => item.id === idea.id ? {
+        ...item,
+        linkedTaskId,
+        status: item.status === "idea" ? "drafting" : item.status,
+        updatedAt: now,
+      } : item),
+    },
+  };
+  if (!recordActivity) return next;
+  return {
+    ...next,
+    activity: [...next.activity, {
+      id: createId("activity"),
+      label: "从创作选题加入任务",
+      detail: idea.title,
+      createdAt: now,
+      source: "agent",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function addCreatorIdeaToBoard(state, ideaId, boardId) {
+  const creator = sanitizeCreatorStudio(state.creator);
+  const idea = creator.ideas.find((item) => item.id === ideaId);
+  const board = validArray(state.boards).find((item) => item.id === boardId && !item.archivedAt);
+  if (!idea || !board) return state;
+  if (idea.linkedBoardId && idea.linkedBoardRecordId) {
+    const linkedBoard = state.boards.find((item) => item.id === idea.linkedBoardId);
+    if (linkedBoard?.records.some((record) => record.id === idea.linkedBoardRecordId)) return state;
+  }
+  const formatLabels = { video: "视频", graphic: "图文", article: "文章", live: "直播" };
+  const values = Object.fromEntries(board.fields.map((field) => {
+    const name = field.name.toLocaleLowerCase("zh-CN");
+    let value = field.type === "checkbox" ? false : field.type === "number" ? 0 : "";
+    if (name.includes("平台")) value = field.type === "select" ? (field.options.includes(idea.platform) ? idea.platform : "") : idea.platform;
+    if (name.includes("形式") || name.includes("类型")) {
+      const format = formatLabels[idea.format];
+      value = field.type === "select" ? (field.options.includes(format) ? format : "") : format;
+    }
+    if (name.includes("来源") && field.type === "text") value = idea.sourceRefs.map((source) => source.title).join("、");
+    return [field.id, value];
+  }));
+  const beforeIds = new Set(board.records.map((record) => record.id));
+  let next = addBoardRecord(state, board.id, { title: idea.title, statusId: board.statuses[0]?.id, values }, false);
+  const updatedBoard = next.boards.find((item) => item.id === board.id);
+  const record = updatedBoard?.records.find((item) => !beforeIds.has(item.id));
+  if (!record) return state;
+  const now = new Date().toISOString();
+  const nextCreator = sanitizeCreatorStudio(next.creator);
+  return {
+    ...next,
+    version: 8,
+    creator: {
+      ...nextCreator,
+      ideas: nextCreator.ideas.map((item) => item.id === idea.id ? { ...item, linkedBoardId: board.id, linkedBoardRecordId: record.id, updatedAt: now } : item),
+    },
+    activity: [...next.activity, {
+      id: createId("activity"),
+      label: "把创作选题接入业务台",
+      detail: `${board.name} · ${idea.title}`,
+      createdAt: now,
+      source: "agent",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function removeCreatorIdea(state, ideaId) {
+  const creator = sanitizeCreatorStudio(state.creator);
+  const idea = creator.ideas.find((item) => item.id === ideaId);
+  if (!idea) return state;
+  const now = new Date().toISOString();
+  return {
+    ...state,
+    version: 8,
+    creator: {
+      ...creator,
+      ideas: creator.ideas.filter((item) => item.id !== ideaId),
+      reviews: creator.reviews.map((review) => review.ideaId === ideaId ? { ...review, ideaId: null } : review),
+    },
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: "移除一个创作选题",
+      detail: idea.title,
+      createdAt: now,
+      source: "human",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function saveCreatorReview(state, input) {
+  const creator = sanitizeCreatorStudio(state.creator);
+  const existing = creator.reviews.find((review) => review.id === input?.id);
+  if (!existing && creator.reviews.length >= MAX_CREATOR_REVIEWS) return state;
+  const ideaId = input?.ideaId && creator.ideas.some((idea) => idea.id === input.ideaId) ? input.ideaId : null;
+  const now = new Date().toISOString();
+  const review = sanitizeCreatorReview({
+    ...input,
+    id: existing?.id || input?.id,
+    ideaId,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  });
+  const hasEvidence = Object.values(review.metrics).some((metric) => metric > 0) || Boolean(review.notes);
+  if (!review.title || !review.platform || !review.publishedAt || !hasEvidence) return state;
+  return {
+    ...state,
+    version: 8,
+    creator: {
+      ...creator,
+      ideas: creator.ideas.map((idea) => idea.id === ideaId ? { ...idea, status: "published", updatedAt: now } : idea),
+      reviews: [...creator.reviews.filter((item) => item.id !== review.id), review].slice(-MAX_CREATOR_REVIEWS),
+    },
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: review.analysis ? "保存一次内容复盘" : "记录一条发布结果",
+      detail: `${review.platform} · ${review.title}`,
+      createdAt: now,
+      source: review.analysis ? "agent" : "human",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function removeCreatorReview(state, reviewId) {
+  const creator = sanitizeCreatorStudio(state.creator);
+  const review = creator.reviews.find((item) => item.id === reviewId);
+  if (!review) return state;
+  const now = new Date().toISOString();
+  return {
+    ...state,
+    version: 8,
+    creator: { ...creator, reviews: creator.reviews.filter((item) => item.id !== reviewId) },
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: "移除一次内容复盘",
+      detail: review.title,
       createdAt: now,
       source: "human",
     }].slice(-MAX_ACTIVITY),

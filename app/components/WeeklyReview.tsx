@@ -134,18 +134,20 @@ export function WeeklyReview({
       <article className="week-trace">
         <header>
           <div><span>WEEK TRACE / {snapshot.weekKey}</span><h2>这一周留下了什么痕迹</h2></div>
-          <div className="trace-legend"><span><i className="work" />推进</span><span><i className="capture" />输入与节律</span><span><i className="knowledge" />知识</span></div>
+          <div className="trace-legend"><span><i className="work" />推进</span><span><i className="capture" />输入与节律</span><span><i className="knowledge" />知识</span><span><i className="creator" />创作</span></div>
         </header>
         <ol>
           {snapshot.days.map((day) => {
             const work = day.tasksCreated + day.tasksCompleted;
             const capture = day.inboxCaptured + day.habitCheckins;
             const knowledge = day.videos + day.knowledgeCards + day.inquiries;
+            const creator = day.creatorIdeas + day.creatorReviews;
             return (
               <li key={day.key} aria-label={`${day.dateLabel}共 ${day.total} 条记录`}>
                 <strong>{String(day.total).padStart(2, "0")}</strong>
                 <div className="trace-bar"><i style={{ height: day.total ? `${Math.max(12, Math.round((day.total / maxDayTotal) * 100))}%` : "3%" }}>
                   {knowledge > 0 && <span className="knowledge" style={{ flex: knowledge }} />}
+                  {creator > 0 && <span className="creator" style={{ flex: creator }} />}
                   {capture > 0 && <span className="capture" style={{ flex: capture }} />}
                   {work > 0 && <span className="work" style={{ flex: work }} />}
                 </i></div>
@@ -160,6 +162,8 @@ export function WeeklyReview({
           <span><strong>{snapshot.sourceStats.capturedItems}</strong>输入</span>
           <span><strong>{snapshot.sourceStats.knowledgeCards}</strong>知识卡</span>
           <span><strong>{snapshot.sourceStats.knowledgeInquiries}</strong>次求证</span>
+          <span><strong>{snapshot.sourceStats.creatorIdeas}</strong>创作选题</span>
+          <span><strong>{snapshot.sourceStats.creatorReviews}</strong>内容复盘</span>
         </footer>
       </article>
 
@@ -170,6 +174,7 @@ export function WeeklyReview({
             <article><i>✓</i><div><strong>实际完成</strong><p>{snapshot.completedTasks.length ? snapshot.completedTasks.map((task) => task.title).join(" · ") : "还没有完成记录"}</p></div></article>
             <article><i>↘</i><div><strong>输入去向</strong><p>{snapshot.sourceStats.capturedItems} 条输入，{snapshot.sourceStats.plannedItems} 条已安排，{pendingInbox} 条仍待整理</p></div></article>
             <article><i>◇</i><div><strong>形成知识</strong><p>{snapshot.sourceStats.videos} 个视频 · {snapshot.sourceStats.knowledgeCards} 张卡片 · {snapshot.sourceStats.knowledgeInquiries} 次有据问答</p></div></article>
+            <article><i>◒</i><div><strong>创作闭环</strong><p>{snapshot.sourceStats.creatorIdeas} 个选题 · {snapshot.sourceStats.creatorReviews} 次发布复盘</p></div></article>
           </div>
           <div className="open-loops">
             <span>仍然打开的循环 · {snapshot.openTasks.length}</span>
