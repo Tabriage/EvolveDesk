@@ -319,7 +319,7 @@ export default function Home() {
         <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>可配置路线</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>任务与焦点</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#ff6d5a" }} /><span>统一收件箱</span><b>运行中</b></div>
-        <div className="rail-capability"><i style={{ background: "#7657d6" }} /><span>视频理解</span><b>运行中</b></div>
+        <div className="rail-capability"><i style={{ background: "#7657d6" }} /><span>字幕与画面</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#ff6d5a" }} /><span>创作闭环</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>知识再利用</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#7657d6" }} /><span>间隔复习</span><b>运行中</b></div>
@@ -573,9 +573,9 @@ export default function Home() {
       ) : activeView === "video" ? (
         <aside className="agent-panel video-guide-panel">
           <header><div className="agent-glyph video-glyph"><span>▷</span></div><div><strong>视频理解边界</strong><small>本地导入 · 有据可查</small></div><button aria-label="打开连接设置" onClick={() => setSettingsOpen(true)}>•••</button></header>
-          <div className="video-guide-intro"><span>LINK OR FILE → EVIDENCE</span><h3>先得到真实字幕，<br />再沿时间点理解。</h3><p>标题和封面只能帮助识别来源，永远不能代替字幕成为总结或问答依据。</p></div>
-          <ol className="video-guide-steps"><li><i>1</i><div><strong>本地导入</strong><p>支持四个平台链接与不超过 500MB 的本地音视频。</p></div></li><li><i>2</i><div><strong>字幕优先</strong><p>平台字幕直接读取；本地文件只在临时目录停留。</p></div></li><li><i>3</i><div><strong>时间证据</strong><p>Whisper 转录完成即删媒体，字幕保存在浏览器资料库。</p></div></li><li><i>4</i><div><strong>有据问答</strong><p>Agent 只读相关片段，回答必须返回有效时间引用。</p></div></li></ol>
-          <div className="video-plan-b"><span>资料边界</span><p>搜索在浏览器本地完成；提问最多发送 12 段相关字幕到你配置的本机模型。</p></div>
+          <div className="video-guide-intro"><span>LINK OR FILE → EVIDENCE</span><h3>先得到真实字幕与画面，<br />再沿时间点理解。</h3><p>标题和封面只用于识别来源；总结与问答必须回到字幕片段或本机抽取的采样帧。</p></div>
+          <ol className="video-guide-steps"><li><i>1</i><div><strong>本地导入</strong><p>支持四个平台链接与不超过 500MB 的本地音视频。</p></div></li><li><i>2</i><div><strong>字幕优先</strong><p>平台字幕直接读取；缺失时可用本机 Whisper。</p></div></li><li><i>3</i><div><strong>视觉底片</strong><p>FFmpeg 抽帧，Tesseract OCR；图片只存当前浏览器。</p></div></li><li><i>4</i><div><strong>双证据问答</strong><p>Agent 返回有效的字幕 S 编号或画面 F 编号。</p></div></li></ol>
+          <div className="video-plan-b"><span>资料边界</span><p>搜索与筛选在浏览器本地完成；单次提问最多发送 12 段字幕与 4 帧选中画面到本机模型。</p></div>
           <div className="guardrail-footer"><i className={connected ? "online" : ""} /><div><strong>{connected ? "总结模型已连接" : "等待模型连接"}</strong><p>导入视频不需要模型密钥</p></div><button onClick={() => setSettingsOpen(true)}>设置</button></div>
         </aside>
       ) : (

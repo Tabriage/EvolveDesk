@@ -37,9 +37,20 @@ export type VideoSummary = {
   chapters: Array<{ title: string; summary: string; timestamp: string | null }>;
   concepts: Array<{ term: string; explanation: string }>;
   caveats: string[];
+  visualFindings: Array<{ frameId: string; timestamp: string; observation: string }>;
   creatorInsights: { hook: string; structure: string; angles: string[] };
   suggestedTasks: Array<{ title: string; note: string }>;
-  cards: Array<{ title: string; content: string; tags: string[] }>;
+  cards: Array<{ title: string; content: string; tags: string[]; evidenceFrameIds: string[] }>;
+};
+
+export type VisualEvidenceFrame = {
+  id: string;
+  seconds: number;
+  timestamp: string;
+  ocrText: string;
+  modelText: string;
+  observation: string;
+  uncertainty: string;
 };
 
 export type VideoRecord = {
@@ -52,8 +63,12 @@ export type VideoRecord = {
   description: string;
   duration: number | null;
   thumbnail: string;
+  hasVideo: boolean;
+  width: number;
+  height: number;
   localFileName: string;
   transcriptSource: "platform" | "local-whisper" | "manual";
+  visualEvidence: VisualEvidenceFrame[];
   summary: VideoSummary;
   createdAt: string;
 };
@@ -65,6 +80,7 @@ export type KnowledgeCard = {
   tags: string[];
   sourceUrl: string;
   sourceTitle: string;
+  evidenceFrameIds: string[];
   createdAt: string;
 };
 
@@ -139,6 +155,7 @@ export type WeeklyReviewSourceStats = {
   plannedItems: number;
   habitCheckins: number;
   videos: number;
+  visualFrames: number;
   knowledgeCards: number;
   knowledgeInquiries: number;
   creatorIdeas: number;
@@ -171,6 +188,7 @@ export type WeeklyDaySnapshot = {
   inboxCaptured: number;
   habitCheckins: number;
   videos: number;
+  visualFrames: number;
   knowledgeCards: number;
   inquiries: number;
   creatorIdeas: number;
@@ -191,7 +209,7 @@ export type WeeklySnapshot = {
   createdTasks: Array<Pick<WorkTask, "id" | "title" | "note" | "done" | "createdAt">>;
   openTasks: Array<Pick<WorkTask, "id" | "title" | "note" | "priority" | "createdAt">>;
   capturedItems: Array<Pick<InboxItem, "id" | "content" | "kind" | "status" | "createdAt">>;
-  videos: Array<Pick<VideoRecord, "id" | "title" | "platform" | "createdAt">>;
+  videos: Array<Pick<VideoRecord, "id" | "title" | "platform" | "createdAt"> & { visualFrameCount: number }>;
   knowledgeCards: Array<Pick<KnowledgeCard, "id" | "title" | "tags" | "sourceTitle" | "createdAt">>;
   inquiries: Array<{ id: string; question: string; answerable: boolean; sourceCount: number; createdAt: string }>;
   creatorIdeas: Array<Pick<CreatorIdea, "id" | "title" | "platform" | "status" | "createdAt">>;
@@ -412,7 +430,7 @@ export type CreatorStudioState = {
 };
 
 export type WorkbenchState = {
-  version: 9;
+  version: 10;
   focusTaskId: string | null;
   tasks: WorkTask[];
   inbox: InboxItem[];

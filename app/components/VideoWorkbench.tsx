@@ -1,11 +1,13 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
-import { loadTranscript, saveTranscript } from "../features/transcript-store.mjs";
-import type { KnowledgeCard, KnowledgeInquiry, VideoRecord, VideoSummary } from "../features/workbench-core.mjs";
+import { segmentTranscript } from "../features/transcript-core.mjs";
+import { loadTranscript, loadVisualFrames, saveTranscript, saveVisualFrames } from "../features/transcript-store.mjs";
+import type { KnowledgeCard, KnowledgeInquiry, VideoRecord, VideoSummary, VisualEvidenceFrame } from "../features/workbench-core.mjs";
 import { TranscriptStudio } from "./TranscriptStudio";
+import { VisualEvidenceStudio, type VisualFrameDraft } from "./VisualEvidenceStudio";
 
-type ImportedVideo = Omit<VideoRecord, "id" | "summary" | "createdAt" | "transcriptSource" | "localFileName"> & {
+type ImportedVideo = Omit<VideoRecord, "id" | "summary" | "createdAt" | "transcriptSource" | "localFileName" | "visualEvidence"> & {
   inputUrl: string;
   transcript: string | null;
   transcriptSource: "platform" | "local-whisper" | "unavailable";
@@ -15,7 +17,17 @@ type ImportedVideo = Omit<VideoRecord, "id" | "summary" | "createdAt" | "transcr
 };
 
 type TranscriptionStatus = {
-  runtime: { whisper: boolean; ffmpeg: boolean; ytDlp: boolean; ready: boolean; localReady: boolean };
+  runtime: {
+    whisper: boolean;
+    ffmpeg: boolean;
+    ytDlp: boolean;
+    tesseract: boolean;
+    ocrLanguages: string[];
+    ready: boolean;
+    localReady: boolean;
+    visualReady: boolean;
+    ocrReady: boolean;
+  };
   model: {
     name: string;
     filename: string;
@@ -26,6 +38,7 @@ type TranscriptionStatus = {
   };
   downloading: boolean;
   transcribing: boolean;
+  extractingVisuals: boolean;
 };
 
 type VideoWorkbenchProps = {
@@ -90,11 +103,13 @@ export function VideoWorkbench({
   const [video, setVideo] = useState<ImportedVideo | null>(null);
   const [transcript, setTranscript] = useState("");
   const [summary, setSummary] = useState<VideoSummary | null>(null);
-  const [busy, setBusy] = useState<"" | "import" | "upload" | "model" | "transcribe" | "summarize">("");
+  const [visualFrames, setVisualFrames] = useState<VisualFrameDraft[]>([]);
+  const [busy, setBusy] = useState<"" | "import" | "upload" | "model" | "transcribe" | "visual" | "summarize">("");
   const [message, setMessage] = useState("粘贴视频链接，先读取真实元数据与字幕");
   const [savedMode, setSavedMode] = useState<"" | "knowledge" | "tasks">("");
   const [transcriptionStatus, setTranscriptionStatus] = useState<TranscriptionStatus | null>(null);
   const [transcriptStored, setTranscriptStored] = useState(false);
+  const [visualStored, setVisualStored] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -129,6 +144,8 @@ export function VideoWorkbench({
     setSummary(null);
     setSavedMode("");
     setTranscriptStored(false);
+    setVisualFrames([]);
+    setVisualStored(false);
     try {
       await discardPendingUpload(video);
       const response = await fetch(companionUrl("/api/video/import"), {
@@ -147,6 +164,7 @@ export function VideoWorkbench({
     } catch (error) {
       setVideo(null);
       setTranscript("");
+      setVisualFrames([]);
       setMessage(error instanceof Error ? error.message : "视频导入失败");
     } finally {
       setBusy("");
@@ -166,6 +184,8 @@ export function VideoWorkbench({
     setSummary(null);
     setSavedMode("");
     setTranscriptStored(false);
+    setVisualFrames([]);
+    setVisualStored(false);
     try {
       await discardPendingUpload(video);
       const response = await fetch(companionUrl("/api/video/upload"), {
@@ -183,10 +203,11 @@ export function VideoWorkbench({
       setVideo(data.video);
       setUrl("");
       setTranscript("");
-      setMessage(`已读取 ${data.video.localFileName || file.name} · 文件仅临时保留，转录后立即删除`);
+      setMessage(`已读取 ${data.video.localFileName || file.name} · 文件仅临时保留，保存或转录后立即删除`);
     } catch (error) {
       setVideo(null);
       setTranscript("");
+      setVisualFrames([]);
       setMessage(error instanceof Error ? error.message : "本地文件导入失败");
     } finally {
       setBusy("");
@@ -209,8 +230,54 @@ export function VideoWorkbench({
     }
   }
 
+  async function extractVisuals(target: ImportedVideo | null = video) {
+    if (!target?.hasVideo) {
+      setMessage("当前来源没有视频轨道，无法抽取画面");
+      return [] as VisualFrameDraft[];
+    }
+    setBusy("visual");
+    setMessage("正在本机抽取关键采样帧并运行 OCR；平台临时视频完成后会立即删除…");
+    try {
+      const candidates = segmentTranscript(transcript).map((segment) => segment.seconds).filter((seconds): seconds is number => seconds !== null);
+      const response = await fetch(companionUrl("/api/video/visual-evidence"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(target.platform === "local"
+          ? { uploadId: target.uploadId, candidates }
+          : { url: target.url, candidates }),
+      });
+      const data = (await response.json()) as {
+        error?: string;
+        visualEvidence?: {
+          frames: Array<Pick<VisualEvidenceFrame, "id" | "seconds" | "timestamp" | "ocrText"> & { imageDataUrl: string }>;
+          ocr: { available: boolean; languages: string[] };
+        };
+      };
+      if (!response.ok || !data.visualEvidence?.frames.length) throw new Error(data.error || "本机没有返回可用画面");
+      const nextFrames = data.visualEvidence.frames.map((frame, index) => ({
+        ...frame,
+        modelText: "",
+        observation: "",
+        uncertainty: "",
+        included: index < 6,
+      }));
+      setVisualFrames(nextFrames);
+      setVisualStored(false);
+      setSummary(null);
+      setSavedMode("");
+      setMessage(`已抽取 ${nextFrames.length} 帧 · ${data.visualEvidence.ocr.available ? "本机 OCR 已完成" : "未检测到 OCR，图片仍可核对"}`);
+      return nextFrames;
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "画面抽取失败");
+      return [] as VisualFrameDraft[];
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function transcribe() {
     if (!video) return;
+    if (video.platform === "local" && video.hasVideo && !visualFrames.length) await extractVisuals(video);
     setBusy("transcribe");
     setMessage("正在下载临时音频并使用本机 Whisper 转录；音频处理后会立即删除…");
     try {
@@ -272,6 +339,15 @@ export function VideoWorkbench({
             description: video.description,
           },
           transcript,
+          visualEvidence: visualFrames.filter((frame) => frame.included).map((frame) => ({
+            id: frame.id,
+            seconds: frame.seconds,
+            timestamp: frame.timestamp,
+            ocrText: frame.ocrText,
+            modelText: frame.modelText,
+            observation: frame.observation,
+            uncertainty: frame.uncertainty,
+          })),
         }),
       });
       const data = (await response.json()) as { error?: string; summary?: VideoSummary };
@@ -298,20 +374,36 @@ export function VideoWorkbench({
       description: video.description,
       duration: video.duration,
       thumbnail: video.thumbnail,
+      hasVideo: video.hasVideo,
+      width: video.width,
+      height: video.height,
       localFileName: video.localFileName || "",
       transcriptSource: video.transcriptSource === "platform"
         ? "platform"
         : video.transcriptSource === "local-whisper" ? "local-whisper" : "manual",
+      visualEvidence: visualFrames.map((frame) => ({
+        id: frame.id,
+        seconds: frame.seconds,
+        timestamp: frame.timestamp,
+        ocrText: frame.ocrText,
+        modelText: frame.modelText,
+        observation: frame.observation,
+        uncertainty: frame.uncertainty,
+      })),
       summary,
     }, createTasks);
-    const stored = await saveTranscript(video.url, transcript);
+    const [stored, storedVisuals] = await Promise.all([
+      saveTranscript(video.url, transcript),
+      visualFrames.length ? saveVisualFrames(video.url, visualFrames) : Promise.resolve(false),
+    ]);
     await discardPendingUpload(video);
     setVideo((current) => current ? { ...current, uploadId: undefined } : current);
     setTranscriptStored(stored);
+    setVisualStored(storedVisuals);
     setSavedMode(createTasks ? "tasks" : "knowledge");
     setMessage(createTasks
-      ? `已保存 ${summary.cards.length} 张知识卡片，并加入 ${summary.suggestedTasks.length} 个任务${stored ? "；字幕已进入浏览器资料库" : "；字幕未能持久化"}`
-      : `已保存视频总结和 ${summary.cards.length} 张知识卡片${stored ? "；字幕已进入浏览器资料库" : "；字幕未能持久化"}`);
+      ? `已保存 ${summary.cards.length} 张知识卡片，并加入 ${summary.suggestedTasks.length} 个任务${stored ? "；字幕已存浏览器" : "；字幕未能持久化"}${visualFrames.length ? storedVisuals ? "；画面已存浏览器" : "；画面未能持久化" : ""}`
+      : `已保存视频总结和 ${summary.cards.length} 张知识卡片${stored ? "；字幕已存浏览器" : "；字幕未能持久化"}${visualFrames.length ? storedVisuals ? "；画面已存浏览器" : "；画面未能持久化" : ""}`);
   }
 
   async function openSaved(saved: VideoRecord) {
@@ -326,6 +418,9 @@ export function VideoWorkbench({
       description: saved.description,
       duration: saved.duration,
       thumbnail: saved.thumbnail,
+      hasVideo: saved.hasVideo,
+      width: saved.width,
+      height: saved.height,
       localFileName: saved.localFileName,
       transcript: null,
       transcriptSource: saved.transcriptSource === "platform"
@@ -333,13 +428,26 @@ export function VideoWorkbench({
         : saved.transcriptSource === "local-whisper" ? "local-whisper" : "unavailable",
       importedAt: saved.createdAt,
     });
-    const savedTranscript = await loadTranscript(saved.url).catch(() => "");
+    const [savedTranscript, storedFrames] = await Promise.all([
+      loadTranscript(saved.url).catch(() => ""),
+      loadVisualFrames(saved.url).catch(() => []),
+    ]);
+    const imageById = new Map(storedFrames.map((frame) => [frame.id, frame.imageDataUrl]));
+    const restoredFrames = saved.visualEvidence.map((frame, index) => ({
+      ...frame,
+      imageDataUrl: imageById.get(frame.id) || "",
+      included: index < 6,
+    }));
     setTranscript(savedTranscript);
     setTranscriptStored(Boolean(savedTranscript));
+    setVisualFrames(restoredFrames);
+    setVisualStored(Boolean(restoredFrames.length && restoredFrames.every((frame) => frame.imageDataUrl)));
     setSourceMode(saved.platform === "local" ? "file" : "url");
     setSummary(saved.summary);
     setSavedMode("knowledge");
-    setMessage(savedTranscript ? "已从浏览器本地资料库恢复字幕，可继续搜索和提问" : "这条旧总结没有持久化字幕；重新生成前需要再次导入来源");
+    setMessage(savedTranscript
+      ? `已恢复字幕${restoredFrames.length ? `与 ${restoredFrames.length} 帧视觉证据` : ""}，可继续搜索和提问`
+      : "这条旧总结没有持久化字幕；重新生成前需要再次导入来源");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -355,7 +463,7 @@ export function VideoWorkbench({
 
       <div className="video-pipeline" aria-label="视频总结流程">
         <div className={video ? "done" : "active"}><i>1</i><span><strong>导入</strong><small>元数据与字幕</small></span></div><b />
-        <div className={transcript ? "done" : video ? "active" : ""}><i>2</i><span><strong>核对</strong><small>真实文本来源</small></span></div><b />
+        <div className={transcript || visualFrames.length ? "done" : video ? "active" : ""}><i>2</i><span><strong>核对</strong><small>字幕与真实画面</small></span></div><b />
         <div className={summary ? "done" : transcript ? "active" : ""}><i>3</i><span><strong>理解</strong><small>章节与要点</small></span></div><b />
         <div className={savedMode ? "done" : summary ? "active" : ""}><i>4</i><span><strong>再利用</strong><small>知识卡与任务</small></span></div>
       </div>
@@ -394,7 +502,7 @@ export function VideoWorkbench({
               <span>已读取来源</span>
               <h2>{video.title}</h2>
               <p>{video.author || "作者未知"}</p>
-              {video.platform === "local" ? <em>本地临时文件 · 转录后删除</em> : <a href={video.url} target="_blank" rel="noreferrer">打开原视频 ↗</a>}
+              {video.platform === "local" ? <em>本地临时文件 · 保存或转录后删除</em> : <a href={video.url} target="_blank" rel="noreferrer">打开原视频 ↗</a>}
             </div>
           </article>
 
@@ -434,11 +542,29 @@ export function VideoWorkbench({
 
       <p className="video-status"><i className={busy ? "busy" : ""} />{message}</p>
 
+      {video && (
+        <VisualEvidenceStudio
+          video={{ title: video.title, hasVideo: video.hasVideo, canExtract: video.platform !== "local" || Boolean(video.uploadId) }}
+          frames={visualFrames}
+          baseURL={baseURL}
+          apiKey={apiKey}
+          model={model}
+          extracting={busy === "visual"}
+          ocrReady={Boolean(transcriptionStatus?.runtime.ocrReady)}
+          ocrLanguages={transcriptionStatus?.runtime.ocrLanguages || []}
+          stored={visualStored}
+          onExtract={async () => { await extractVisuals(); }}
+          onChange={(frames) => { setVisualFrames(frames); setSummary(null); setSavedMode(""); }}
+          onNeedSettings={onNeedSettings}
+        />
+      )}
+
       {video && transcript.trim().length >= 80 && (
         <TranscriptStudio
           key={`${video.url}-${transcript.length}`}
           transcript={transcript}
           video={{ title: video.title, url: video.url, platform: video.platform }}
+          visualFrames={visualFrames.filter((frame) => frame.included)}
           baseURL={baseURL}
           apiKey={apiKey}
           model={model}
@@ -476,10 +602,12 @@ export function VideoWorkbench({
             </section>
             <section className="knowledge-preview">
               <header><span>将要保存</span><b>{summary.cards.length} 卡片 · {summary.suggestedTasks.length} 任务</b></header>
-              {summary.cards.slice(0, 3).map((card) => <div key={card.title}><strong>{card.title}</strong><p>{card.content}</p><small>{card.tags.map((tag) => `#${tag}`).join(" ")}</small></div>)}
+              {summary.cards.slice(0, 3).map((card) => <div key={card.title}><strong>{card.title}</strong><p>{card.content}</p><small>{card.tags.map((tag) => `#${tag}`).join(" ")}{card.evidenceFrameIds.length ? ` · ${card.evidenceFrameIds.length} 帧证据` : ""}</small></div>)}
               {summary.cards.length > 3 && <em>还有 {summary.cards.length - 3} 张知识卡片</em>}
             </section>
           </div>
+
+          {summary.visualFindings.length > 0 && <section className="summary-visual-findings"><header><span>画面直接支持</span><b>{summary.visualFindings.length} 帧</b></header>{summary.visualFindings.map((finding) => <div key={`${finding.frameId}-${finding.observation}`}><time>{finding.timestamp}</time><p>{finding.observation}</p></div>)}</section>}
 
           {summary.caveats.length > 0 && <div className="summary-caveats"><span>阅读边界</span>{summary.caveats.map((item) => <p key={item}>! {item}</p>)}</div>}
 
@@ -495,7 +623,7 @@ export function VideoWorkbench({
           <header><div><p className="eyebrow">本地知识架</p><h2>看过之后，仍然找得到。</h2></div><span>{videos.length} 个视频 · {knowledge.length} 张卡片</span></header>
           <div className="saved-video-grid">
             {videos.slice().reverse().slice(0, 6).map((saved) => (
-              <button key={saved.id} onClick={() => void openSaved(saved)}><i>{platformNames[saved.platform]}</i><strong>{saved.title}</strong><p>{saved.summary.oneSentence}</p><small>{saved.summary.cards.length} 张卡片</small></button>
+              <button key={saved.id} onClick={() => void openSaved(saved)}><i>{platformNames[saved.platform]}</i><strong>{saved.title}</strong><p>{saved.summary.oneSentence}</p><small>{saved.summary.cards.length} 张卡片{saved.visualEvidence.length ? ` · ${saved.visualEvidence.length} 帧` : ""}</small></button>
             ))}
           </div>
           {relatedCards.length > 0 && <p className="related-card-note">当前视频已有 {relatedCards.length} 张知识卡片保存在本机。</p>}

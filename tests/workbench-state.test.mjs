@@ -87,7 +87,19 @@ test("video summaries become durable knowledge and optional tasks", () => {
     description: "",
     duration: 600,
     thumbnail: "",
+    hasVideo: true,
+    width: 1280,
+    height: 720,
     transcriptSource: "local-whisper",
+    visualEvidence: [{
+      id: "frame-12-evidence",
+      seconds: 12,
+      timestamp: "00:12",
+      ocrText: "统一入口",
+      modelText: "收件箱",
+      observation: "画面展示一个名为收件箱的统一入口。",
+      uncertainty: "无法从单帧确认后续处理顺序。",
+    }],
     summary: {
       oneSentence: "把输入快速转成可复习的知识与下一步行动。",
       audience: "正在建立个人学习系统的人",
@@ -97,22 +109,37 @@ test("video summaries become durable knowledge and optional tasks", () => {
       chapters: [{ title: "采集", summary: "先降低输入阻力。", timestamp: "00:00" }],
       concepts: [{ term: "渐进整理", explanation: "需要使用时再增加结构。" }],
       caveats: [],
+      visualFindings: [
+        { frameId: "frame-12-evidence", timestamp: "伪造时间", observation: "画面显示统一收件箱。" },
+        { frameId: "frame-does-not-exist", timestamp: "00:99", observation: "不应保留的画面。" },
+      ],
       creatorInsights: { hook: "从信息焦虑切入", structure: "问题—流程—示例", angles: ["展示真实的一周"] },
       suggestedTasks: [{ title: "整理学习收件箱", note: "只处理最近三条" }],
-      cards: [{ title: "渐进整理", content: "结构应在使用中逐步形成。", tags: ["学习系统"] }],
+      cards: [{ title: "渐进整理", content: "结构应在使用中逐步形成。", tags: ["学习系统"], evidenceFrameIds: ["frame-12-evidence", "frame-does-not-exist"] }],
     },
   }, true);
 
-  assert.equal(saved.version, 9);
+  assert.equal(saved.version, 10);
   assert.equal(saved.videos.length, 1);
   assert.equal(saved.videos[0].transcriptSource, "local-whisper");
+  assert.equal(saved.videos[0].visualEvidence[0].ocrText, "统一入口");
+  assert.equal(saved.videos[0].summary.visualFindings.length, 1);
+  assert.equal(saved.videos[0].summary.visualFindings[0].timestamp, "00:12");
   assert.equal(saved.knowledge.length, 1);
+  assert.deepEqual(saved.knowledge[0].evidenceFrameIds, ["frame-12-evidence"]);
   assert.equal(saved.tasks.length, 1);
   assert.equal(saved.inbox[0].status, "planned");
   assert.match(saved.activity.at(-1)?.detail ?? "", /1 张知识卡片 · 1 个任务/);
+  const weekly = buildWeeklySnapshot(saved, new Date(saved.videos[0].createdAt));
+  assert.equal(weekly.sourceStats.visualFrames, 1);
+  assert.equal(weekly.days.reduce((total, day) => total + day.visualFrames, 0), 1);
+  assert.equal(weekly.videos[0].visualFrameCount, 1);
   const restored = parseWorkbenchState(JSON.stringify(saved));
   assert.equal(restored.videos[0].summary.oneSentence, saved.videos[0].summary.oneSentence);
   assert.equal(restored.videos[0].transcriptSource, "local-whisper");
+  assert.equal(restored.videos[0].hasVideo, true);
+  assert.equal(restored.videos[0].visualEvidence.length, 1);
+  assert.deepEqual(restored.knowledge[0].evidenceFrameIds, ["frame-12-evidence"]);
   const localRestored = parseWorkbenchState(JSON.stringify({
     ...saved,
     videos: [{ ...saved.videos[0], url: "local-media://source-1", platform: "local", localFileName: "课程录音.wav" }],
@@ -138,7 +165,7 @@ test("grounded knowledge answers persist with citations and remain actionable", 
     suggestedTask: { title: "整理最近三条学习输入", note: "只做归入口，不做复杂分类" },
   });
 
-  assert.equal(answered.version, 9);
+  assert.equal(answered.version, 10);
   assert.equal(answered.knowledgeInquiries.length, 1);
   assert.equal(answered.knowledgeInquiries[0].sources[0].cardTitle, "渐进整理");
   assert.equal(answered.activity.at(-1)?.label, "保存一次知识问答");
@@ -193,7 +220,7 @@ test("weekly reviews upsert by week and survive local state migration", () => {
   assert.equal(updated.weeklyReviews[0].headline, "一周只有一个方向");
   assert.equal(updated.activity.at(-1)?.label, "更新本周回顾");
   const restored = parseWorkbenchState(JSON.stringify(updated));
-  assert.equal(restored.version, 9);
+  assert.equal(restored.version, 10);
   assert.equal(restored.weeklyReviews[0].suggestedActions[0].title, "完成一个未完成任务");
 });
 
@@ -243,7 +270,7 @@ test("study cards stay grounded, schedule real reviews, and survive migration", 
     sources: [{ cardId: source.id, cardTitle: source.title, sourceTitle: source.sourceTitle, sourceUrl: source.sourceUrl }],
   }]);
 
-  assert.equal(saved.version, 9);
+  assert.equal(saved.version, 10);
   assert.equal(saved.study.cards.length, 2);
   assert.equal(saved.study.cards[0].sources[0].cardTitle, source.title);
   assert.equal(saved.study.cards[0].sources[0].sourceUrl, source.sourceUrl);
@@ -272,7 +299,7 @@ test("study cards stay grounded, schedule real reviews, and survive migration", 
   const suspended = toggleStudyCardSuspended(afterGood, cardIds[0]);
   assert.equal(suspended.study.cards.find((card) => card.id === cardIds[0])?.suspended, true);
   const restored = parseWorkbenchState(JSON.stringify(suspended));
-  assert.equal(restored.version, 9);
+  assert.equal(restored.version, 10);
   assert.equal(restored.study.attempts.length, 2);
   assert.equal(restored.study.cards[0].sources[0].cardTitle, source.title);
 
@@ -311,7 +338,7 @@ test("personal routes turn confirmed phase actions into tasks or habits", () => 
     ],
   });
 
-  assert.equal(saved.version, 9);
+  assert.equal(saved.version, 10);
   assert.equal(saved.routes.length, 1);
   const route = saved.routes[0];
   const [taskAction, habitAction] = route.phases[0].actions;
@@ -407,7 +434,7 @@ test("personal business boards preserve typed records across schema edits and mi
     ],
   });
 
-  assert.equal(saved.version, 9);
+  assert.equal(saved.version, 10);
   assert.equal(saved.boards.length, 1);
   assert.equal(saved.boards[0].linkedRouteId, routeId);
   const board = saved.boards[0];
@@ -438,7 +465,7 @@ test("personal business boards preserve typed records across schema edits and mi
   assert.equal(edited.boards[0].records.length, 1);
   assert.equal(edited.boards[0].records[0].title, "工作台路线介绍");
   const restored = parseWorkbenchState(JSON.stringify(edited));
-  assert.equal(restored.version, 9);
+  assert.equal(restored.version, 10);
   assert.equal(restored.boards[0].records[0].values[platformField.id], "B站");
 
   const withTask = createBoardRecordTask(restored, board.id, record.id);
@@ -595,7 +622,7 @@ test("creator studio keeps inspiration grounded and closes the loop through task
   assert.equal(weekly.sourceStats.creatorIdeas, 1);
   assert.equal(weekly.sourceStats.creatorReviews, 1);
   const restored = parseWorkbenchState(JSON.stringify(reviewed));
-  assert.equal(restored.version, 9);
+  assert.equal(restored.version, 10);
   assert.equal(restored.creator.ideas[0].linkedTaskId, tasked.tasks.at(-1)?.id);
   assert.equal(restored.creator.reviews[0].ideaId, idea.id);
 

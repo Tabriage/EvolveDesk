@@ -1,6 +1,9 @@
 const DATABASE_NAME = "evolve-desk.sources.v1";
 const STORE_NAME = "transcripts";
+const VISUAL_STORE_NAME = "visualFrames";
 const MAX_TRANSCRIPT_CHARS = 100_000;
+const MAX_VISUAL_FRAMES = 8;
+const MAX_FRAME_DATA_CHARS = 620_000;
 
 function requestResult(request) {
   return new Promise((resolve, reject) => {
@@ -11,10 +14,11 @@ function requestResult(request) {
 
 async function openDatabase() {
   if (!globalThis.indexedDB) return null;
-  const request = globalThis.indexedDB.open(DATABASE_NAME, 1);
+  const request = globalThis.indexedDB.open(DATABASE_NAME, 2);
   request.addEventListener("upgradeneeded", () => {
     const database = request.result;
     if (!database.objectStoreNames.contains(STORE_NAME)) database.createObjectStore(STORE_NAME, { keyPath: "sourceKey" });
+    if (!database.objectStoreNames.contains(VISUAL_STORE_NAME)) database.createObjectStore(VISUAL_STORE_NAME, { keyPath: "sourceKey" });
   }, { once: true });
   return requestResult(request);
 }
@@ -53,6 +57,48 @@ export async function loadTranscript(sourceKey) {
     const record = await requestResult(transaction.objectStore(STORE_NAME).get(key));
     await transactionDone(transaction);
     return typeof record?.transcript === "string" ? record.transcript.slice(0, MAX_TRANSCRIPT_CHARS) : "";
+  } finally {
+    database.close();
+  }
+}
+
+export async function saveVisualFrames(sourceKey, value) {
+  const key = String(sourceKey || "").trim().slice(0, 2_000);
+  const seen = new Set();
+  const frames = (Array.isArray(value) ? value : []).slice(0, MAX_VISUAL_FRAMES).map((frame) => ({
+    id: String(frame?.id || "").trim().slice(0, 100),
+    imageDataUrl: String(frame?.imageDataUrl || ""),
+  })).filter((frame) => {
+    if (!frame.id || seen.has(frame.id) || frame.imageDataUrl.length > MAX_FRAME_DATA_CHARS || !/^data:image\/jpeg;base64,\/9j\/[A-Za-z0-9+/=]*$/.test(frame.imageDataUrl)) return false;
+    seen.add(frame.id);
+    return true;
+  });
+  if (!key || !frames.length) return false;
+  const database = await openDatabase();
+  if (!database) return false;
+  try {
+    const transaction = database.transaction(VISUAL_STORE_NAME, "readwrite");
+    transaction.objectStore(VISUAL_STORE_NAME).put({ sourceKey: key, frames, updatedAt: new Date().toISOString() });
+    await transactionDone(transaction);
+    return true;
+  } finally {
+    database.close();
+  }
+}
+
+export async function loadVisualFrames(sourceKey) {
+  const key = String(sourceKey || "").trim().slice(0, 2_000);
+  if (!key) return [];
+  const database = await openDatabase();
+  if (!database) return [];
+  try {
+    const transaction = database.transaction(VISUAL_STORE_NAME, "readonly");
+    const record = await requestResult(transaction.objectStore(VISUAL_STORE_NAME).get(key));
+    await transactionDone(transaction);
+    return (Array.isArray(record?.frames) ? record.frames : []).slice(0, MAX_VISUAL_FRAMES).map((frame) => ({
+      id: String(frame?.id || "").trim().slice(0, 100),
+      imageDataUrl: String(frame?.imageDataUrl || "").slice(0, MAX_FRAME_DATA_CHARS),
+    })).filter((frame) => frame.id && /^data:image\/jpeg;base64,\/9j\/[A-Za-z0-9+/=]*$/.test(frame.imageDataUrl));
   } finally {
     database.close();
   }

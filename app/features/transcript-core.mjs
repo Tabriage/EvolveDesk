@@ -131,6 +131,30 @@ export function selectTranscriptEvidence(value, question, limit = 12, charLimit 
     .slice(0, Math.max(1, limit));
 }
 
+export function selectVisualEvidence(value, question, limit = 4) {
+  const frames = (Array.isArray(value) ? value : []).filter((frame) => frame?.id && Number.isFinite(frame?.seconds));
+  if (!frames.length) return [];
+  const normalizedQuery = cleanText(question, 600).toLocaleLowerCase("zh-CN");
+  const tokens = queryTokens(normalizedQuery);
+  const ranked = frames.map((frame, index) => {
+    const text = cleanText(`${frame.ocrText || ""} ${frame.modelText || ""} ${frame.observation || ""} ${frame.uncertainty || ""}`, 3_000).toLocaleLowerCase("zh-CN");
+    let score = normalizedQuery && text.includes(normalizedQuery) ? 20 : 0;
+    for (const token of tokens) {
+      const occurrences = text.split(token).length - 1;
+      score += Math.min(occurrences, 4) * (token.length > 2 ? 4 : 2);
+    }
+    return { frame, index, score };
+  }).filter((item) => item.score > 0).sort((left, right) => right.score - left.score || left.index - right.index);
+  const selected = new Map(ranked.slice(0, Math.max(1, limit)).map((item) => [item.frame.id, item.frame]));
+  const structuralIndexes = [0, Math.floor((frames.length - 1) / 2), frames.length - 1];
+  for (const index of structuralIndexes) {
+    if (selected.size >= Math.max(1, limit)) break;
+    const frame = frames[index];
+    if (frame) selected.set(frame.id, frame);
+  }
+  return [...selected.values()].slice(0, Math.max(1, limit));
+}
+
 export function videoTimestampUrl(value, seconds) {
   const safeSeconds = Number.isFinite(seconds) ? Math.max(0, Math.round(seconds)) : null;
   if (safeSeconds === null) return String(value || "");

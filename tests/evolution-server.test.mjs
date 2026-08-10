@@ -33,6 +33,8 @@ test("local source agent exposes health and rejects foreign origins", async (con
   assert.ok(healthPayload.capabilities.includes("video-import"));
   assert.ok(healthPayload.capabilities.includes("local-transcription"));
   assert.ok(healthPayload.capabilities.includes("local-media-upload"));
+  assert.ok(healthPayload.capabilities.includes("visual-evidence"));
+  assert.ok(healthPayload.capabilities.includes("local-ocr"));
 
   const transcriptionStatus = await fetch(`http://127.0.0.1:${port}/api/video/transcription/status`, {
     headers: { origin: "http://localhost:3000" },
@@ -41,6 +43,9 @@ test("local source agent exposes health and rejects foreign origins", async (con
   const transcriptionPayload = await transcriptionStatus.json();
   assert.equal(typeof transcriptionPayload.status.runtime.ready, "boolean");
   assert.equal(typeof transcriptionPayload.status.runtime.localReady, "boolean");
+  assert.equal(typeof transcriptionPayload.status.runtime.visualReady, "boolean");
+  assert.equal(typeof transcriptionPayload.status.runtime.ocrReady, "boolean");
+  assert.ok(Array.isArray(transcriptionPayload.status.runtime.ocrLanguages));
   assert.equal(typeof transcriptionPayload.status.model.ready, "boolean");
   assert.equal(transcriptionPayload.status.downloading, false);
 
@@ -67,6 +72,14 @@ test("local source agent exposes health and rejects foreign origins", async (con
   });
   assert.equal(unsafeTranscription.status, 400);
   assert.match((await unsafeTranscription.json()).error, /当前支持/);
+
+  const unsafeVisual = await fetch(`http://127.0.0.1:${port}/api/video/visual-evidence`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "http://localhost:3000" },
+    body: JSON.stringify({ url: "https://youtube.com.evil.example/watch?v=test", candidates: [0, 30] }),
+  });
+  assert.equal(unsafeVisual.status, 400);
+  assert.match((await unsafeVisual.json()).error, /当前支持/);
 
   const unsafeUpload = await fetch(`http://127.0.0.1:${port}/api/video/upload`, {
     method: "POST",

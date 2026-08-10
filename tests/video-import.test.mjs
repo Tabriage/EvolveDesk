@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   parseVideoUrl,
+  selectVisualTimestamps,
   validateLocalMediaUpload,
   vttToTranscript,
   WHISPER_MODEL,
@@ -16,6 +17,15 @@ test("video importer accepts only explicit supported HTTPS hosts", () => {
   assert.throws(() => parseVideoUrl("http://www.youtube.com/watch?v=abc"), /HTTPS/);
   assert.throws(() => parseVideoUrl("https://youtube.com.evil.example/watch?v=abc"), /当前支持/);
   assert.throws(() => parseVideoUrl("file:///etc/passwd"), /HTTPS/);
+});
+
+test("visual sampling uses transcript time coverage and stays bounded", () => {
+  assert.deepEqual(selectVisualTimestamps(600, [0, 30, 90, 180, 300, 450, 580], 4), [0, 90, 300, 580]);
+  const fallback = selectVisualTimestamps(120, [], 8);
+  assert.ok(fallback.length >= 6 && fallback.length <= 8);
+  assert.equal(new Set(fallback).size, fallback.length);
+  assert.ok(fallback.every((seconds) => seconds >= 0 && seconds < 120));
+  assert.deepEqual(selectVisualTimestamps(1, [], 8), [0]);
 });
 
 test("VTT captions become compact timestamped transcript text", () => {

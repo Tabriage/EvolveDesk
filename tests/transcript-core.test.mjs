@@ -4,6 +4,7 @@ import {
   searchTranscript,
   segmentTranscript,
   selectTranscriptEvidence,
+  selectVisualEvidence,
   timestampToSeconds,
   videoTimestampUrl,
 } from "../app/features/transcript-core.mjs";
@@ -20,6 +21,19 @@ test("timestamped transcript becomes bounded navigable evidence", () => {
   assert.equal(timestampToSeconds("1:02:03"), 3723);
   assert.equal(timestampToSeconds("61:03"), null);
   assert.ok(segments.every((segment) => segment.text.length <= 1440));
+});
+
+test("visual evidence selection prefers matching OCR and keeps structural coverage", () => {
+  const frames = [
+    { id: "f1", seconds: 10, ocrText: "首页", modelText: "", observation: "打开应用首页", uncertainty: "" },
+    { id: "f2", seconds: 40, ocrText: "导出设置", modelText: "PNG", observation: "画面显示导出格式选择", uncertainty: "按钮下半部被遮挡" },
+    { id: "f3", seconds: 90, ocrText: "完成", modelText: "", observation: "显示保存成功", uncertainty: "" },
+  ];
+  const matched = selectVisualEvidence(frames, "如何选择导出格式？", 2);
+  assert.equal(matched[0].id, "f2");
+  assert.equal(matched.length, 2);
+  const structural = selectVisualEvidence(frames, "没有匹配的术语", 3);
+  assert.deepEqual(structural.map((frame) => frame.id), ["f1", "f2", "f3"]);
 });
 
 test("transcript search and question evidence prefer matching text while retaining context", () => {

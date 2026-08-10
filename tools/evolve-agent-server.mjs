@@ -13,6 +13,8 @@ import {
 import {
   downloadWhisperModel,
   discardLocalMedia,
+  extractLocalVisualEvidence,
+  extractVideoVisualEvidence,
   importLocalMedia,
   importVideo,
   transcriptionStatus,
@@ -28,6 +30,7 @@ let videoImportBusy = false;
 let localMediaImportBusy = false;
 let modelDownloadBusy = false;
 let videoTranscriptionBusy = false;
+let visualEvidenceBusy = false;
 
 const outputSchema = z.object({
   title: z.string().min(2).max(80),
@@ -158,6 +161,7 @@ async function currentTranscriptionStatus() {
     ...(await transcriptionStatus()),
     downloading: modelDownloadBusy,
     transcribing: videoTranscriptionBusy,
+    extractingVisuals: visualEvidenceBusy,
   };
 }
 
@@ -183,6 +187,21 @@ async function handleVideoTranscription(body) {
   }
 }
 
+async function handleVisualEvidence(body) {
+  if (visualEvidenceBusy) throw new Error("已有一个视频正在抽取画面，请等待它完成");
+  visualEvidenceBusy = true;
+  try {
+    const candidates = Array.isArray(body.candidates) ? body.candidates.slice(0, 160) : [];
+    return {
+      visualEvidence: body.uploadId
+        ? await extractLocalVisualEvidence(body.uploadId, candidates)
+        : await extractVideoVisualEvidence(body.url, candidates),
+    };
+  } finally {
+    visualEvidenceBusy = false;
+  }
+}
+
 const server = createServer(async (request, response) => {
   let origin = "";
   try {
@@ -196,8 +215,8 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/health") {
       send(response, 200, {
         ok: true,
-        version: "0.6.0",
-        capabilities: ["source-evolution", "video-import", "local-media-upload", "local-transcription"],
+        version: "0.7.0",
+        capabilities: ["source-evolution", "video-import", "local-media-upload", "local-transcription", "visual-evidence", "local-ocr"],
         latest: await latestProposal(),
       }, origin);
       return;
@@ -230,6 +249,10 @@ const server = createServer(async (request, response) => {
       }
       if (url.pathname === "/api/video/transcribe") {
         send(response, 200, await handleVideoTranscription(body), origin);
+        return;
+      }
+      if (url.pathname === "/api/video/visual-evidence") {
+        send(response, 200, await handleVisualEvidence(body), origin);
         return;
       }
       if (url.pathname === "/api/video/upload/discard") {

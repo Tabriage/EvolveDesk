@@ -71,7 +71,7 @@ export function inboxKind(content) {
 
 export function createInitialWorkbench() {
   return {
-    version: 9,
+    version: 10,
     focusTaskId: null,
     tasks: [],
     inbox: [],
@@ -110,6 +110,26 @@ function dedupeRecordIds(items, prefix) {
   });
 }
 
+function sanitizeVisualEvidence(value) {
+  const seen = new Set();
+  return validArray(value).slice(0, 8).map((frame) => {
+    const seconds = Number(frame?.seconds);
+    return {
+      id: cleanText(frame?.id, 100),
+      seconds: Number.isFinite(seconds) ? Math.min(2 * 60 * 60, Math.max(0, Math.round(seconds))) : 0,
+      timestamp: cleanText(frame?.timestamp, 16),
+      ocrText: cleanText(frame?.ocrText, 1_200),
+      modelText: cleanText(frame?.modelText, 1_200),
+      observation: cleanText(frame?.observation, 600),
+      uncertainty: cleanText(frame?.uncertainty, 300),
+    };
+  }).filter((frame) => {
+    if (!frame.id || seen.has(frame.id)) return false;
+    seen.add(frame.id);
+    return true;
+  });
+}
+
 function sanitizeVideoSummary(summary) {
   const value = summary && typeof summary === "object" ? summary : {};
   return {
@@ -132,6 +152,11 @@ function sanitizeVideoSummary(summary) {
       explanation: cleanText(concept?.explanation, 500),
     })).filter((concept) => concept.term && concept.explanation),
     caveats: validArray(value.caveats).slice(0, 6).map((item) => cleanText(item, 300)).filter(Boolean),
+    visualFindings: validArray(value.visualFindings).slice(0, 8).map((finding) => ({
+      frameId: cleanText(finding?.frameId, 100),
+      timestamp: cleanText(finding?.timestamp, 16),
+      observation: cleanText(finding?.observation, 600),
+    })).filter((finding) => finding.frameId && finding.observation),
     creatorInsights: {
       hook: cleanText(value.creatorInsights?.hook, 300),
       structure: cleanText(value.creatorInsights?.structure, 500),
@@ -145,7 +170,24 @@ function sanitizeVideoSummary(summary) {
       title: cleanText(card?.title, 120),
       content: cleanText(card?.content, 1_200),
       tags: validArray(card?.tags).slice(0, 5).map((tag) => cleanText(tag, 24)).filter(Boolean),
+      evidenceFrameIds: [...new Set(validArray(card?.evidenceFrameIds).slice(0, 4).map((id) => cleanText(id, 100)).filter(Boolean))],
     })).filter((card) => card.title && card.content),
+  };
+}
+
+function bindSummaryVisualEvidence(summary, frames) {
+  const value = sanitizeVideoSummary(summary);
+  const frameById = new Map(frames.map((frame) => [frame.id, frame]));
+  return {
+    ...value,
+    visualFindings: value.visualFindings.filter((finding) => frameById.has(finding.frameId)).map((finding) => ({
+      ...finding,
+      timestamp: frameById.get(finding.frameId).timestamp,
+    })),
+    cards: value.cards.map((card) => ({
+      ...card,
+      evidenceFrameIds: card.evidenceFrameIds.filter((id) => frameById.has(id)),
+    })),
   };
 }
 
@@ -266,6 +308,7 @@ function sanitizeWeeklyReview(review) {
       plannedItems: safeCount(stats.plannedItems),
       habitCheckins: safeCount(stats.habitCheckins),
       videos: safeCount(stats.videos),
+      visualFrames: safeCount(stats.visualFrames),
       knowledgeCards: safeCount(stats.knowledgeCards),
       knowledgeInquiries: safeCount(stats.knowledgeInquiries),
       creatorIdeas: safeCount(stats.creatorIdeas),
@@ -596,23 +639,31 @@ export function parseWorkbenchState(raw) {
       createdAt: cleanText(entry.createdAt, 40) || new Date().toISOString(),
       source: entry.source === "agent" ? "agent" : "human",
     })).filter((entry) => entry.label);
-    const videos = validArray(parsed.videos).slice(-MAX_VIDEOS).map((video) => ({
-      id: cleanText(video.id, 100) || createId("video"),
-      url: cleanText(video.url, 2_000),
-      platform: ["youtube", "bilibili", "xiaohongshu", "douyin", "local"].includes(video.platform) ? video.platform : "youtube",
-      sourceId: cleanText(video.sourceId, 120),
-      title: cleanText(video.title, 240),
-      author: cleanText(video.author, 120),
-      description: cleanText(video.description, 800),
-      duration: Number.isFinite(video.duration) ? Math.max(0, Math.round(video.duration)) : null,
-      thumbnail: cleanText(video.thumbnail, 2_000),
-      localFileName: cleanText(video.localFileName, 180),
-      transcriptSource: video.transcriptSource === "manual"
-        ? "manual"
-        : video.transcriptSource === "local-whisper" ? "local-whisper" : "platform",
-      summary: sanitizeVideoSummary(video.summary),
-      createdAt: cleanText(video.createdAt, 40) || new Date().toISOString(),
-    })).filter((video) => video.url && video.title && video.summary.oneSentence);
+    const videos = validArray(parsed.videos).slice(-MAX_VIDEOS).map((video) => {
+      const visualEvidence = sanitizeVisualEvidence(video.visualEvidence);
+      return {
+        id: cleanText(video.id, 100) || createId("video"),
+        url: cleanText(video.url, 2_000),
+        platform: ["youtube", "bilibili", "xiaohongshu", "douyin", "local"].includes(video.platform) ? video.platform : "youtube",
+        sourceId: cleanText(video.sourceId, 120),
+        title: cleanText(video.title, 240),
+        author: cleanText(video.author, 120),
+        description: cleanText(video.description, 800),
+        duration: Number.isFinite(video.duration) ? Math.max(0, Math.round(video.duration)) : null,
+        thumbnail: cleanText(video.thumbnail, 2_000),
+        hasVideo: typeof video.hasVideo === "boolean" ? video.hasVideo : video.platform !== "local" || /\.(?:mkv|mov|mp4|webm)$/i.test(cleanText(video.localFileName, 180)),
+        width: Number.isFinite(video.width) ? Math.max(0, Math.round(video.width)) : 0,
+        height: Number.isFinite(video.height) ? Math.max(0, Math.round(video.height)) : 0,
+        localFileName: cleanText(video.localFileName, 180),
+        transcriptSource: video.transcriptSource === "manual"
+          ? "manual"
+          : video.transcriptSource === "local-whisper" ? "local-whisper" : "platform",
+        visualEvidence,
+        summary: bindSummaryVisualEvidence(video.summary, visualEvidence),
+        createdAt: cleanText(video.createdAt, 40) || new Date().toISOString(),
+      };
+    }).filter((video) => video.url && video.title && video.summary.oneSentence);
+    const visualIdsBySource = new Map(videos.map((video) => [video.url, new Set(video.visualEvidence.map((frame) => frame.id))]));
     const knowledge = validArray(parsed.knowledge).slice(-MAX_KNOWLEDGE_CARDS).map((card) => ({
       id: cleanText(card.id, 100) || createId("knowledge"),
       title: cleanText(card.title, 120),
@@ -620,6 +671,7 @@ export function parseWorkbenchState(raw) {
       tags: validArray(card.tags).slice(0, 5).map((tag) => cleanText(tag, 24)).filter(Boolean),
       sourceUrl: cleanText(card.sourceUrl, 2_000),
       sourceTitle: cleanText(card.sourceTitle, 240),
+      evidenceFrameIds: [...new Set(validArray(card.evidenceFrameIds).slice(0, 4).map((id) => cleanText(id, 100)).filter((id) => visualIdsBySource.get(cleanText(card.sourceUrl, 2_000))?.has(id)))],
       createdAt: cleanText(card.createdAt, 40) || new Date().toISOString(),
     })).filter((card) => card.title && card.content);
     const knowledgeInquiries = validArray(parsed.knowledgeInquiries)
@@ -676,7 +728,7 @@ export function parseWorkbenchState(raw) {
       reviews: creatorBase.reviews.map((review) => creatorBase.ideas.some((idea) => idea.id === review.ideaId) ? review : { ...review, ideaId: null }),
     };
     const focusTaskId = tasks.some((task) => task.id === parsed.focusTaskId) ? parsed.focusTaskId : null;
-    return { version: 9, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries, weeklyReviews, routes, boards, creator, study };
+    return { version: 10, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries, weeklyReviews, routes, boards, creator, study };
   } catch {
     return createInitialWorkbench();
   }
@@ -781,7 +833,8 @@ export function applyAgentActions(state, actions, planTitle = "Agent 整理工�
 }
 
 export function saveVideoSummary(state, input, createTasks = false) {
-  const summary = sanitizeVideoSummary(input?.summary);
+  const visualEvidence = sanitizeVisualEvidence(input?.visualEvidence);
+  const summary = bindSummaryVisualEvidence(input?.summary, visualEvidence);
   const url = cleanText(input?.url, 2_000);
   const title = cleanText(input?.title, 240);
   if (!url || !title || !summary.oneSentence) return state;
@@ -797,16 +850,20 @@ export function saveVideoSummary(state, input, createTasks = false) {
     description: cleanText(input?.description, 800),
     duration: Number.isFinite(input?.duration) ? Math.max(0, Math.round(input.duration)) : null,
     thumbnail: cleanText(input?.thumbnail, 2_000),
+    hasVideo: Boolean(input?.hasVideo),
+    width: Number.isFinite(input?.width) ? Math.max(0, Math.round(input.width)) : 0,
+    height: Number.isFinite(input?.height) ? Math.max(0, Math.round(input.height)) : 0,
     localFileName: cleanText(input?.localFileName, 180),
     transcriptSource: input?.transcriptSource === "manual"
       ? "manual"
       : input?.transcriptSource === "local-whisper" ? "local-whisper" : "platform",
+    visualEvidence,
     summary,
     createdAt: existing?.createdAt || now,
   };
   let next = {
     ...state,
-    version: 9,
+    version: 10,
     videos: [...state.videos.filter((item) => item.url !== url), video].slice(-MAX_VIDEOS),
     inbox: state.inbox.map((item) => item.content === url || item.content === cleanText(input?.capturedUrl, 2_000) ? { ...item, status: "planned" } : item),
   };
@@ -860,7 +917,7 @@ export function saveKnowledgeInquiry(state, input) {
   if (!inquiry.question || !inquiry.answer) return state;
   return {
     ...state,
-    version: 9,
+    version: 10,
     knowledgeInquiries: [...validArray(state.knowledgeInquiries), inquiry].slice(-MAX_KNOWLEDGE_INQUIRIES),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -913,7 +970,7 @@ export function saveStudyCards(state, drafts, actor = "agent") {
   if (!savedCount) return state;
   return {
     ...state,
-    version: 9,
+    version: 10,
     study: { ...study, cards },
     activity: [...state.activity, {
       id: createId("activity"),
@@ -986,7 +1043,7 @@ export function rateStudyCard(state, cardId, rating, selectedAnswer = "", review
   });
   return {
     ...state,
-    version: 9,
+    version: 10,
     study: {
       cards: study.cards.map((item) => item.id === card.id ? updatedCard : item),
       attempts: [...study.attempts, attempt].slice(-MAX_STUDY_ATTEMPTS),
@@ -1008,7 +1065,7 @@ export function removeStudyCard(state, cardId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 9,
+    version: 10,
     study: {
       cards: study.cards.filter((item) => item.id !== cardId),
       attempts: study.attempts.filter((attempt) => attempt.cardId !== cardId),
@@ -1031,7 +1088,7 @@ export function toggleStudyCardSuspended(state, cardId) {
   const suspended = !card.suspended;
   return {
     ...state,
-    version: 9,
+    version: 10,
     study: { ...study, cards: study.cards.map((item) => item.id === cardId ? { ...item, suspended, updatedAt: now } : item) },
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1084,6 +1141,7 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
       inboxCaptured: 0,
       habitCheckins: 0,
       videos: 0,
+      visualFrames: 0,
       knowledgeCards: 0,
       inquiries: 0,
       creatorIdeas: 0,
@@ -1115,7 +1173,11 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
   for (const task of tasksCreated) dayForTimestamp(task.createdAt).tasksCreated += 1;
   for (const task of completedTasks) dayForTimestamp(task.completedAt).tasksCompleted += 1;
   for (const item of capturedItems) dayForTimestamp(item.createdAt).inboxCaptured += 1;
-  for (const video of videos) dayForTimestamp(video.createdAt).videos += 1;
+  for (const video of videos) {
+    const day = dayForTimestamp(video.createdAt);
+    day.videos += 1;
+    day.visualFrames += validArray(video.visualEvidence).length;
+  }
   for (const card of knowledgeCards) dayForTimestamp(card.createdAt).knowledgeCards += 1;
   for (const inquiry of inquiries) dayForTimestamp(inquiry.createdAt).inquiries += 1;
   for (const idea of creatorIdeas) dayForTimestamp(idea.createdAt).creatorIdeas += 1;
@@ -1135,7 +1197,7 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
   }
   for (const day of days) {
     day.total = day.tasksCreated + day.tasksCompleted + day.inboxCaptured + day.habitCheckins
-      + day.videos + day.knowledgeCards + day.inquiries + day.creatorIdeas + day.creatorReviews
+      + day.videos + day.visualFrames + day.knowledgeCards + day.inquiries + day.creatorIdeas + day.creatorReviews
       + day.studyCardsCreated + day.studyReviews;
   }
   const sourceStats = {
@@ -1145,6 +1207,7 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
     plannedItems: capturedItems.filter((item) => item.status === "planned").length,
     habitCheckins,
     videos: videos.length,
+    visualFrames: videos.reduce((total, video) => total + validArray(video.visualEvidence).length, 0),
     knowledgeCards: knowledgeCards.length,
     knowledgeInquiries: inquiries.length,
     creatorIdeas: creatorIdeas.length,
@@ -1163,7 +1226,13 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
     createdTasks: tasksCreated.slice(-12).map(({ id, title, note, done, createdAt }) => ({ id, title, note, done, createdAt })),
     openTasks: validArray(state.tasks).filter((task) => !task.done).slice(-8).map(({ id, title, note, priority, createdAt }) => ({ id, title, note, priority, createdAt })),
     capturedItems: capturedItems.slice(-12).map(({ id, content, kind, status, createdAt }) => ({ id, content, kind, status, createdAt })),
-    videos: videos.slice(-8).map(({ id, title, platform, createdAt }) => ({ id, title, platform, createdAt })),
+    videos: videos.slice(-8).map(({ id, title, platform, createdAt, visualEvidence }) => ({
+      id,
+      title,
+      platform,
+      createdAt,
+      visualFrameCount: validArray(visualEvidence).length,
+    })),
     knowledgeCards: knowledgeCards.slice(-12).map(({ id, title, tags, sourceTitle, createdAt }) => ({ id, title, tags, sourceTitle, createdAt })),
     inquiries: inquiries.slice(-8).map(({ id, question, answerable, sources, createdAt }) => ({
       id,
@@ -1193,7 +1262,7 @@ export function saveWeeklyReview(state, input) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 9,
+    version: 10,
     weeklyReviews: [
       ...validArray(state.weeklyReviews).filter((item) => item.weekKey !== review.weekKey),
       review,
@@ -1222,7 +1291,7 @@ export function savePersonalRoute(state, input) {
   const isUpdate = Boolean(existing);
   return {
     ...state,
-    version: 9,
+    version: 10,
     routes: [...validArray(state.routes).filter((item) => item.id !== route.id), route].slice(-MAX_PERSONAL_ROUTES),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1282,7 +1351,7 @@ export function activateRouteAction(state, routeId, phaseId, actionId, recordAct
     createdAt: updatedAt,
     source: "agent",
   }].slice(-MAX_ACTIVITY) : next.activity;
-  return { ...next, version: 9, routes, activity };
+  return { ...next, version: 10, routes, activity };
 }
 
 export function completeRoutePhase(state, routeId, phaseId) {
@@ -1292,7 +1361,7 @@ export function completeRoutePhase(state, routeId, phaseId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 9,
+    version: 10,
     routes: state.routes.map((item) => item.id !== route.id ? item : {
       ...item,
       updatedAt: now,
@@ -1314,7 +1383,7 @@ export function archivePersonalRoute(state, routeId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 9,
+    version: 10,
     routes: state.routes.map((item) => item.id === routeId ? { ...item, archivedAt: now, updatedAt: now } : item),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1345,7 +1414,7 @@ export function savePersonalBoard(state, input) {
   if (!board.name || !board.purpose || board.statuses.length < 2 || !board.fields.length) return state;
   return {
     ...state,
-    version: 9,
+    version: 10,
     boards: [...validArray(state.boards).filter((item) => item.id !== board.id), board].slice(-MAX_PERSONAL_BOARDS),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1375,7 +1444,7 @@ export function addBoardRecord(state, boardId, input, recordActivity = true) {
   };
   return {
     ...state,
-    version: 9,
+    version: 10,
     boards: state.boards.map((item) => item.id === board.id ? { ...item, updatedAt: now, records: [...item.records, record] } : item),
     activity: recordActivity ? [...state.activity, {
       id: createId("activity"),
@@ -1404,7 +1473,7 @@ export function updateBoardRecord(state, boardId, recordId, input, recordActivit
   };
   return {
     ...state,
-    version: 9,
+    version: 10,
     boards: state.boards.map((item) => item.id === board.id ? {
       ...item,
       updatedAt: now,
@@ -1427,7 +1496,7 @@ export function removeBoardRecord(state, boardId, recordId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 9,
+    version: 10,
     boards: state.boards.map((item) => item.id === board.id ? {
       ...item,
       updatedAt: now,
@@ -1463,7 +1532,7 @@ export function createBoardRecordTask(state, boardId, recordId, recordActivity =
   const now = new Date().toISOString();
   next = {
     ...next,
-    version: 9,
+    version: 10,
     boards: next.boards.map((item) => item.id === board.id ? {
       ...item,
       updatedAt: now,
@@ -1489,7 +1558,7 @@ export function archivePersonalBoard(state, boardId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 9,
+    version: 10,
     boards: state.boards.map((item) => item.id === boardId ? { ...item, archivedAt: now, updatedAt: now } : item),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1507,7 +1576,7 @@ export function saveCreatorProfile(state, input) {
   if (!profile.niche && !profile.audience && !profile.voice && !profile.platforms.length) return state;
   return {
     ...state,
-    version: 9,
+    version: 10,
     creator: { ...creator, profile },
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1526,7 +1595,7 @@ export function addCreatorSignal(state, input) {
   if (!signal.title || !signal.note) return state;
   return {
     ...state,
-    version: 9,
+    version: 10,
     creator: { ...creator, signals: [...creator.signals, signal].slice(-MAX_CREATOR_SIGNALS) },
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1545,7 +1614,7 @@ export function removeCreatorSignal(state, signalId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 9,
+    version: 10,
     creator: { ...creator, signals: creator.signals.filter((item) => item.id !== signalId) },
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1610,7 +1679,7 @@ export function saveCreatorIdea(state, input) {
   if (!idea.title || !idea.promise || !idea.hook || !idea.angle || !idea.steps.length) return state;
   return {
     ...state,
-    version: 9,
+    version: 10,
     creator: { ...creator, ideas: [...creator.ideas.filter((item) => item.id !== idea.id), idea].slice(-MAX_CREATOR_IDEAS) },
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1640,7 +1709,7 @@ export function updateCreatorIdea(state, ideaId, input, recordActivity = true) {
   if (nextIdea.status === idea.status && nextIdea.steps.every((step, index) => step.done === idea.steps[index]?.done)) return state;
   return {
     ...state,
-    version: 9,
+    version: 10,
     creator: { ...creator, ideas: creator.ideas.map((item) => item.id === idea.id ? nextIdea : item) },
     activity: recordActivity ? [...state.activity, {
       id: createId("activity"),
@@ -1673,7 +1742,7 @@ export function createCreatorIdeaTask(state, ideaId, recordActivity = true) {
   const nextCreator = sanitizeCreatorStudio(next.creator);
   next = {
     ...next,
-    version: 9,
+    version: 10,
     creator: {
       ...nextCreator,
       ideas: nextCreator.ideas.map((item) => item.id === idea.id ? {
@@ -1727,7 +1796,7 @@ export function addCreatorIdeaToBoard(state, ideaId, boardId) {
   const nextCreator = sanitizeCreatorStudio(next.creator);
   return {
     ...next,
-    version: 9,
+    version: 10,
     creator: {
       ...nextCreator,
       ideas: nextCreator.ideas.map((item) => item.id === idea.id ? { ...item, linkedBoardId: board.id, linkedBoardRecordId: record.id, updatedAt: now } : item),
@@ -1749,7 +1818,7 @@ export function removeCreatorIdea(state, ideaId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 9,
+    version: 10,
     creator: {
       ...creator,
       ideas: creator.ideas.filter((item) => item.id !== ideaId),
@@ -1782,7 +1851,7 @@ export function saveCreatorReview(state, input) {
   if (!review.title || !review.platform || !review.publishedAt || !hasEvidence) return state;
   return {
     ...state,
-    version: 9,
+    version: 10,
     creator: {
       ...creator,
       ideas: creator.ideas.map((idea) => idea.id === ideaId ? { ...idea, status: "published", updatedAt: now } : idea),
@@ -1805,7 +1874,7 @@ export function removeCreatorReview(state, reviewId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 9,
+    version: 10,
     creator: { ...creator, reviews: creator.reviews.filter((item) => item.id !== reviewId) },
     activity: [...state.activity, {
       id: createId("activity"),

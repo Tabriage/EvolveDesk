@@ -212,6 +212,29 @@ test("study card generator requires selected knowledge before calling a model", 
   assert.match((await response.json()).error, /至少选择一张有内容的知识卡片/);
 });
 
+test("visual Agent accepts only bounded locally extracted JPEG evidence", async () => {
+  const worker = await createWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/agent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "analyze-video-frames",
+        baseURL: "http://localhost:62783/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        video: { title: "教程视频" },
+        frames: [{ id: "forged-frame", seconds: 12, timestamp: "00:12", imageDataUrl: "https://example.com/frame.jpg" }],
+      }),
+    }),
+    env,
+    context,
+  );
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /本机抽取的有效画面/);
+});
+
 test("video summary endpoint refuses to infer from title without transcript evidence", async () => {
   const worker = await createWorker();
   const response = await worker.fetch(

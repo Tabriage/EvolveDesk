@@ -11,6 +11,8 @@ const execFileAsync = promisify(execFile);
 const MAX_TRANSCRIPT_CHARS = 100_000;
 const MAX_VIDEO_SECONDS = 2 * 60 * 60;
 const MAX_AUDIO_BYTES = 500 * 1024 * 1024;
+const MAX_VISUAL_FRAMES = 8;
+const MAX_FRAME_BYTES = 450 * 1024;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MODEL_DIRECTORY = join(ROOT, ".evolve", "models");
 const UPLOAD_DIRECTORY = join(ROOT, ".evolve", "uploads");
@@ -90,7 +92,7 @@ async function probeLocalMedia(path) {
   try {
     const { stdout } = await execFileAsync("ffprobe", [
       "-v", "error",
-      "-show_entries", "format=duration:format_tags=title,artist,author:stream=codec_type",
+      "-show_entries", "format=duration:format_tags=title,artist,author:stream=codec_type,width,height",
       "-of", "json",
       path,
     ], { timeout: 30_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true });
@@ -102,10 +104,14 @@ async function probeLocalMedia(path) {
     const duration = Number(payload.format?.duration);
     if (!Number.isFinite(duration) || duration <= 0) throw new Error("无法读取本地媒体时长");
     if (duration > MAX_VIDEO_SECONDS) throw new Error("本地音视频最长支持两小时");
+    const videoStream = streams.find((stream) => stream?.codec_type === "video");
     return {
       duration: Math.round(duration),
       title: cleanText(payload.format?.tags?.title, 240),
       author: cleanText(payload.format?.tags?.artist || payload.format?.tags?.author, 120),
+      hasVideo: Boolean(videoStream),
+      width: Number.isFinite(videoStream?.width) ? Math.max(0, Math.round(videoStream.width)) : 0,
+      height: Number.isFinite(videoStream?.height) ? Math.max(0, Math.round(videoStream.height)) : 0,
     };
   } catch (error) {
     if (error?.code === "ENOENT") throw new Error("缺少 ffprobe，请先安装 ffmpeg");
@@ -145,6 +151,9 @@ export async function importLocalMedia(stream, metadata) {
       description: `本地文件 · ${file.originalName}`,
       duration: probed.duration,
       thumbnail: "",
+      hasVideo: probed.hasVideo,
+      width: probed.width,
+      height: probed.height,
       transcript: null,
       transcriptSource: "unavailable",
       importedAt: new Date().toISOString(),
@@ -195,15 +204,45 @@ async function commandAvailable(command, args) {
   }
 }
 
-export async function transcriptionStatus() {
-  const [whisper, ffmpeg, ytDlp, model] = await Promise.all([
-    commandAvailable("whisper-cli", ["--version"]),
+async function visualRuntimeStatus() {
+  const [ffmpeg, ytDlp, tesseract] = await Promise.all([
     commandAvailable("ffmpeg", ["-version"]),
     commandAvailable("yt-dlp", ["--version"]),
+    commandAvailable("tesseract", ["--version"]),
+  ]);
+  let ocrLanguages = [];
+  if (tesseract) {
+    try {
+      const { stdout } = await execFileAsync("tesseract", ["--list-langs"], { timeout: 8_000, maxBuffer: 512 * 1024, windowsHide: true });
+      const available = new Set(String(stdout || "").split(/\r?\n/).map((line) => line.trim()));
+      ocrLanguages = ["chi_sim", "chi_tra", "eng"].filter((language) => available.has(language));
+    } catch {
+      ocrLanguages = [];
+    }
+  }
+  return {
+    ffmpeg,
+    ytDlp,
+    tesseract,
+    ocrLanguages,
+    visualReady: ffmpeg,
+    ocrReady: tesseract && ocrLanguages.length > 0,
+  };
+}
+
+export async function transcriptionStatus() {
+  const [whisper, visualRuntime, model] = await Promise.all([
+    commandAvailable("whisper-cli", ["--version"]),
+    visualRuntimeStatus(),
     modelStatus(),
   ]);
   return {
-    runtime: { whisper, ffmpeg, ytDlp, ready: whisper && ffmpeg && ytDlp, localReady: whisper && ffmpeg },
+    runtime: {
+      whisper,
+      ...visualRuntime,
+      ready: whisper && visualRuntime.ffmpeg && visualRuntime.ytDlp,
+      localReady: whisper && visualRuntime.ffmpeg,
+    },
     model: {
       name: WHISPER_MODEL.name,
       filename: WHISPER_MODEL.filename,
@@ -368,6 +407,9 @@ export async function importVideo(value) {
       description: cleanText(metadata.description, 800),
       duration: Number.isFinite(metadata.duration) ? Math.max(0, Math.round(metadata.duration)) : null,
       thumbnail: cleanText(metadata.thumbnail, 2_000),
+      hasVideo: true,
+      width: Number.isFinite(metadata.width) ? Math.max(0, Math.round(metadata.width)) : 0,
+      height: Number.isFinite(metadata.height) ? Math.max(0, Math.round(metadata.height)) : 0,
       transcript: transcript || null,
       transcriptSource: transcript ? "platform" : "unavailable",
       importedAt: new Date().toISOString(),
@@ -379,6 +421,171 @@ export async function importVideo(value) {
   } finally {
     await rm(temporary, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+function frameTimestamp(seconds) {
+  const safe = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const rest = safe % 60;
+  return hours
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`
+    : `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+}
+
+export function selectVisualTimestamps(duration, candidates = [], maxFrames = MAX_VISUAL_FRAMES) {
+  const safeDuration = Math.min(MAX_VIDEO_SECONDS, Math.max(1, Math.round(Number(duration) || 1)));
+  const limit = Math.min(MAX_VISUAL_FRAMES, Math.max(1, Math.round(Number(maxFrames) || MAX_VISUAL_FRAMES)));
+  const latest = Math.max(0, safeDuration - 1);
+  const uniqueCandidates = [...new Set((Array.isArray(candidates) ? candidates : [])
+    .map((value) => Math.min(latest, Math.max(0, Math.round(Number(value)))))
+    .filter((value) => Number.isFinite(value)))]
+    .sort((left, right) => left - right);
+  const selected = [];
+  if (uniqueCandidates.length) {
+    const count = Math.min(limit, uniqueCandidates.length);
+    for (let index = 0; index < count; index += 1) {
+      const position = count === 1 ? 0 : Math.round(index * (uniqueCandidates.length - 1) / (count - 1));
+      selected.push(uniqueCandidates[position]);
+    }
+  }
+  const fallbackFractions = [0.06, 0.18, 0.32, 0.48, 0.64, 0.8, 0.94, 0.99];
+  for (const fraction of fallbackFractions) {
+    if (selected.length >= limit) break;
+    const value = Math.min(latest, Math.max(0, Math.round(safeDuration * fraction)));
+    if (!selected.some((current) => Math.abs(current - value) < Math.min(3, safeDuration / 10))) selected.push(value);
+  }
+  if (!selected.length) selected.push(0);
+  return [...new Set(selected)].sort((left, right) => left - right).slice(0, limit);
+}
+
+async function extractFrameImage(sourcePath, outputPath, seconds) {
+  const render = async (width, quality) => {
+    await rm(outputPath, { force: true }).catch(() => {});
+    await execFileAsync("ffmpeg", [
+      "-nostdin",
+      "-hide_banner",
+      "-loglevel", "error",
+      "-y",
+      "-ss", String(seconds),
+      "-i", sourcePath,
+      "-map", "0:v:0",
+      "-frames:v", "1",
+      "-vf", `scale=${width}:-2:force_original_aspect_ratio=decrease`,
+      "-q:v", String(quality),
+      outputPath,
+    ], { timeout: 60_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true });
+  };
+  await render(960, 5);
+  let image = await readFile(outputPath);
+  if (image.length > MAX_FRAME_BYTES) {
+    await render(720, 8);
+    image = await readFile(outputPath);
+  }
+  if (!image.length || image.length > MAX_FRAME_BYTES) throw new Error("关键帧图片超过本地安全上限");
+  return image;
+}
+
+async function recognizeFrameText(path, languages) {
+  if (!languages.length) return "";
+  try {
+    const { stdout } = await execFileAsync("tesseract", [path, "stdout", "-l", languages.join("+"), "--psm", "6"], {
+      timeout: 30_000,
+      maxBuffer: 2 * 1024 * 1024,
+      windowsHide: true,
+    });
+    return cleanText(stdout, 1_200);
+  } catch {
+    return "";
+  }
+}
+
+async function extractVisualFramesFromPath(sourcePath, candidates = []) {
+  const runtime = await visualRuntimeStatus();
+  if (!runtime.ffmpeg) throw new Error("缺少 ffmpeg，无法抽取视频画面");
+  const probed = await probeLocalMedia(sourcePath);
+  if (!probed.hasVideo) throw new Error("这个文件只有音频轨道，没有可抽取的画面");
+  const timestamps = selectVisualTimestamps(probed.duration, candidates);
+  const temporary = await mkdtemp(join(tmpdir(), "evolve-frames-"));
+  const frames = [];
+  const seenHashes = new Set();
+  try {
+    for (const seconds of timestamps) {
+      const path = join(temporary, `frame-${String(seconds).padStart(5, "0")}.jpg`);
+      const image = await extractFrameImage(sourcePath, path, seconds);
+      const hash = createHash("sha256").update(image).digest("hex");
+      if (seenHashes.has(hash)) continue;
+      seenHashes.add(hash);
+      const ocrText = runtime.ocrReady ? await recognizeFrameText(path, runtime.ocrLanguages) : "";
+      frames.push({
+        id: `frame-${seconds}-${hash.slice(0, 8)}`,
+        seconds,
+        timestamp: frameTimestamp(seconds),
+        ocrText,
+        imageDataUrl: `data:image/jpeg;base64,${image.toString("base64")}`,
+      });
+    }
+    if (!frames.length) throw new Error("没有从视频中抽取到可用画面");
+    return {
+      frames,
+      ocr: {
+        available: runtime.ocrReady,
+        languages: runtime.ocrLanguages,
+      },
+      duration: probed.duration,
+    };
+  } finally {
+    await rm(temporary, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function downloadedVideoPath(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const source = entries.find((entry) => entry.isFile() && entry.name.startsWith("source.") && !entry.name.endsWith(".part"));
+  if (!source) throw new Error("视频平台没有返回可读取的画面文件");
+  const path = join(directory, source.name);
+  const details = await stat(path);
+  if (!details.size) throw new Error("下载到的视频为空");
+  if (details.size > MAX_AUDIO_BYTES) throw new Error("视频文件超过 500MB 安全上限");
+  return path;
+}
+
+export async function extractVideoVisualEvidence(value, candidates = []) {
+  const target = parseVideoUrl(value);
+  const runtime = await visualRuntimeStatus();
+  if (!runtime.ytDlp) throw new Error("缺少 yt-dlp，无法读取视频画面");
+  if (!runtime.ffmpeg) throw new Error("缺少 ffmpeg，无法抽取视频画面");
+  const temporary = await mkdtemp(join(tmpdir(), "evolve-visual-"));
+  try {
+    await execFileAsync("yt-dlp", [
+      "--no-playlist",
+      "--format", "bestvideo[height<=720]/best[height<=720]/best",
+      "--match-filter", `duration <= ${MAX_VIDEO_SECONDS}`,
+      "--max-filesize", "500M",
+      "--paths", temporary,
+      "--output", "source.%(ext)s",
+      "--no-warnings",
+      "--socket-timeout", "20",
+      "--retries", "2",
+      target.url,
+    ], { timeout: 10 * 60_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
+    return await extractVisualFramesFromPath(await downloadedVideoPath(temporary), candidates);
+  } catch (error) {
+    if (error?.killed || error?.signal === "SIGTERM") throw new Error("画面抽取超时，已清理临时视频");
+    const detail = cleanText(error?.stderr || error?.message, 360);
+    throw new Error(detail ? `画面抽取失败：${detail}` : "画面抽取失败");
+  } finally {
+    await rm(temporary, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+export async function extractLocalVisualEvidence(uploadId, candidates = []) {
+  const id = String(uploadId || "").trim();
+  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("本地文件标识无效，请重新选择文件");
+  await cleanupExpiredUploads();
+  const upload = pendingUploads.get(id);
+  if (!upload) throw new Error("临时文件已经失效，请重新选择本地文件");
+  return extractVisualFramesFromPath(upload.path, candidates);
 }
 
 async function downloadedAudioPath(directory) {

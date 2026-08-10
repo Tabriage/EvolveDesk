@@ -1,21 +1,25 @@
 "use client";
 
 import { FormEvent, useMemo, useState } from "react";
-import { searchTranscript, segmentTranscript, selectTranscriptEvidence, videoTimestampUrl } from "../features/transcript-core.mjs";
+import Image from "next/image";
+import { searchTranscript, segmentTranscript, selectTranscriptEvidence, selectVisualEvidence, videoTimestampUrl } from "../features/transcript-core.mjs";
 import type { TranscriptSegment } from "../features/transcript-core.mjs";
-import type { KnowledgeInquiry } from "../features/workbench-core.mjs";
+import type { KnowledgeInquiry, VisualEvidenceFrame } from "../features/workbench-core.mjs";
 
 type KnowledgeDraft = Omit<KnowledgeInquiry, "id" | "createdAt">;
 type VideoSource = KnowledgeInquiry["sources"][number] & {
+  kind?: "transcript" | "frame";
   timestamp: string | null;
   seconds: number | null;
   text: string;
 };
+type VideoVisualFrame = VisualEvidenceFrame & { imageDataUrl: string; included: boolean };
 type VideoAnswer = Omit<KnowledgeDraft, "sources"> & { sources: VideoSource[] };
 
 type TranscriptStudioProps = {
   transcript: string;
   video: { title: string; url: string; platform: string };
+  visualFrames: VideoVisualFrame[];
   baseURL: string;
   apiKey: string;
   model: string;
@@ -34,6 +38,7 @@ const questionIdeas = [
 export function TranscriptStudio({
   transcript,
   video,
+  visualFrames,
   baseURL,
   apiKey,
   model,
@@ -61,20 +66,21 @@ export function TranscriptStudio({
       return;
     }
     if (!apiKey.trim()) {
-      setMessage("先连接本地模型；只会发送筛选后的字幕片段");
+      setMessage("先连接本地模型；只会发送筛选后的字幕片段与相关画面");
       onNeedSettings();
       return;
     }
     const evidence = selectTranscriptEvidence(transcript, request, 12, 18_000);
-    if (!evidence.length) {
-      setMessage("当前字幕没有可用于回答的片段");
+    const frameEvidence = selectVisualEvidence(visualFrames, request, 4);
+    if (!evidence.length && !frameEvidence.length) {
+      setMessage("当前字幕和画面都没有可用于回答的资料");
       return;
     }
     setBusy(true);
     setAnswer(null);
     setSaved(false);
     setTaskAdded(false);
-    setMessage(`正在核对 ${evidence.length} 段字幕，并验证模型返回的引用…`);
+    setMessage(`正在核对 ${evidence.length} 段字幕与 ${frameEvidence.length} 帧画面，并验证模型返回的引用…`);
     try {
       const response = await fetch("/api/agent", {
         method: "POST",
@@ -87,14 +93,15 @@ export function TranscriptStudio({
           question: request,
           video,
           segments: evidence,
+          frames: frameEvidence,
         }),
       });
       const data = (await response.json()) as { error?: string; answer?: VideoAnswer };
       if (!response.ok || !data.answer) throw new Error(data.error || "模型没有返回视频回答");
       setAnswer({ ...data.answer, question: request });
       setMessage(data.answer.answerable
-        ? `回答已绑定 ${data.answer.sources.length} 个真实字幕片段；保存前不会写入知识记忆`
-        : "相关字幕不足以完整回答，Agent 已保留资料缺口");
+        ? `回答已绑定 ${data.answer.sources.length} 个真实字幕或画面来源；保存前不会写入知识记忆`
+        : "相关字幕与画面不足以完整回答，Agent 已保留资料缺口");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "视频问答失败");
     } finally {
@@ -130,7 +137,7 @@ export function TranscriptStudio({
     <section className="transcript-studio">
       <header>
         <div><p className="eyebrow">时间证据轨 · 当前视频</p><h2>找到原话，再问这一段说明了什么。</h2></div>
-        <span><strong>{segments.length}</strong> 段证据<small>{stored ? "已存浏览器" : "保存总结后持久化"}</small></span>
+        <span><strong>{segments.length}</strong> 段字幕<small>{visualFrames.length ? `另有 ${visualFrames.length} 帧画面` : stored ? "已存浏览器" : "保存总结后持久化"}</small></span>
       </header>
 
       <div className="transcript-studio-grid">
@@ -149,11 +156,11 @@ export function TranscriptStudio({
         </aside>
 
         <main className="video-inquiry-desk">
-          <header><span>Single-source Agent</span><strong>只读当前字幕</strong></header>
+          <header><span>Single-source Agent</span><strong>只读当前字幕与画面</strong></header>
           <div className="video-question-ideas">{questionIdeas.map((idea) => <button key={idea} onClick={() => chooseQuestion(idea)}>{idea}</button>)}</div>
           <form onSubmit={ask}>
             <textarea value={question} onChange={(event) => setQuestion(event.target.value.slice(0, 600))} placeholder="例如：作者建议先做哪三步？分别在哪个时间点说明？" aria-label="向当前视频提问" />
-            <footer><span>{question.length}/600 · 最多发送 12 段相关字幕</span><button disabled={busy || question.trim().length < 4}>{busy ? "正在核对…" : "从视频中回答"}<b>✦</b></button></footer>
+            <footer><span>{question.length}/600 · 最多 12 段字幕 + 4 帧画面</span><button disabled={busy || question.trim().length < 4}>{busy ? "正在核对…" : "从视频中回答"}<b>✦</b></button></footer>
           </form>
 
           {answer ? (
@@ -162,15 +169,16 @@ export function TranscriptStudio({
               <h3>{answer.answer}</h3>
               {answer.keyPoints.length > 0 && <div className="video-answer-points">{answer.keyPoints.map((point, index) => <p key={point}><i>{String(index + 1).padStart(2, "0")}</i>{point}</p>)}</div>}
               {answer.sources.length > 0 && <div className="video-answer-sources"><span>回到原话</span>{answer.sources.map((source) => {
-                const evidence = <><strong>{source.timestamp || source.cardTitle}</strong><p>{source.text}</p></>;
+                const frame = source.kind === "frame" ? visualFrames.find((item) => item.id === source.cardId) : null;
+                const evidence = <>{frame?.imageDataUrl && <Image unoptimized width={184} height={116} src={frame.imageDataUrl} alt={`${source.timestamp || "采样时间"} 的引用画面`} />}<strong>{source.timestamp || source.cardTitle}</strong><p>{source.text}</p></>;
                 return sourceIsPlayable && source.seconds !== null
-                  ? <a key={source.cardId} href={videoTimestampUrl(video.url, source.seconds)} target="_blank" rel="noreferrer">{evidence}</a>
-                  : <article key={source.cardId}>{evidence}</article>;
+                  ? <a className={source.kind === "frame" ? "frame-source" : ""} key={`${source.kind}-${source.cardId}`} href={videoTimestampUrl(video.url, source.seconds)} target="_blank" rel="noreferrer">{evidence}</a>
+                  : <article className={source.kind === "frame" ? "frame-source" : ""} key={`${source.kind}-${source.cardId}`}>{evidence}</article>;
               })}</div>}
               {answer.gaps.length > 0 && <div className="video-answer-gaps"><span>还不能确认</span>{answer.gaps.map((gap) => <p key={gap}>! {gap}</p>)}</div>}
               <footer><button onClick={saveAnswer} disabled={saved}>{saved ? "已保存问答" : "保存到知识记忆"}</button>{answer.suggestedTask && <button onClick={addSuggestedTask} disabled={taskAdded}>{taskAdded ? "已加入任务" : "加入建议行动 ↗"}</button>}</footer>
             </article>
-          ) : <div className="video-answer-empty"><span>⌁</span><strong>每个结论都能回到时间点</strong><p>本地先缩小证据范围，模型不能把标题或外部常识混进回答。</p></div>}
+          ) : <div className="video-answer-empty"><span>⌁</span><strong>每个结论都能回到时间点</strong><p>本地先缩小字幕与画面范围，模型不能把标题或外部常识混进回答。</p></div>}
           <p className="video-inquiry-message"><i className={busy ? "busy" : ""} />{message}</p>
         </main>
       </div>

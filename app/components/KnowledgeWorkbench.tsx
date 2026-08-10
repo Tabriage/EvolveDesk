@@ -183,7 +183,7 @@ export function KnowledgeWorkbench({
               const selected = selectedIds.includes(card.id);
               return (
                 <button className={selected ? "selected" : ""} key={card.id} onClick={() => toggleCard(card.id)} aria-pressed={selected}>
-                  <i>{selected ? "✓" : "+"}</i><span><small>{card.sourceTitle}</small><strong>{card.title}</strong><p>{card.content}</p><em>{card.tags.map((tag) => `#${tag}`).join(" ")}</em></span>
+                  <i>{selected ? "✓" : "+"}</i><span><small>{card.sourceTitle}{card.evidenceFrameIds.length ? ` · ${card.evidenceFrameIds.length} 帧证据` : ""}</small><strong>{card.title}</strong><p>{card.content}</p><em>{card.tags.map((tag) => `#${tag}`).join(" ")}</em></span>
                 </button>
               );
             })}
