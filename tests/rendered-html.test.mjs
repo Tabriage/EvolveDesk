@@ -39,6 +39,7 @@ test("server-renders the Evolve Desk product", async () => {
   assert.match(html, /统一收件箱/);
   assert.match(html, /视频总结/);
   assert.match(html, /知识库/);
+  assert.match(html, /学习专题/);
   assert.match(html, /记忆复习/);
   assert.match(html, /周回顾/);
   assert.match(html, /进化实验室/);
@@ -71,6 +72,30 @@ test("weekly review endpoint refuses to invent a review without recorded evidenc
 
   assert.equal(response.status, 400);
   assert.match((await response.json()).error, /没有可回顾/);
+});
+
+test("learning topic Agent requires at least two real source digests", async () => {
+  const worker = await createWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/agent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "build-learning-topic",
+        baseURL: "http://localhost:62783/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        title: "学习系统",
+        goal: "怎样降低整理阻力？",
+        sources: [{ kind: "video", id: "video-1", title: "来源一", digest: "只有一条真实摘要" }],
+      }),
+    }),
+    env,
+    context,
+  );
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /至少选择两条/);
 });
 
 test("route designer requires a concrete direction before calling a model", async () => {

@@ -158,6 +158,7 @@ export type WeeklyReviewSourceStats = {
   visualFrames: number;
   knowledgeCards: number;
   knowledgeInquiries: number;
+  learningTopics: number;
   creatorIdeas: number;
   creatorReviews: number;
   studyCardsCreated: number;
@@ -191,6 +192,7 @@ export type WeeklyDaySnapshot = {
   visualFrames: number;
   knowledgeCards: number;
   inquiries: number;
+  learningTopics: number;
   creatorIdeas: number;
   creatorReviews: number;
   studyCardsCreated: number;
@@ -212,6 +214,7 @@ export type WeeklySnapshot = {
   videos: Array<Pick<VideoRecord, "id" | "title" | "platform" | "createdAt"> & { visualFrameCount: number }>;
   knowledgeCards: Array<Pick<KnowledgeCard, "id" | "title" | "tags" | "sourceTitle" | "createdAt">>;
   inquiries: Array<{ id: string; question: string; answerable: boolean; sourceCount: number; createdAt: string }>;
+  learningTopics: Array<Pick<LearningTopic, "id" | "title" | "goal" | "updatedAt"> & { nodeCount: number }>;
   creatorIdeas: Array<Pick<CreatorIdea, "id" | "title" | "platform" | "status" | "createdAt">>;
   creatorReviews: Array<Pick<CreatorReview, "id" | "title" | "platform" | "publishedAt" | "createdAt">>;
   studyCards: Array<Pick<StudyCard, "id" | "kind" | "prompt" | "createdAt">>;
@@ -232,6 +235,43 @@ export type KnowledgeRelation = {
   sharedTags: string[];
   sharedTerms: string[];
   score: number;
+};
+
+export type LearningSourceRef = {
+  kind: "video" | "knowledge";
+  id: string;
+};
+
+export type LearningMapNode = {
+  id: string;
+  kind: "idea" | "method" | "evidence" | "contrast";
+  title: string;
+  summary: string;
+  sourceRefs: LearningSourceRef[];
+};
+
+export type LearningMapEdge = {
+  from: string;
+  to: string;
+  relation: "supports" | "extends" | "contrasts" | "depends_on";
+  label: string;
+};
+
+export type LearningMap = {
+  thesis: string;
+  nodes: LearningMapNode[];
+  edges: LearningMapEdge[];
+  openQuestions: Array<{ id: string; question: string; reason: string }>;
+};
+
+export type LearningTopic = {
+  id: string;
+  title: string;
+  goal: string;
+  sources: LearningSourceRef[];
+  map: LearningMap | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type PersonalRouteAction = {
@@ -430,7 +470,7 @@ export type CreatorStudioState = {
 };
 
 export type WorkbenchState = {
-  version: 10;
+  version: 11;
   focusTaskId: string | null;
   tasks: WorkTask[];
   inbox: InboxItem[];
@@ -439,6 +479,7 @@ export type WorkbenchState = {
   videos: VideoRecord[];
   knowledge: KnowledgeCard[];
   knowledgeInquiries: KnowledgeInquiry[];
+  learningTopics: LearningTopic[];
   weeklyReviews: WeeklyReview[];
   routes: PersonalRoute[];
   boards: PersonalBoard[];
@@ -479,6 +520,12 @@ export function saveKnowledgeInquiry(
   state: WorkbenchState,
   input: Omit<KnowledgeInquiry, "id" | "createdAt">,
 ): WorkbenchState;
+export function saveLearningTopic(
+  state: WorkbenchState,
+  input: Omit<LearningTopic, "id" | "createdAt" | "updatedAt"> & { id?: string; map?: LearningMap | null },
+  actor?: "human" | "agent",
+): WorkbenchState;
+export function removeLearningTopic(state: WorkbenchState, topicId: string): WorkbenchState;
 export function saveStudyCards(state: WorkbenchState, cards: StudyCardDraft[], actor?: "agent" | "human"): WorkbenchState;
 export function rateStudyCard(
   state: WorkbenchState,

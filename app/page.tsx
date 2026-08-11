@@ -5,6 +5,7 @@ import { BoardWorkbench } from "./components/BoardWorkbench";
 import { CreatorStudio } from "./components/CreatorStudio";
 import { EvolutionLab } from "./components/EvolutionLab";
 import { KnowledgeWorkbench } from "./components/KnowledgeWorkbench";
+import { LearningTopicStudio } from "./components/LearningTopicStudio";
 import { QuickStart } from "./components/QuickStart";
 import { RouteWorkbench } from "./components/RouteWorkbench";
 import { StudyStudio } from "./components/StudyStudio";
@@ -33,9 +34,11 @@ import {
   removeCreatorIdea,
   removeCreatorReview,
   removeCreatorSignal,
+  removeLearningTopic,
   removeStudyCard,
   removeBoardRecord,
   saveKnowledgeInquiry,
+  saveLearningTopic,
   saveStudyCards,
   saveCreatorIdea,
   saveCreatorProfile,
@@ -55,7 +58,7 @@ import type {
   WorkbenchState,
 } from "./features/workbench-core.mjs";
 
-type ActiveView = "today" | "routes" | "boards" | "creator" | "inbox" | "video" | "knowledge" | "study" | "review" | "memory" | "lab";
+type ActiveView = "today" | "routes" | "boards" | "creator" | "inbox" | "video" | "knowledge" | "topics" | "study" | "review" | "memory" | "lab";
 
 type WorkPlan = {
   title: string;
@@ -289,7 +292,7 @@ export default function Home() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${activeView === "topics" ? "topic-mode" : ""}`}>
       <header className="topbar">
         <button className="brand" onClick={() => setActiveView("today")}>
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
@@ -310,6 +313,7 @@ export default function Home() {
         <button className={activeView === "inbox" ? "active" : ""} onClick={() => setActiveView("inbox")}><span>↘</span> 收件箱<small>{newInbox.length}</small></button>
         <button className={activeView === "video" ? "active" : ""} onClick={() => setActiveView("video")}><span>▷</span> 视频总结<small>{desk.videos.length}</small></button>
         <button className={activeView === "knowledge" ? "active" : ""} onClick={() => setActiveView("knowledge")}><span>◇</span> 知识库<small>{desk.knowledge.length}</small></button>
+        <button className={activeView === "topics" ? "active" : ""} onClick={() => setActiveView("topics")}><span>⌘</span> 学习专题<small>{desk.learningTopics.length}</small></button>
         <button className={activeView === "study" ? "active" : ""} onClick={() => setActiveView("study")}><span>◈</span> 记忆复习<small>{dueStudyCards.length}</small></button>
         <button className={activeView === "review" ? "active" : ""} onClick={() => setActiveView("review")}><span>↺</span> 周回顾<small>{desk.weeklyReviews.length}</small></button>
         <button className={activeView === "memory" ? "active" : ""} onClick={() => setActiveView("memory")}><span>◎</span> 自省记忆</button>
@@ -322,6 +326,7 @@ export default function Home() {
         <div className="rail-capability"><i style={{ background: "#7657d6" }} /><span>字幕与画面</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#ff6d5a" }} /><span>创作闭环</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>知识再利用</span><b>运行中</b></div>
+        <div className="rail-capability"><i style={{ background: "#1f9d6a" }} /><span>多源专题</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#7657d6" }} /><span>间隔复习</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#d39a2c" }} /><span>周度回顾</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#1f9d6a" }} /><span>本地记忆</span><b>运行中</b></div>
@@ -515,6 +520,23 @@ export default function Home() {
           />
         )}
 
+        {activeView === "topics" && hydrated && (
+          <LearningTopicStudio
+            baseURL={baseURL}
+            apiKey={apiKey}
+            model={model}
+            videos={desk.videos}
+            knowledge={desk.knowledge}
+            topics={desk.learningTopics}
+            onNeedSettings={() => setSettingsOpen(true)}
+            onOpenVideo={() => setActiveView("video")}
+            onOpenKnowledge={() => setActiveView("knowledge")}
+            onSave={(topic, actor) => setDesk((current) => saveLearningTopic(current, topic, actor))}
+            onRemove={(topicId) => setDesk((current) => removeLearningTopic(current, topicId))}
+            onCreateTask={(task) => createTask(task.title, "agent", task.note)}
+          />
+        )}
+
         {activeView === "study" && hydrated && (
           <StudyStudio
             baseURL={baseURL}
@@ -577,6 +599,14 @@ export default function Home() {
           <ol className="video-guide-steps"><li><i>1</i><div><strong>本地导入</strong><p>支持四个平台链接与不超过 500MB 的本地音视频。</p></div></li><li><i>2</i><div><strong>字幕优先</strong><p>平台字幕直接读取；缺失时可用本机 Whisper。</p></div></li><li><i>3</i><div><strong>视觉底片</strong><p>FFmpeg 抽帧，Tesseract OCR；图片只存当前浏览器。</p></div></li><li><i>4</i><div><strong>双证据问答</strong><p>Agent 返回有效的字幕 S 编号或画面 F 编号。</p></div></li></ol>
           <div className="video-plan-b"><span>资料边界</span><p>搜索与筛选在浏览器本地完成；单次提问最多发送 12 段字幕与 4 帧选中画面到本机模型。</p></div>
           <div className="guardrail-footer"><i className={connected ? "online" : ""} /><div><strong>{connected ? "总结模型已连接" : "等待模型连接"}</strong><p>导入视频不需要模型密钥</p></div><button onClick={() => setSettingsOpen(true)}>设置</button></div>
+        </aside>
+      ) : activeView === "topics" ? (
+        <aside className="agent-panel topic-guide-panel">
+          <header><div className="agent-glyph topic-glyph"><span>⌘</span></div><div><strong>专题编织边界</strong><small>多来源 · 可回查</small></div><button aria-label="打开连接设置" onClick={() => setSettingsOpen(true)}>•••</button></header>
+          <div className="topic-guide-intro"><span>SOURCES → RELATIONS → GAPS</span><h3>不是画一张好看的图，<br />而是保留理解从哪里来。</h3><p>每个节点必须引用当前专题的真实视频或知识卡；缺少证据的内容只能进入待求证区。</p></div>
+          <ol className="topic-guide-steps"><li><i>1</i><div><strong>钉住资料</strong><p>最多选择 16 条本地视频总结和知识卡。</p></div></li><li><i>2</i><div><strong>围绕问题</strong><p>先写学习目标，避免按来源机械复述。</p></div></li><li><i>3</i><div><strong>重绑引用</strong><p>服务端只保留实际提供的 S 编号与节点关系。</p></div></li><li><i>4</i><div><strong>留下缺口</strong><p>开放问题可以明确加入今日求证任务。</p></div></li></ol>
+          <div className="video-plan-b"><span>资料边界</span><p>摘要筛选在浏览器完成；原始关键帧与完整字幕不会随专题请求发送。</p></div>
+          <div className="guardrail-footer"><i className={connected ? "online" : ""} /><div><strong>{connected ? "专题模型已连接" : "等待模型连接"}</strong><p>资料架可以离线保存</p></div><button onClick={() => setSettingsOpen(true)}>设置</button></div>
         </aside>
       ) : (
         <WorkAgent baseURL={baseURL} apiKey={apiKey} model={model} connected={connected} state={desk} onNeedSettings={() => setSettingsOpen(true)} onApply={applyWorkPlan} />

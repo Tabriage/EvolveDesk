@@ -21,6 +21,7 @@ import {
   getTodayKey,
   inboxKind,
   parseWorkbenchState,
+  removeLearningTopic,
   removeBoardRecord,
   removeCreatorIdea,
   removeCreatorReview,
@@ -30,6 +31,7 @@ import {
   saveCreatorProfile,
   saveCreatorReview,
   saveKnowledgeInquiry,
+  saveLearningTopic,
   saveStudyCards,
   savePersonalBoard,
   savePersonalRoute,
@@ -119,7 +121,7 @@ test("video summaries become durable knowledge and optional tasks", () => {
     },
   }, true);
 
-  assert.equal(saved.version, 10);
+  assert.equal(saved.version, 11);
   assert.equal(saved.videos.length, 1);
   assert.equal(saved.videos[0].transcriptSource, "local-whisper");
   assert.equal(saved.videos[0].visualEvidence[0].ocrText, "统一入口");
@@ -165,12 +167,95 @@ test("grounded knowledge answers persist with citations and remain actionable", 
     suggestedTask: { title: "整理最近三条学习输入", note: "只做归入口，不做复杂分类" },
   });
 
-  assert.equal(answered.version, 10);
+  assert.equal(answered.version, 11);
   assert.equal(answered.knowledgeInquiries.length, 1);
   assert.equal(answered.knowledgeInquiries[0].sources[0].cardTitle, "渐进整理");
   assert.equal(answered.activity.at(-1)?.label, "保存一次知识问答");
   const restored = parseWorkbenchState(JSON.stringify(answered));
   assert.equal(restored.knowledgeInquiries[0].suggestedTask?.title, "整理最近三条学习输入");
+});
+
+test("learning topics keep only real sources, grounded nodes, and valid relations", () => {
+  const video = {
+    id: "video-topic-1",
+    url: "https://www.bilibili.com/video/BVtopic",
+    platform: "bilibili",
+    sourceId: "BVtopic",
+    title: "建立学习系统",
+    author: "示例作者",
+    description: "",
+    duration: 300,
+    thumbnail: "",
+    hasVideo: true,
+    width: 1280,
+    height: 720,
+    localFileName: "",
+    transcriptSource: "platform",
+    visualEvidence: [],
+    summary: {
+      oneSentence: "统一输入并逐步整理。",
+      audience: "学习者",
+      worthWatching: "包含可执行流程。",
+      informationDensity: "high",
+      keyPoints: [],
+      chapters: [],
+      concepts: [],
+      caveats: [],
+      visualFindings: [],
+      creatorInsights: { hook: "", structure: "", angles: [] },
+      suggestedTasks: [],
+      cards: [],
+    },
+    createdAt: "2026-08-11T01:00:00.000Z",
+  };
+  const knowledge = {
+    id: "knowledge-topic-1",
+    title: "渐进整理",
+    content: "结构应随真实使用逐步增加。",
+    tags: ["学习系统"],
+    sourceUrl: video.url,
+    sourceTitle: video.title,
+    evidenceFrameIds: [],
+    createdAt: "2026-08-11T01:05:00.000Z",
+  };
+  const initial = { ...createInitialWorkbench(), videos: [video], knowledge: [knowledge] };
+  const saved = saveLearningTopic(initial, {
+    id: "learning-topic-test",
+    title: "可持续学习系统",
+    goal: "哪些方法能够降低整理阻力？",
+    sources: [
+      { kind: "video", id: video.id },
+      { kind: "knowledge", id: knowledge.id },
+      { kind: "knowledge", id: "forged-source" },
+    ],
+    map: {
+      thesis: "先统一输入，再随使用逐步增加结构。",
+      nodes: [
+        { id: "node-1", kind: "method", title: "统一入口", summary: "先降低捕捉阻力。", sourceRefs: [{ kind: "video", id: video.id }] },
+        { id: "node-2", kind: "idea", title: "渐进整理", summary: "结构在使用时形成。", sourceRefs: [{ kind: "knowledge", id: knowledge.id }, { kind: "knowledge", id: "forged-source" }] },
+        { id: "node-2", kind: "contrast", title: "重复节点", summary: "重复 ID 不应获得新的身份。", sourceRefs: [{ kind: "video", id: video.id }] },
+        { id: "node-3", kind: "evidence", title: "伪造节点", summary: "不应保留。", sourceRefs: [{ kind: "video", id: "forged-video" }] },
+      ],
+      edges: [
+        { from: "node-1", to: "node-2", relation: "depends_on", label: "先捕捉再整理" },
+        { from: "node-2", to: "missing-node", relation: "supports", label: "无效关系" },
+      ],
+      openQuestions: [{ id: "question-1", question: "长期复习效果如何？", reason: "当前资料没有纵向记录。" }],
+    },
+  }, "agent");
+
+  assert.equal(saved.version, 11);
+  assert.equal(saved.learningTopics.length, 1);
+  assert.equal(saved.learningTopics[0].sources.length, 2);
+  assert.equal(saved.learningTopics[0].map.nodes.length, 2);
+  assert.equal(saved.learningTopics[0].map.edges.length, 1);
+  assert.deepEqual(saved.learningTopics[0].map.nodes[1].sourceRefs, [{ kind: "knowledge", id: knowledge.id }]);
+  assert.equal(saved.activity.at(-1)?.source, "agent");
+  const weekly = buildWeeklySnapshot(saved, new Date(2026, 7, 11, 12));
+  assert.equal(weekly.sourceStats.learningTopics, 1);
+  const restored = parseWorkbenchState(JSON.stringify(saved));
+  assert.equal(restored.learningTopics[0].map.openQuestions[0].question, "长期复习效果如何？");
+  assert.equal(removeLearningTopic(restored, "learning-topic-test").learningTopics.length, 0);
 });
 
 test("weekly snapshots count only evidence inside the selected local week", () => {
@@ -220,7 +305,7 @@ test("weekly reviews upsert by week and survive local state migration", () => {
   assert.equal(updated.weeklyReviews[0].headline, "一周只有一个方向");
   assert.equal(updated.activity.at(-1)?.label, "更新本周回顾");
   const restored = parseWorkbenchState(JSON.stringify(updated));
-  assert.equal(restored.version, 10);
+  assert.equal(restored.version, 11);
   assert.equal(restored.weeklyReviews[0].suggestedActions[0].title, "完成一个未完成任务");
 });
 
@@ -270,7 +355,7 @@ test("study cards stay grounded, schedule real reviews, and survive migration", 
     sources: [{ cardId: source.id, cardTitle: source.title, sourceTitle: source.sourceTitle, sourceUrl: source.sourceUrl }],
   }]);
 
-  assert.equal(saved.version, 10);
+  assert.equal(saved.version, 11);
   assert.equal(saved.study.cards.length, 2);
   assert.equal(saved.study.cards[0].sources[0].cardTitle, source.title);
   assert.equal(saved.study.cards[0].sources[0].sourceUrl, source.sourceUrl);
@@ -299,7 +384,7 @@ test("study cards stay grounded, schedule real reviews, and survive migration", 
   const suspended = toggleStudyCardSuspended(afterGood, cardIds[0]);
   assert.equal(suspended.study.cards.find((card) => card.id === cardIds[0])?.suspended, true);
   const restored = parseWorkbenchState(JSON.stringify(suspended));
-  assert.equal(restored.version, 10);
+  assert.equal(restored.version, 11);
   assert.equal(restored.study.attempts.length, 2);
   assert.equal(restored.study.cards[0].sources[0].cardTitle, source.title);
 
@@ -338,7 +423,7 @@ test("personal routes turn confirmed phase actions into tasks or habits", () => 
     ],
   });
 
-  assert.equal(saved.version, 10);
+  assert.equal(saved.version, 11);
   assert.equal(saved.routes.length, 1);
   const route = saved.routes[0];
   const [taskAction, habitAction] = route.phases[0].actions;
@@ -434,7 +519,7 @@ test("personal business boards preserve typed records across schema edits and mi
     ],
   });
 
-  assert.equal(saved.version, 10);
+  assert.equal(saved.version, 11);
   assert.equal(saved.boards.length, 1);
   assert.equal(saved.boards[0].linkedRouteId, routeId);
   const board = saved.boards[0];
@@ -465,7 +550,7 @@ test("personal business boards preserve typed records across schema edits and mi
   assert.equal(edited.boards[0].records.length, 1);
   assert.equal(edited.boards[0].records[0].title, "工作台路线介绍");
   const restored = parseWorkbenchState(JSON.stringify(edited));
-  assert.equal(restored.version, 10);
+  assert.equal(restored.version, 11);
   assert.equal(restored.boards[0].records[0].values[platformField.id], "B站");
 
   const withTask = createBoardRecordTask(restored, board.id, record.id);
@@ -622,7 +707,7 @@ test("creator studio keeps inspiration grounded and closes the loop through task
   assert.equal(weekly.sourceStats.creatorIdeas, 1);
   assert.equal(weekly.sourceStats.creatorReviews, 1);
   const restored = parseWorkbenchState(JSON.stringify(reviewed));
-  assert.equal(restored.version, 10);
+  assert.equal(restored.version, 11);
   assert.equal(restored.creator.ideas[0].linkedTaskId, tasked.tasks.at(-1)?.id);
   assert.equal(restored.creator.reviews[0].ideaId, idea.id);
 

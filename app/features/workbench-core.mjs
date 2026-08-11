@@ -7,6 +7,9 @@ const MAX_ACTIVITY = 80;
 const MAX_VIDEOS = 40;
 const MAX_KNOWLEDGE_CARDS = 120;
 const MAX_KNOWLEDGE_INQUIRIES = 40;
+const MAX_LEARNING_TOPICS = 24;
+const MAX_TOPIC_SOURCES = 16;
+const MAX_TOPIC_NODES = 8;
 const MAX_STUDY_CARDS = 240;
 const MAX_STUDY_ATTEMPTS = 800;
 const MAX_WEEKLY_REVIEWS = 24;
@@ -71,7 +74,7 @@ export function inboxKind(content) {
 
 export function createInitialWorkbench() {
   return {
-    version: 10,
+    version: 11,
     focusTaskId: null,
     tasks: [],
     inbox: [],
@@ -80,6 +83,7 @@ export function createInitialWorkbench() {
     videos: [],
     knowledge: [],
     knowledgeInquiries: [],
+    learningTopics: [],
     weeklyReviews: [],
     routes: [],
     boards: [],
@@ -214,6 +218,96 @@ function sanitizeKnowledgeInquiry(inquiry) {
   };
 }
 
+function learningSourceKey(source) {
+  const kind = source?.kind === "video" ? "video" : source?.kind === "knowledge" ? "knowledge" : "";
+  const id = cleanText(source?.id, 100);
+  return kind && id ? `${kind}:${id}` : "";
+}
+
+function createLearningSourceIndex(videos, knowledge) {
+  return new Map([
+    ...validArray(videos).map((video) => [`video:${video.id}`, { kind: "video", id: video.id }]),
+    ...validArray(knowledge).map((card) => [`knowledge:${card.id}`, { kind: "knowledge", id: card.id }]),
+  ]);
+}
+
+function sanitizeLearningMap(map, sourceIndex, topicSources) {
+  if (!map || typeof map !== "object") return null;
+  const allowedSourceKeys = new Set(topicSources.map(learningSourceKey));
+  const seenNodeIds = new Set();
+  const nodes = validArray(map.nodes).slice(0, MAX_TOPIC_NODES).map((node) => {
+    const id = cleanText(node?.id, 100) || createId("topic-node");
+    if (seenNodeIds.has(id)) return null;
+    seenNodeIds.add(id);
+    const sourceRefs = [];
+    const seenSources = new Set();
+    for (const source of validArray(node?.sourceRefs).slice(0, 6)) {
+      const key = learningSourceKey(source);
+      const canonical = sourceIndex.get(key);
+      if (!canonical || !allowedSourceKeys.has(key) || seenSources.has(key)) continue;
+      seenSources.add(key);
+      sourceRefs.push(canonical);
+    }
+    return {
+      id,
+      kind: ["idea", "method", "evidence", "contrast"].includes(node?.kind) ? node.kind : "idea",
+      title: cleanText(node?.title, 100),
+      summary: cleanText(node?.summary, 600),
+      sourceRefs,
+    };
+  }).filter((node) => node && node.title && node.summary && node.sourceRefs.length);
+  if (nodes.length < 2) return null;
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const seenEdges = new Set();
+  const edges = validArray(map.edges).slice(0, 12).map((edge) => {
+    const from = cleanText(edge?.from, 100);
+    const to = cleanText(edge?.to, 100);
+    const relation = ["supports", "extends", "contrasts", "depends_on"].includes(edge?.relation) ? edge.relation : "extends";
+    return { from, to, relation, label: cleanText(edge?.label, 80) };
+  }).filter((edge) => {
+    const key = `${edge.from}:${edge.to}:${edge.relation}`;
+    if (!nodeIds.has(edge.from) || !nodeIds.has(edge.to) || edge.from === edge.to || seenEdges.has(key)) return false;
+    seenEdges.add(key);
+    return true;
+  });
+  const seenQuestions = new Set();
+  const openQuestions = validArray(map.openQuestions).slice(0, 5).map((question) => {
+    let id = cleanText(question?.id, 100) || createId("topic-question");
+    if (seenQuestions.has(id)) id = createId("topic-question");
+    seenQuestions.add(id);
+    return {
+      id,
+      question: cleanText(question?.question, 360),
+      reason: cleanText(question?.reason, 360),
+    };
+  }).filter((question) => question.question && question.reason);
+  const thesis = cleanText(map.thesis, 600);
+  return thesis ? { thesis, nodes, edges, openQuestions } : null;
+}
+
+function sanitizeLearningTopic(topic, sourceIndex) {
+  const value = topic && typeof topic === "object" ? topic : {};
+  const sources = [];
+  const seenSources = new Set();
+  for (const source of validArray(value.sources).slice(0, MAX_TOPIC_SOURCES)) {
+    const key = learningSourceKey(source);
+    const canonical = sourceIndex.get(key);
+    if (!canonical || seenSources.has(key)) continue;
+    seenSources.add(key);
+    sources.push(canonical);
+  }
+  const now = new Date().toISOString();
+  return {
+    id: cleanText(value.id, 100) || createId("learning-topic"),
+    title: cleanText(value.title, 100),
+    goal: cleanText(value.goal, 500),
+    sources,
+    map: sanitizeLearningMap(value.map, sourceIndex, sources),
+    createdAt: cleanText(value.createdAt, 40) || now,
+    updatedAt: cleanText(value.updatedAt, 40) || now,
+  };
+}
+
 function validIso(value, fallback = "") {
   const cleaned = cleanText(value, 40);
   return Number.isFinite(new Date(cleaned).getTime()) ? cleaned : fallback;
@@ -311,6 +405,7 @@ function sanitizeWeeklyReview(review) {
       visualFrames: safeCount(stats.visualFrames),
       knowledgeCards: safeCount(stats.knowledgeCards),
       knowledgeInquiries: safeCount(stats.knowledgeInquiries),
+      learningTopics: safeCount(stats.learningTopics),
       creatorIdeas: safeCount(stats.creatorIdeas),
       creatorReviews: safeCount(stats.creatorReviews),
       studyCardsCreated: safeCount(stats.studyCardsCreated),
@@ -678,6 +773,11 @@ export function parseWorkbenchState(raw) {
       .slice(-MAX_KNOWLEDGE_INQUIRIES)
       .map(sanitizeKnowledgeInquiry)
       .filter((inquiry) => inquiry.question && inquiry.answer);
+    const learningSourceIndex = createLearningSourceIndex(videos, knowledge);
+    const learningTopics = validArray(parsed.learningTopics)
+      .slice(-MAX_LEARNING_TOPICS)
+      .map((topic) => sanitizeLearningTopic(topic, learningSourceIndex))
+      .filter((topic) => topic.title && topic.goal && topic.sources.length >= 2);
     const studyBase = sanitizeStudyState(parsed.study);
     const knowledgeById = new Map(knowledge.map((card) => [card.id, card]));
     const study = {
@@ -728,7 +828,7 @@ export function parseWorkbenchState(raw) {
       reviews: creatorBase.reviews.map((review) => creatorBase.ideas.some((idea) => idea.id === review.ideaId) ? review : { ...review, ideaId: null }),
     };
     const focusTaskId = tasks.some((task) => task.id === parsed.focusTaskId) ? parsed.focusTaskId : null;
-    return { version: 10, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries, weeklyReviews, routes, boards, creator, study };
+    return { version: 11, focusTaskId, tasks, inbox, habits, activity, videos, knowledge, knowledgeInquiries, learningTopics, weeklyReviews, routes, boards, creator, study };
   } catch {
     return createInitialWorkbench();
   }
@@ -863,7 +963,7 @@ export function saveVideoSummary(state, input, createTasks = false) {
   };
   let next = {
     ...state,
-    version: 10,
+    version: 11,
     videos: [...state.videos.filter((item) => item.url !== url), video].slice(-MAX_VIDEOS),
     inbox: state.inbox.map((item) => item.content === url || item.content === cleanText(input?.capturedUrl, 2_000) ? { ...item, status: "planned" } : item),
   };
@@ -917,7 +1017,7 @@ export function saveKnowledgeInquiry(state, input) {
   if (!inquiry.question || !inquiry.answer) return state;
   return {
     ...state,
-    version: 10,
+    version: 11,
     knowledgeInquiries: [...validArray(state.knowledgeInquiries), inquiry].slice(-MAX_KNOWLEDGE_INQUIRIES),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -925,6 +1025,54 @@ export function saveKnowledgeInquiry(state, input) {
       detail: `${inquiry.question} · ${inquiry.sources.length} 条引用`,
       createdAt: inquiry.createdAt,
       source: "agent",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function saveLearningTopic(state, input, actor = "human") {
+  const sourceIndex = createLearningSourceIndex(state.videos, state.knowledge);
+  const existing = validArray(state.learningTopics).find((topic) => topic.id === cleanText(input?.id, 100));
+  const now = new Date().toISOString();
+  const topic = sanitizeLearningTopic({
+    ...existing,
+    ...input,
+    id: existing?.id || cleanText(input?.id, 100) || undefined,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  }, sourceIndex);
+  if (!topic.title || topic.goal.length < 4 || topic.sources.length < 2) return state;
+  const mapped = Boolean(topic.map);
+  return {
+    ...state,
+    version: 11,
+    learningTopics: [
+      ...validArray(state.learningTopics).filter((item) => item.id !== topic.id),
+      topic,
+    ].slice(-MAX_LEARNING_TOPICS),
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: mapped ? "保存学习专题脉络" : existing ? "更新学习专题资料" : "建立多来源学习专题",
+      detail: `${topic.title} · ${topic.sources.length} 条资料${mapped ? ` · ${topic.map.nodes.length} 个有据节点` : ""}`,
+      createdAt: now,
+      source: actor === "agent" ? "agent" : "human",
+    }].slice(-MAX_ACTIVITY),
+  };
+}
+
+export function removeLearningTopic(state, topicId) {
+  const topic = validArray(state.learningTopics).find((item) => item.id === topicId);
+  if (!topic) return state;
+  const now = new Date().toISOString();
+  return {
+    ...state,
+    version: 11,
+    learningTopics: state.learningTopics.filter((item) => item.id !== topicId),
+    activity: [...state.activity, {
+      id: createId("activity"),
+      label: "移除学习专题",
+      detail: topic.title,
+      createdAt: now,
+      source: "human",
     }].slice(-MAX_ACTIVITY),
   };
 }
@@ -970,7 +1118,7 @@ export function saveStudyCards(state, drafts, actor = "agent") {
   if (!savedCount) return state;
   return {
     ...state,
-    version: 10,
+    version: 11,
     study: { ...study, cards },
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1043,7 +1191,7 @@ export function rateStudyCard(state, cardId, rating, selectedAnswer = "", review
   });
   return {
     ...state,
-    version: 10,
+    version: 11,
     study: {
       cards: study.cards.map((item) => item.id === card.id ? updatedCard : item),
       attempts: [...study.attempts, attempt].slice(-MAX_STUDY_ATTEMPTS),
@@ -1065,7 +1213,7 @@ export function removeStudyCard(state, cardId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 10,
+    version: 11,
     study: {
       cards: study.cards.filter((item) => item.id !== cardId),
       attempts: study.attempts.filter((attempt) => attempt.cardId !== cardId),
@@ -1088,7 +1236,7 @@ export function toggleStudyCardSuspended(state, cardId) {
   const suspended = !card.suspended;
   return {
     ...state,
-    version: 10,
+    version: 11,
     study: { ...study, cards: study.cards.map((item) => item.id === cardId ? { ...item, suspended, updatedAt: now } : item) },
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1144,6 +1292,7 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
       visualFrames: 0,
       knowledgeCards: 0,
       inquiries: 0,
+      learningTopics: 0,
       creatorIdeas: 0,
       creatorReviews: 0,
       studyCardsCreated: 0,
@@ -1162,6 +1311,7 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
   const videos = validArray(state.videos).filter((video) => dateInRange(video.createdAt, start, end));
   const knowledgeCards = validArray(state.knowledge).filter((card) => dateInRange(card.createdAt, start, end));
   const inquiries = validArray(state.knowledgeInquiries).filter((inquiry) => dateInRange(inquiry.createdAt, start, end));
+  const learningTopics = validArray(state.learningTopics).filter((topic) => dateInRange(topic.updatedAt, start, end));
   const creator = sanitizeCreatorStudio(state.creator);
   const creatorIdeas = creator.ideas.filter((idea) => dateInRange(idea.createdAt, start, end));
   const creatorReviews = creator.reviews.filter((review) => dateInRange(review.createdAt, start, end));
@@ -1180,6 +1330,7 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
   }
   for (const card of knowledgeCards) dayForTimestamp(card.createdAt).knowledgeCards += 1;
   for (const inquiry of inquiries) dayForTimestamp(inquiry.createdAt).inquiries += 1;
+  for (const topic of learningTopics) dayForTimestamp(topic.updatedAt).learningTopics += 1;
   for (const idea of creatorIdeas) dayForTimestamp(idea.createdAt).creatorIdeas += 1;
   for (const review of creatorReviews) dayForTimestamp(review.createdAt).creatorReviews += 1;
   for (const card of studyCards) dayForTimestamp(card.createdAt).studyCardsCreated += 1;
@@ -1197,7 +1348,7 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
   }
   for (const day of days) {
     day.total = day.tasksCreated + day.tasksCompleted + day.inboxCaptured + day.habitCheckins
-      + day.videos + day.visualFrames + day.knowledgeCards + day.inquiries + day.creatorIdeas + day.creatorReviews
+      + day.videos + day.visualFrames + day.knowledgeCards + day.inquiries + day.learningTopics + day.creatorIdeas + day.creatorReviews
       + day.studyCardsCreated + day.studyReviews;
   }
   const sourceStats = {
@@ -1210,6 +1361,7 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
     visualFrames: videos.reduce((total, video) => total + validArray(video.visualEvidence).length, 0),
     knowledgeCards: knowledgeCards.length,
     knowledgeInquiries: inquiries.length,
+    learningTopics: learningTopics.length,
     creatorIdeas: creatorIdeas.length,
     creatorReviews: creatorReviews.length,
     studyCardsCreated: studyCards.length,
@@ -1241,6 +1393,7 @@ export function buildWeeklySnapshot(state, anchorDate = new Date()) {
       sourceCount: validArray(sources).length,
       createdAt,
     })),
+    learningTopics: learningTopics.slice(-8).map(({ id, title, goal, map, updatedAt }) => ({ id, title, goal, nodeCount: map?.nodes.length || 0, updatedAt })),
     creatorIdeas: creatorIdeas.slice(-8).map(({ id, title, platform, status, createdAt }) => ({ id, title, platform, status, createdAt })),
     creatorReviews: creatorReviews.slice(-8).map(({ id, title, platform, publishedAt, createdAt }) => ({ id, title, platform, publishedAt, createdAt })),
     studyCards: studyCards.slice(-12).map(({ id, kind, prompt, createdAt }) => ({ id, kind, prompt, createdAt })),
@@ -1262,7 +1415,7 @@ export function saveWeeklyReview(state, input) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 10,
+    version: 11,
     weeklyReviews: [
       ...validArray(state.weeklyReviews).filter((item) => item.weekKey !== review.weekKey),
       review,
@@ -1291,7 +1444,7 @@ export function savePersonalRoute(state, input) {
   const isUpdate = Boolean(existing);
   return {
     ...state,
-    version: 10,
+    version: 11,
     routes: [...validArray(state.routes).filter((item) => item.id !== route.id), route].slice(-MAX_PERSONAL_ROUTES),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1351,7 +1504,7 @@ export function activateRouteAction(state, routeId, phaseId, actionId, recordAct
     createdAt: updatedAt,
     source: "agent",
   }].slice(-MAX_ACTIVITY) : next.activity;
-  return { ...next, version: 10, routes, activity };
+  return { ...next, version: 11, routes, activity };
 }
 
 export function completeRoutePhase(state, routeId, phaseId) {
@@ -1361,7 +1514,7 @@ export function completeRoutePhase(state, routeId, phaseId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 10,
+    version: 11,
     routes: state.routes.map((item) => item.id !== route.id ? item : {
       ...item,
       updatedAt: now,
@@ -1383,7 +1536,7 @@ export function archivePersonalRoute(state, routeId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 10,
+    version: 11,
     routes: state.routes.map((item) => item.id === routeId ? { ...item, archivedAt: now, updatedAt: now } : item),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1414,7 +1567,7 @@ export function savePersonalBoard(state, input) {
   if (!board.name || !board.purpose || board.statuses.length < 2 || !board.fields.length) return state;
   return {
     ...state,
-    version: 10,
+    version: 11,
     boards: [...validArray(state.boards).filter((item) => item.id !== board.id), board].slice(-MAX_PERSONAL_BOARDS),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1444,7 +1597,7 @@ export function addBoardRecord(state, boardId, input, recordActivity = true) {
   };
   return {
     ...state,
-    version: 10,
+    version: 11,
     boards: state.boards.map((item) => item.id === board.id ? { ...item, updatedAt: now, records: [...item.records, record] } : item),
     activity: recordActivity ? [...state.activity, {
       id: createId("activity"),
@@ -1473,7 +1626,7 @@ export function updateBoardRecord(state, boardId, recordId, input, recordActivit
   };
   return {
     ...state,
-    version: 10,
+    version: 11,
     boards: state.boards.map((item) => item.id === board.id ? {
       ...item,
       updatedAt: now,
@@ -1496,7 +1649,7 @@ export function removeBoardRecord(state, boardId, recordId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 10,
+    version: 11,
     boards: state.boards.map((item) => item.id === board.id ? {
       ...item,
       updatedAt: now,
@@ -1532,7 +1685,7 @@ export function createBoardRecordTask(state, boardId, recordId, recordActivity =
   const now = new Date().toISOString();
   next = {
     ...next,
-    version: 10,
+    version: 11,
     boards: next.boards.map((item) => item.id === board.id ? {
       ...item,
       updatedAt: now,
@@ -1558,7 +1711,7 @@ export function archivePersonalBoard(state, boardId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 10,
+    version: 11,
     boards: state.boards.map((item) => item.id === boardId ? { ...item, archivedAt: now, updatedAt: now } : item),
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1576,7 +1729,7 @@ export function saveCreatorProfile(state, input) {
   if (!profile.niche && !profile.audience && !profile.voice && !profile.platforms.length) return state;
   return {
     ...state,
-    version: 10,
+    version: 11,
     creator: { ...creator, profile },
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1595,7 +1748,7 @@ export function addCreatorSignal(state, input) {
   if (!signal.title || !signal.note) return state;
   return {
     ...state,
-    version: 10,
+    version: 11,
     creator: { ...creator, signals: [...creator.signals, signal].slice(-MAX_CREATOR_SIGNALS) },
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1614,7 +1767,7 @@ export function removeCreatorSignal(state, signalId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 10,
+    version: 11,
     creator: { ...creator, signals: creator.signals.filter((item) => item.id !== signalId) },
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1679,7 +1832,7 @@ export function saveCreatorIdea(state, input) {
   if (!idea.title || !idea.promise || !idea.hook || !idea.angle || !idea.steps.length) return state;
   return {
     ...state,
-    version: 10,
+    version: 11,
     creator: { ...creator, ideas: [...creator.ideas.filter((item) => item.id !== idea.id), idea].slice(-MAX_CREATOR_IDEAS) },
     activity: [...state.activity, {
       id: createId("activity"),
@@ -1709,7 +1862,7 @@ export function updateCreatorIdea(state, ideaId, input, recordActivity = true) {
   if (nextIdea.status === idea.status && nextIdea.steps.every((step, index) => step.done === idea.steps[index]?.done)) return state;
   return {
     ...state,
-    version: 10,
+    version: 11,
     creator: { ...creator, ideas: creator.ideas.map((item) => item.id === idea.id ? nextIdea : item) },
     activity: recordActivity ? [...state.activity, {
       id: createId("activity"),
@@ -1742,7 +1895,7 @@ export function createCreatorIdeaTask(state, ideaId, recordActivity = true) {
   const nextCreator = sanitizeCreatorStudio(next.creator);
   next = {
     ...next,
-    version: 10,
+    version: 11,
     creator: {
       ...nextCreator,
       ideas: nextCreator.ideas.map((item) => item.id === idea.id ? {
@@ -1796,7 +1949,7 @@ export function addCreatorIdeaToBoard(state, ideaId, boardId) {
   const nextCreator = sanitizeCreatorStudio(next.creator);
   return {
     ...next,
-    version: 10,
+    version: 11,
     creator: {
       ...nextCreator,
       ideas: nextCreator.ideas.map((item) => item.id === idea.id ? { ...item, linkedBoardId: board.id, linkedBoardRecordId: record.id, updatedAt: now } : item),
@@ -1818,7 +1971,7 @@ export function removeCreatorIdea(state, ideaId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 10,
+    version: 11,
     creator: {
       ...creator,
       ideas: creator.ideas.filter((item) => item.id !== ideaId),
@@ -1851,7 +2004,7 @@ export function saveCreatorReview(state, input) {
   if (!review.title || !review.platform || !review.publishedAt || !hasEvidence) return state;
   return {
     ...state,
-    version: 10,
+    version: 11,
     creator: {
       ...creator,
       ideas: creator.ideas.map((idea) => idea.id === ideaId ? { ...idea, status: "published", updatedAt: now } : idea),
@@ -1874,7 +2027,7 @@ export function removeCreatorReview(state, reviewId) {
   const now = new Date().toISOString();
   return {
     ...state,
-    version: 10,
+    version: 11,
     creator: { ...creator, reviews: creator.reviews.filter((item) => item.id !== reviewId) },
     activity: [...state.activity, {
       id: createId("activity"),

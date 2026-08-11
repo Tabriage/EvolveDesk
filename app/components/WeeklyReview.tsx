@@ -140,7 +140,7 @@ export function WeeklyReview({
           {snapshot.days.map((day) => {
             const work = day.tasksCreated + day.tasksCompleted;
             const capture = day.inboxCaptured + day.habitCheckins;
-            const knowledge = day.videos + day.visualFrames + day.knowledgeCards + day.inquiries;
+            const knowledge = day.videos + day.visualFrames + day.knowledgeCards + day.inquiries + day.learningTopics;
             const creator = day.creatorIdeas + day.creatorReviews;
             const study = day.studyCardsCreated + day.studyReviews;
             return (
@@ -165,6 +165,7 @@ export function WeeklyReview({
           <span><strong>{snapshot.sourceStats.visualFrames}</strong>画面帧</span>
           <span><strong>{snapshot.sourceStats.knowledgeCards}</strong>知识卡</span>
           <span><strong>{snapshot.sourceStats.knowledgeInquiries}</strong>次求证</span>
+          <span><strong>{snapshot.sourceStats.learningTopics}</strong>学习专题</span>
           <span><strong>{snapshot.sourceStats.creatorIdeas}</strong>创作选题</span>
           <span><strong>{snapshot.sourceStats.creatorReviews}</strong>内容复盘</span>
           <span><strong>{snapshot.sourceStats.studyCardsCreated}</strong>复习卡</span>
@@ -178,7 +179,7 @@ export function WeeklyReview({
           <div className="evidence-ledger">
             <article><i>✓</i><div><strong>实际完成</strong><p>{snapshot.completedTasks.length ? snapshot.completedTasks.map((task) => task.title).join(" · ") : "还没有完成记录"}</p></div></article>
             <article><i>↘</i><div><strong>输入去向</strong><p>{snapshot.sourceStats.capturedItems} 条输入，{snapshot.sourceStats.plannedItems} 条已安排，{pendingInbox} 条仍待整理</p></div></article>
-            <article><i>◇</i><div><strong>形成知识</strong><p>{snapshot.sourceStats.videos} 个视频 · {snapshot.sourceStats.visualFrames} 帧画面 · {snapshot.sourceStats.knowledgeCards} 张卡片 · {snapshot.sourceStats.knowledgeInquiries} 次有据问答</p></div></article>
+            <article><i>◇</i><div><strong>形成知识</strong><p>{snapshot.sourceStats.videos} 个视频 · {snapshot.sourceStats.visualFrames} 帧画面 · {snapshot.sourceStats.knowledgeCards} 张卡片 · {snapshot.sourceStats.learningTopics} 个专题 · {snapshot.sourceStats.knowledgeInquiries} 次有据问答</p></div></article>
             <article><i>◒</i><div><strong>创作闭环</strong><p>{snapshot.sourceStats.creatorIdeas} 个选题 · {snapshot.sourceStats.creatorReviews} 次发布复盘</p></div></article>
             <article><i>◈</i><div><strong>主动回忆</strong><p>{snapshot.sourceStats.studyCardsCreated} 张新复习卡 · {snapshot.sourceStats.studyReviews} 次真实复习</p></div></article>
           </div>
