@@ -40,6 +40,7 @@ test("server-renders the Evolve Desk product", async () => {
   assert.match(html, /视频总结/);
   assert.match(html, /知识库/);
   assert.match(html, /学习专题/);
+  assert.match(html, /证据星图/);
   assert.match(html, /记忆复习/);
   assert.match(html, /周回顾/);
   assert.match(html, /进化实验室/);

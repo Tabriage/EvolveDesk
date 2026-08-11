@@ -237,6 +237,40 @@ export type KnowledgeRelation = {
   score: number;
 };
 
+export type EvidenceGraphNodeKind = "video" | "frame" | "knowledge" | "topic" | "study";
+export type EvidenceGraphEdgeKind = "contains" | "distills" | "grounds" | "uses" | "reviews" | "relates";
+
+export type EvidenceGraphNode = {
+  id: string;
+  entityId: string;
+  parentId: string | null;
+  kind: EvidenceGraphNodeKind;
+  title: string;
+  detail: string;
+  meta: string;
+  createdAt: string;
+};
+
+export type EvidenceGraphEdge = {
+  id: string;
+  from: string;
+  to: string;
+  kind: EvidenceGraphEdgeKind;
+  label: string;
+};
+
+export type EvidenceGraph = {
+  nodes: EvidenceGraphNode[];
+  edges: EvidenceGraphEdge[];
+  connectedNodeIds: string[];
+  orphanNodeIds: string[];
+};
+
+export type EvidenceGraphPath = {
+  nodeIds: string[];
+  edgeIds: string[];
+};
+
 export type LearningSourceRef = {
   kind: "video" | "knowledge";
   id: string;
@@ -592,3 +626,10 @@ export function saveCreatorReview(
 ): WorkbenchState;
 export function removeCreatorReview(state: WorkbenchState, reviewId: string): WorkbenchState;
 export function findKnowledgeRelations(cards: KnowledgeCard[], limit?: number): KnowledgeRelation[];
+export function buildEvidenceGraph(state: WorkbenchState): EvidenceGraph;
+export function findEvidencePath(
+  graph: EvidenceGraph,
+  fromId: string,
+  toId: string,
+  maxDepth?: number,
+): EvidenceGraphPath | null;

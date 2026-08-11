@@ -11,12 +11,14 @@ import {
   archivePersonalBoard,
   archivePersonalRoute,
   buildWeeklySnapshot,
+  buildEvidenceGraph,
   completeRoutePhase,
   createBoardRecordTask,
   createCreatorIdeaTask,
   createInitialWorkbench,
   createStudyReviewTask,
   findKnowledgeRelations,
+  findEvidencePath,
   getDueStudyCards,
   getTodayKey,
   inboxKind,
@@ -320,6 +322,93 @@ test("knowledge relations expose cross-source shared evidence and ignore same-so
   assert.ok(relations.some((relation) => relation.leftId === "a" && relation.rightId === "b"));
   assert.ok(relations.every((relation) => !(relation.leftId === "a" && relation.rightId === "c")));
   assert.deepEqual(relations.find((relation) => relation.leftId === "a" && relation.rightId === "b")?.sharedTags, ["学习系统"]);
+});
+
+test("evidence graph connects only canonical sources and traces a bounded path", () => {
+  const video = {
+    id: "video-graph",
+    url: "https://example.com/graph-video",
+    platform: "youtube",
+    title: "证据工作流",
+    description: "",
+    createdAt: "2026-08-11T01:00:00.000Z",
+    visualEvidence: [{
+      id: "frame-graph",
+      timestamp: "00:24",
+      observation: "画面展示从资料到复习的连线。",
+    }],
+    summary: { oneSentence: "用真实资料建立可回查的学习链。" },
+  };
+  const groundedCard = {
+    id: "knowledge-graph",
+    title: "保留证据链",
+    content: "每条理解都保留原始画面来源。",
+    tags: ["证据"],
+    sourceUrl: video.url,
+    sourceTitle: video.title,
+    evidenceFrameIds: ["frame-graph", "forged-frame"],
+    createdAt: "2026-08-11T01:05:00.000Z",
+  };
+  const orphanCard = {
+    id: "knowledge-orphan",
+    title: "孤立便签",
+    content: "尚未进入任何后续流程。",
+    tags: ["证据"],
+    sourceUrl: "https://outside.example/source",
+    sourceTitle: "外部资料",
+    evidenceFrameIds: [],
+    createdAt: "2026-08-11T01:06:00.000Z",
+  };
+  const state = {
+    ...createInitialWorkbench(),
+    videos: [video],
+    knowledge: [groundedCard, orphanCard],
+    learningTopics: [{
+      id: "topic-graph",
+      title: "可回查学习",
+      goal: "怎样避免无来源结论？",
+      sources: [
+        { kind: "video", id: video.id },
+        { kind: "knowledge", id: groundedCard.id },
+        { kind: "knowledge", id: "forged-knowledge" },
+      ],
+      map: null,
+      createdAt: "2026-08-11T01:10:00.000Z",
+      updatedAt: "2026-08-11T01:10:00.000Z",
+    }],
+    study: {
+      cards: [{
+        id: "study-graph",
+        prompt: "一条理解为什么要保留来源？",
+        explanation: "这样才能回到原资料核对。",
+        sources: [{ cardId: groundedCard.id }],
+        reviewCount: 0,
+        suspended: false,
+        dueAt: "2026-08-11T01:20:00.000Z",
+        createdAt: "2026-08-11T01:15:00.000Z",
+        updatedAt: "2026-08-11T01:15:00.000Z",
+      }],
+      attempts: [],
+    },
+  };
+  const graph = buildEvidenceGraph(state);
+  const nodeIds = new Set(graph.nodes.map((node) => node.id));
+
+  assert.equal(graph.nodes.length, 6);
+  assert.ok(graph.edges.every((edge) => nodeIds.has(edge.from) && nodeIds.has(edge.to)));
+  assert.ok(graph.edges.some((edge) => edge.kind === "grounds" && edge.from === "frame:video-graph:frame-graph" && edge.to === "knowledge:knowledge-graph"));
+  assert.ok(graph.edges.some((edge) => edge.kind === "reviews" && edge.to === "study:study-graph"));
+  assert.ok(graph.edges.some((edge) => edge.kind === "relates" && edge.to === "knowledge:knowledge-orphan"));
+  assert.ok(graph.edges.every((edge) => !edge.id.includes("forged")));
+  assert.deepEqual(graph.orphanNodeIds, ["knowledge:knowledge-orphan"]);
+  assert.deepEqual(findEvidencePath(graph, "frame:video-graph:frame-graph", "study:study-graph"), {
+    nodeIds: ["frame:video-graph:frame-graph", "knowledge:knowledge-graph", "study:study-graph"],
+    edgeIds: [
+      "grounds:frame:video-graph:frame-graph->knowledge:knowledge-graph",
+      "reviews:knowledge:knowledge-graph->study:study-graph",
+    ],
+  });
+  assert.equal(findEvidencePath(graph, "frame:video-graph:frame-graph", "study:missing"), null);
 });
 
 test("study cards stay grounded, schedule real reviews, and survive migration", () => {

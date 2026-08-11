@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { buildWeeklySnapshot } from "../features/workbench-core.mjs";
+import { buildEvidenceGraph, buildWeeklySnapshot } from "../features/workbench-core.mjs";
 import type { WeeklyReview as WeeklyReviewRecord, WorkbenchState } from "../features/workbench-core.mjs";
 
 type ReviewDraft = Omit<WeeklyReviewRecord, "id" | "createdAt">;
@@ -44,6 +44,7 @@ export function WeeklyReview({
   const [tasksAdded, setTasksAdded] = useState(false);
   const [message, setMessage] = useState("先看事实轨迹，再让 Agent 帮你提炼一个方向");
   const snapshot = useMemo(() => buildWeeklySnapshot(state, shiftedWeek(weekOffset)), [state, weekOffset]);
+  const evidenceGraph = useMemo(() => buildEvidenceGraph(state), [state]);
   const persisted = reviews.find((review) => review.weekKey === snapshot.weekKey) || null;
   const review = (draft?.weekKey === snapshot.weekKey ? draft : null) || persisted;
   const maxDayTotal = Math.max(1, ...snapshot.days.map((day) => day.total));
@@ -180,6 +181,7 @@ export function WeeklyReview({
             <article><i>✓</i><div><strong>实际完成</strong><p>{snapshot.completedTasks.length ? snapshot.completedTasks.map((task) => task.title).join(" · ") : "还没有完成记录"}</p></div></article>
             <article><i>↘</i><div><strong>输入去向</strong><p>{snapshot.sourceStats.capturedItems} 条输入，{snapshot.sourceStats.plannedItems} 条已安排，{pendingInbox} 条仍待整理</p></div></article>
             <article><i>◇</i><div><strong>形成知识</strong><p>{snapshot.sourceStats.videos} 个视频 · {snapshot.sourceStats.visualFrames} 帧画面 · {snapshot.sourceStats.knowledgeCards} 张卡片 · {snapshot.sourceStats.learningTopics} 个专题 · {snapshot.sourceStats.knowledgeInquiries} 次有据问答</p></div></article>
+            <article><i>✦</i><div><strong>当前关系层</strong><p>{evidenceGraph.connectedNodeIds.length}/{evidenceGraph.nodes.length} 个节点已有连接 · {evidenceGraph.edges.length} 条可回查关系 · {evidenceGraph.orphanNodeIds.length} 个节点仍悬空</p></div></article>
             <article><i>◒</i><div><strong>创作闭环</strong><p>{snapshot.sourceStats.creatorIdeas} 个选题 · {snapshot.sourceStats.creatorReviews} 次发布复盘</p></div></article>
             <article><i>◈</i><div><strong>主动回忆</strong><p>{snapshot.sourceStats.studyCardsCreated} 张新复习卡 · {snapshot.sourceStats.studyReviews} 次真实复习</p></div></article>
           </div>

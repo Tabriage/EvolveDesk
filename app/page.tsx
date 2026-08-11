@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { BoardWorkbench } from "./components/BoardWorkbench";
 import { CreatorStudio } from "./components/CreatorStudio";
+import { EvidenceAtlas } from "./components/EvidenceAtlas";
 import { EvolutionLab } from "./components/EvolutionLab";
 import { KnowledgeWorkbench } from "./components/KnowledgeWorkbench";
 import { LearningTopicStudio } from "./components/LearningTopicStudio";
@@ -58,7 +59,7 @@ import type {
   WorkbenchState,
 } from "./features/workbench-core.mjs";
 
-type ActiveView = "today" | "routes" | "boards" | "creator" | "inbox" | "video" | "knowledge" | "topics" | "study" | "review" | "memory" | "lab";
+type ActiveView = "today" | "routes" | "boards" | "creator" | "inbox" | "video" | "knowledge" | "topics" | "graph" | "study" | "review" | "memory" | "lab";
 
 type WorkPlan = {
   title: string;
@@ -292,7 +293,7 @@ export default function Home() {
   }
 
   return (
-    <main className={`app-shell ${activeView === "topics" ? "topic-mode" : ""}`}>
+    <main className={`app-shell ${activeView === "topics" ? "topic-mode" : activeView === "graph" ? "graph-mode" : ""}`}>
       <header className="topbar">
         <button className="brand" onClick={() => setActiveView("today")}>
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
@@ -314,6 +315,7 @@ export default function Home() {
         <button className={activeView === "video" ? "active" : ""} onClick={() => setActiveView("video")}><span>▷</span> 视频总结<small>{desk.videos.length}</small></button>
         <button className={activeView === "knowledge" ? "active" : ""} onClick={() => setActiveView("knowledge")}><span>◇</span> 知识库<small>{desk.knowledge.length}</small></button>
         <button className={activeView === "topics" ? "active" : ""} onClick={() => setActiveView("topics")}><span>⌘</span> 学习专题<small>{desk.learningTopics.length}</small></button>
+        <button className={activeView === "graph" ? "active" : ""} onClick={() => setActiveView("graph")}><span>✦</span> 证据星图<small>{desk.knowledge.length + desk.learningTopics.length}</small></button>
         <button className={activeView === "study" ? "active" : ""} onClick={() => setActiveView("study")}><span>◈</span> 记忆复习<small>{dueStudyCards.length}</small></button>
         <button className={activeView === "review" ? "active" : ""} onClick={() => setActiveView("review")}><span>↺</span> 周回顾<small>{desk.weeklyReviews.length}</small></button>
         <button className={activeView === "memory" ? "active" : ""} onClick={() => setActiveView("memory")}><span>◎</span> 自省记忆</button>
@@ -327,6 +329,7 @@ export default function Home() {
         <div className="rail-capability"><i style={{ background: "#ff6d5a" }} /><span>创作闭环</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>知识再利用</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#1f9d6a" }} /><span>多源专题</span><b>运行中</b></div>
+        <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>证据关系追踪</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#7657d6" }} /><span>间隔复习</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#d39a2c" }} /><span>周度回顾</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#1f9d6a" }} /><span>本地记忆</span><b>运行中</b></div>
@@ -537,6 +540,15 @@ export default function Home() {
           />
         )}
 
+        {activeView === "graph" && hydrated && (
+          <EvidenceAtlas
+            state={desk}
+            onOpenNode={(kind) => setActiveView(kind === "video" || kind === "frame" ? "video" : kind === "knowledge" ? "knowledge" : kind === "topic" ? "topics" : "study")}
+            onOpenVideo={() => setActiveView("video")}
+            onCreateTask={(task) => createTask(task.title, "agent", task.note)}
+          />
+        )}
+
         {activeView === "study" && hydrated && (
           <StudyStudio
             baseURL={baseURL}
@@ -607,6 +619,14 @@ export default function Home() {
           <ol className="topic-guide-steps"><li><i>1</i><div><strong>钉住资料</strong><p>最多选择 16 条本地视频总结和知识卡。</p></div></li><li><i>2</i><div><strong>围绕问题</strong><p>先写学习目标，避免按来源机械复述。</p></div></li><li><i>3</i><div><strong>重绑引用</strong><p>服务端只保留实际提供的 S 编号与节点关系。</p></div></li><li><i>4</i><div><strong>留下缺口</strong><p>开放问题可以明确加入今日求证任务。</p></div></li></ol>
           <div className="video-plan-b"><span>资料边界</span><p>摘要筛选在浏览器完成；原始关键帧与完整字幕不会随专题请求发送。</p></div>
           <div className="guardrail-footer"><i className={connected ? "online" : ""} /><div><strong>{connected ? "专题模型已连接" : "等待模型连接"}</strong><p>资料架可以离线保存</p></div><button onClick={() => setSettingsOpen(true)}>设置</button></div>
+        </aside>
+      ) : activeView === "graph" ? (
+        <aside className="agent-panel topic-guide-panel atlas-guide-panel">
+          <header><div className="agent-glyph atlas-glyph"><span>✦</span></div><div><strong>关系追踪边界</strong><small>本地标识 · 确定性生成</small></div><button aria-label="打开连接设置" onClick={() => setSettingsOpen(true)}>•••</button></header>
+          <div className="topic-guide-intro"><span>IDS → EDGES → TRACE</span><h3>这张图不猜“相关”，<br />只展开已经发生的连接。</h3><p>视频 URL、画面 ID、知识卡 ID、专题来源和复习来源共同决定关系；模型无法在这里新增边。</p></div>
+          <ol className="topic-guide-steps"><li><i>1</i><div><strong>明确引用</strong><p>实线来自保存时已经校验过的对象标识。</p></div></li><li><i>2</i><div><strong>语义旁路</strong><p>知识卡点线只提示共享标签或词项，不冒充因果。</p></div></li><li><i>3</i><div><strong>最近来源链</strong><p>从专题或复习反向找到视频与画面。</p></div></li><li><i>4</i><div><strong>暴露悬空</strong><p>找不到来源时明确列出，并可加入补证任务。</p></div></li></ol>
+          <div className="video-plan-b"><span>计算边界</span><p>图谱只在当前浏览器根据本地工作台状态计算；不会发送资料，也不会写入新的隐藏关系。</p></div>
+          <div className="guardrail-footer"><i className="online" /><div><strong>本地关系层就绪</strong><p>无需模型连接</p></div><button onClick={() => setActiveView("video")}>加资料</button></div>
         </aside>
       ) : (
         <WorkAgent baseURL={baseURL} apiKey={apiKey} model={model} connected={connected} state={desk} onNeedSettings={() => setSettingsOpen(true)} onApply={applyWorkPlan} />

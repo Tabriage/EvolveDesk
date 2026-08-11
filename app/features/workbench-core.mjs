@@ -2083,3 +2083,210 @@ export function findKnowledgeRelations(cards, limit = 8) {
     .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
     .slice(0, Math.max(0, Math.min(Number(limit) || 0, 24)));
 }
+
+function evidenceGraphNodeId(kind, entityId, parentId = "") {
+  return `${kind}:${parentId ? `${parentId}:` : ""}${entityId}`;
+}
+
+export function buildEvidenceGraph(state) {
+  const value = state && typeof state === "object" ? state : {};
+  const nodes = [];
+  const edges = [];
+  const nodeIds = new Set();
+  const edgeIds = new Set();
+  const addNode = (node) => {
+    if (!node.id || nodeIds.has(node.id) || !node.title) return;
+    nodeIds.add(node.id);
+    nodes.push(node);
+  };
+  const addEdge = (from, to, kind, label) => {
+    if (!nodeIds.has(from) || !nodeIds.has(to) || from === to) return;
+    const id = `${kind}:${from}->${to}`;
+    if (edgeIds.has(id)) return;
+    edgeIds.add(id);
+    edges.push({ id, from, to, kind, label: cleanText(label, 120) });
+  };
+  const videos = validArray(value.videos).slice(-MAX_VIDEOS).filter((video) => cleanText(video?.id, 100));
+  const knowledge = validArray(value.knowledge).slice(-MAX_KNOWLEDGE_CARDS).filter((card) => cleanText(card?.id, 100));
+  const topics = validArray(value.learningTopics).slice(-MAX_LEARNING_TOPICS).filter((topic) => cleanText(topic?.id, 100));
+  const studyCards = validArray(value.study?.cards).slice(-MAX_STUDY_CARDS).filter((card) => cleanText(card?.id, 100));
+  const videoByUrl = new Map();
+  const frameNodeByVideoAndId = new Map();
+
+  for (const video of videos) {
+    const videoId = cleanText(video.id, 100);
+    const nodeId = evidenceGraphNodeId("video", videoId);
+    const videoUrl = cleanText(video.url, 2_000);
+    addNode({
+      id: nodeId,
+      entityId: videoId,
+      parentId: null,
+      kind: "video",
+      title: cleanText(video.title, 120),
+      detail: cleanText(video.summary?.oneSentence, 600) || cleanText(video.description, 600) || "已保存的视频资料",
+      meta: `${cleanText(video.platform, 30) || "video"} · ${validArray(video.visualEvidence).length} 帧`,
+      createdAt: validIso(video.createdAt),
+    });
+    if (videoUrl && !videoByUrl.has(videoUrl)) videoByUrl.set(videoUrl, video);
+    for (const frame of validArray(video.visualEvidence).slice(0, 8)) {
+      const frameId = cleanText(frame?.id, 100);
+      if (!frameId) continue;
+      const frameNodeId = evidenceGraphNodeId("frame", frameId, videoId);
+      const frameDetail = cleanText(frame.observation, 600) || cleanText(frame.modelText, 600) || cleanText(frame.ocrText, 600) || cleanText(frame.uncertainty, 600) || "本地抽取的画面证据";
+      addNode({
+        id: frameNodeId,
+        entityId: frameId,
+        parentId: videoId,
+        kind: "frame",
+        title: `${cleanText(frame.timestamp, 16) || "画面"} · ${frameDetail.slice(0, 42)}`,
+        detail: frameDetail,
+        meta: `画面证据 · ${cleanText(video.title, 80)}`,
+        createdAt: validIso(video.createdAt),
+      });
+      frameNodeByVideoAndId.set(`${videoId}:${frameId}`, frameNodeId);
+      addEdge(nodeId, frameNodeId, "contains", "包含画面");
+    }
+  }
+
+  for (const card of knowledge) {
+    const cardId = cleanText(card.id, 100);
+    addNode({
+      id: evidenceGraphNodeId("knowledge", cardId),
+      entityId: cardId,
+      parentId: null,
+      kind: "knowledge",
+      title: cleanText(card.title, 120),
+      detail: cleanText(card.content, 600),
+      meta: validArray(card.tags).length ? validArray(card.tags).slice(0, 3).map((tag) => `#${cleanText(tag, 24)}`).join(" ") : cleanText(card.sourceTitle, 120) || "知识卡",
+      createdAt: validIso(card.createdAt),
+    });
+  }
+
+  for (const topic of topics) {
+    const topicId = cleanText(topic.id, 100);
+    addNode({
+      id: evidenceGraphNodeId("topic", topicId),
+      entityId: topicId,
+      parentId: null,
+      kind: "topic",
+      title: cleanText(topic.title, 120),
+      detail: cleanText(topic.map?.thesis, 600) || cleanText(topic.goal, 600),
+      meta: `${validArray(topic.sources).length} 条资料 · ${validArray(topic.map?.nodes).length} 节点`,
+      createdAt: validIso(topic.updatedAt, validIso(topic.createdAt)),
+    });
+  }
+
+  for (const card of studyCards) {
+    const studyId = cleanText(card.id, 100);
+    const dueAt = validIso(card.dueAt);
+    const due = dueAt && new Date(dueAt).getTime() <= Date.now();
+    addNode({
+      id: evidenceGraphNodeId("study", studyId),
+      entityId: studyId,
+      parentId: null,
+      kind: "study",
+      title: cleanText(card.prompt, 120),
+      detail: cleanText(card.explanation, 600) || "由知识卡生成的主动回忆材料",
+      meta: card.suspended ? "已暂停" : due ? "当前到期" : `${Number.isFinite(card.reviewCount) ? Math.max(0, Math.round(card.reviewCount)) : 0} 次复习`,
+      createdAt: validIso(card.updatedAt, validIso(card.createdAt)),
+    });
+  }
+
+  for (const card of knowledge) {
+    const cardId = cleanText(card.id, 100);
+    const cardNodeId = evidenceGraphNodeId("knowledge", cardId);
+    const sourceVideo = videoByUrl.get(cleanText(card.sourceUrl, 2_000));
+    if (!sourceVideo) continue;
+    const videoId = cleanText(sourceVideo.id, 100);
+    addEdge(evidenceGraphNodeId("video", videoId), cardNodeId, "distills", "提炼为知识");
+    for (const frameId of [...new Set(validArray(card.evidenceFrameIds).map((id) => cleanText(id, 100)).filter(Boolean))]) {
+      const frameNodeId = frameNodeByVideoAndId.get(`${videoId}:${frameId}`);
+      if (frameNodeId) addEdge(frameNodeId, cardNodeId, "grounds", "画面支撑");
+    }
+  }
+
+  for (const topic of topics) {
+    const topicNodeId = evidenceGraphNodeId("topic", cleanText(topic.id, 100));
+    for (const source of validArray(topic.sources)) {
+      const kind = source?.kind === "video" ? "video" : source?.kind === "knowledge" ? "knowledge" : "";
+      const sourceId = cleanText(source?.id, 100);
+      if (kind && sourceId) addEdge(evidenceGraphNodeId(kind, sourceId), topicNodeId, "uses", "进入专题");
+    }
+  }
+
+  for (const studyCard of studyCards) {
+    const studyNodeId = evidenceGraphNodeId("study", cleanText(studyCard.id, 100));
+    for (const source of validArray(studyCard.sources)) {
+      const cardId = cleanText(source?.cardId, 100);
+      if (cardId) addEdge(evidenceGraphNodeId("knowledge", cardId), studyNodeId, "reviews", "生成复习");
+    }
+  }
+
+  for (const relation of findKnowledgeRelations(knowledge, 24)) {
+    const shared = [...validArray(relation.sharedTags), ...validArray(relation.sharedTerms)].filter(Boolean).slice(0, 3).join(" · ");
+    addEdge(
+      evidenceGraphNodeId("knowledge", relation.leftId),
+      evidenceGraphNodeId("knowledge", relation.rightId),
+      "relates",
+      shared ? `共享 ${shared}` : "跨来源关联",
+    );
+  }
+
+  const explicitAdjacency = new Map(nodes.map((node) => [node.id, []]));
+  for (const edge of edges.filter((edge) => edge.kind !== "relates")) {
+    explicitAdjacency.get(edge.from)?.push(edge.to);
+    explicitAdjacency.get(edge.to)?.push(edge.from);
+  }
+  const grounded = new Set(nodes.filter((node) => node.kind === "video" || node.kind === "frame").map((node) => node.id));
+  const queue = [...grounded];
+  while (queue.length) {
+    const current = queue.shift();
+    for (const next of explicitAdjacency.get(current) || []) {
+      if (grounded.has(next)) continue;
+      grounded.add(next);
+      queue.push(next);
+    }
+  }
+  return {
+    nodes,
+    edges,
+    connectedNodeIds: nodes.filter((node) => grounded.has(node.id)).map((node) => node.id),
+    orphanNodeIds: nodes.filter((node) => !grounded.has(node.id)).map((node) => node.id),
+  };
+}
+
+export function findEvidencePath(graph, fromId, toId, maxDepth = 6) {
+  const value = graph && typeof graph === "object" ? graph : {};
+  const nodes = validArray(value.nodes);
+  const edges = validArray(value.edges);
+  const nodeIds = new Set(nodes.map((node) => cleanText(node?.id, 240)).filter(Boolean));
+  const from = cleanText(fromId, 240);
+  const to = cleanText(toId, 240);
+  if (!nodeIds.has(from) || !nodeIds.has(to)) return null;
+  if (from === to) return { nodeIds: [from], edgeIds: [] };
+  const depthLimit = Math.max(1, Math.min(Number(maxDepth) || 6, 12));
+  const adjacency = new Map(nodes.map((node) => [node.id, []]));
+  for (const edge of edges) {
+    if (!nodeIds.has(edge?.from) || !nodeIds.has(edge?.to) || !edge?.id) continue;
+    adjacency.get(edge.from).push({ nodeId: edge.to, edgeId: edge.id });
+    adjacency.get(edge.to).push({ nodeId: edge.from, edgeId: edge.id });
+  }
+  const queue = [{ nodeId: from, nodeIds: [from], edgeIds: [] }];
+  const visited = new Set([from]);
+  while (queue.length) {
+    const current = queue.shift();
+    if (current.edgeIds.length >= depthLimit) continue;
+    for (const next of adjacency.get(current.nodeId) || []) {
+      if (visited.has(next.nodeId)) continue;
+      const path = {
+        nodeId: next.nodeId,
+        nodeIds: [...current.nodeIds, next.nodeId],
+        edgeIds: [...current.edgeIds, next.edgeId],
+      };
+      if (next.nodeId === to) return { nodeIds: path.nodeIds, edgeIds: path.edgeIds };
+      visited.add(next.nodeId);
+      queue.push(path);
+    }
+  }
+  return null;
+}
