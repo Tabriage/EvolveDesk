@@ -2435,3 +2435,46 @@ button:focus-visible,textarea:focus-visible,input:focus-visible,select:focus-vis
   .atlas-guide-panel { min-height:0; }
   .atlas-empty>div { align-items:flex-start; flex-direction:column; }
 }
+
+/* Topic revision proof sheet — preview before overwrite */
+.topic-revision-review { margin:0 0 13px; overflow:hidden; border:1px solid #cfd8d5; border-radius:17px; background:#fbfcfb; box-shadow:0 15px 42px rgba(24,35,38,.055); }
+.topic-revision-review>header { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; padding:17px 19px 14px; border-bottom:1px solid #dde3e0; background:linear-gradient(105deg,#f5f8f7,#fbfcfb 60%,#f0f3ff); }
+.topic-revision-review>header span { color:#3159f5; font:6px var(--font-geist-mono); font-weight:800; letter-spacing:.12em; }
+.topic-revision-review>header h2 { margin:5px 0 0; font:600 17px/1.25 Georgia,"Songti SC",serif; }
+.topic-revision-review>header>strong { flex:none; padding:7px 9px; border:1px solid #cfd7ff; border-radius:8px; background:white; color:#3159f5; font:7px var(--font-geist-mono); }
+.revision-source-delta { display:grid; grid-template-columns:1fr 1.3fr; gap:1px; background:#dfe4e2; }
+.revision-source-delta>div { min-height:64px; padding:12px 16px; background:#f8faf9; }
+.revision-source-delta span { color:#7d8884; font:6px var(--font-geist-mono); font-weight:800; letter-spacing:.08em; }
+.revision-source-delta p { display:flex; flex-wrap:wrap; gap:5px; margin:8px 0 0; color:#66716d; font-size:7px; line-height:1.55; }
+.revision-source-delta p.changed { color:#8a5c24; }
+.revision-source-delta p i { padding:4px 6px; border-radius:6px; background:#edf0ef; font-style:normal; }
+.revision-source-delta p i.added { background:#e6f4ed; color:#277455; }.revision-source-delta p i.removed { background:#fff0ed; color:#a24f44; text-decoration:line-through; }
+.revision-thesis { display:grid; grid-template-columns:1fr 24px 1fr; align-items:stretch; gap:0; padding:13px 16px; border-bottom:1px solid #dfe4e2; background:white; }
+.revision-thesis article { padding:10px 12px; border:1px solid #dfe4e2; border-radius:10px; background:#f7f9f8; }
+.revision-thesis article:last-child { border-color:#bfcaff; background:#f2f4ff; }
+.revision-thesis span { color:#89928f; font:6px var(--font-geist-mono); font-weight:800; }
+.revision-thesis p { margin:7px 0 0; color:#4c5854; font:500 10px/1.55 Georgia,"Songti SC",serif; }
+.revision-thesis>b { display:grid; place-items:center; color:#9da6a3; font:8px var(--font-geist-mono); }
+.revision-ledger { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; padding:12px 16px; background:#f4f6f5; }
+.revision-ledger>article { min-width:0; min-height:105px; padding:11px; border:1px solid #dde3e0; border-top:3px solid #6a9f88; border-radius:10px; background:white; }
+.revision-ledger>article.changed { border-top-color:#3159f5; }.revision-ledger>article.removed { border-top-color:#e56a5a; }
+.revision-ledger article>header { display:flex; align-items:center; justify-content:space-between; margin-bottom:7px; }
+.revision-ledger article>header span { color:#60706a; font-size:7px; font-weight:800; }.revision-ledger article>header strong { color:#8a9490; font:8px var(--font-geist-mono); }
+.revision-ledger article p { margin:5px 0; color:#74807b; font-size:6px; line-height:1.5; }
+.topic-revision-review>blockquote { margin:0; padding:13px 18px; border-top:1px solid #dfe4e2; border-bottom:1px solid #dfe4e2; background:#fffdf8; }
+.topic-revision-review>blockquote span { color:#9a7040; font:6px var(--font-geist-mono); font-weight:800; letter-spacing:.08em; }
+.topic-revision-review>blockquote p { margin:6px 0 0; color:#5e6259; font-size:8px; line-height:1.6; }
+.topic-revision-review>blockquote small { display:block; margin-top:6px; color:#92724b; font-size:6px; }
+.topic-revision-review>footer { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:12px 16px; background:#fbfcfb; }
+.topic-revision-review>footer>p { display:flex; align-items:center; gap:7px; margin:0; color:#7a8581; font-size:7px; }
+.topic-revision-review>footer>p i { width:6px; height:6px; border-radius:50%; background:#e5a62a; }
+.topic-revision-review>footer>div { display:flex; flex:none; gap:6px; }
+.topic-revision-review>footer button { min-height:34px; padding:0 11px; border:1px solid #d8dfdc; border-radius:8px; background:white; color:#6b7672; font-size:7px; font-weight:700; cursor:pointer; }
+.topic-revision-review>footer button:last-child { min-width:120px; border:0; background:#3159f5; color:white; }.topic-revision-review>footer button span { float:right; margin-left:15px; }
+
+@media (max-width:760px) {
+  .topic-revision-review>header,.topic-revision-review>footer { align-items:flex-start; flex-direction:column; }
+  .revision-source-delta,.revision-thesis,.revision-ledger { grid-template-columns:1fr; }
+  .revision-thesis>b { min-height:22px; transform:rotate(90deg); }
+  .topic-revision-review>footer>div { width:100%; }.topic-revision-review>footer button { flex:1; }
+}

@@ -616,7 +616,7 @@ export default function Home() {
         <aside className="agent-panel topic-guide-panel">
           <header><div className="agent-glyph topic-glyph"><span>⌘</span></div><div><strong>专题编织边界</strong><small>多来源 · 可回查</small></div><button aria-label="打开连接设置" onClick={() => setSettingsOpen(true)}>•••</button></header>
           <div className="topic-guide-intro"><span>SOURCES → RELATIONS → GAPS</span><h3>不是画一张好看的图，<br />而是保留理解从哪里来。</h3><p>每个节点必须引用当前专题的真实视频或知识卡；缺少证据的内容只能进入待求证区。</p></div>
-          <ol className="topic-guide-steps"><li><i>1</i><div><strong>钉住资料</strong><p>最多选择 16 条本地视频总结和知识卡。</p></div></li><li><i>2</i><div><strong>围绕问题</strong><p>先写学习目标，避免按来源机械复述。</p></div></li><li><i>3</i><div><strong>重绑引用</strong><p>服务端只保留实际提供的 S 编号与节点关系。</p></div></li><li><i>4</i><div><strong>留下缺口</strong><p>开放问题可以明确加入今日求证任务。</p></div></li></ol>
+          <ol className="topic-guide-steps"><li><i>1</i><div><strong>钉住资料</strong><p>最多选择 16 条本地视频总结和知识卡。</p></div></li><li><i>2</i><div><strong>围绕问题</strong><p>先写学习目标，避免按来源机械复述。</p></div></li><li><i>3</i><div><strong>重绑引用</strong><p>服务端只保留实际提供的 S 编号与节点关系。</p></div></li><li><i>4</i><div><strong>审阅修订</strong><p>新增资料后先比较保留、改写与移除，再决定是否采用。</p></div></li><li><i>5</i><div><strong>留下缺口</strong><p>采用后的开放问题可以明确加入今日求证任务。</p></div></li></ol>
           <div className="video-plan-b"><span>资料边界</span><p>摘要筛选在浏览器完成；原始关键帧与完整字幕不会随专题请求发送。</p></div>
           <div className="guardrail-footer"><i className={connected ? "online" : ""} /><div><strong>{connected ? "专题模型已连接" : "等待模型连接"}</strong><p>资料架可以离线保存</p></div><button onClick={() => setSettingsOpen(true)}>设置</button></div>
         </aside>

@@ -68,7 +68,7 @@ export function QuickStart({ connected, onClose, onOpenSettings, onCreateTask }:
               <li><i>4</i><div><strong>重复流程再做成个人业务台</strong><small>从内容、学习或订单模板开始，不必自己设计系统。</small></div></li>
               <li><i>5</i><div><strong>有内容目标再打开创作工作室</strong><small>从真实素材形成选题，发布后再用数据复盘。</small></div></li>
               <li><i>6</i><div><strong>教程视频可以核对真实画面</strong><small>本机抽取采样帧与 OCR，结论能回到确切时间点。</small></div></li>
-              <li><i>7</i><div><strong>多条资料可以编成学习专题</strong><small>节点保留视频或知识卡来源，证据不足就进入待求证区。</small></div></li>
+              <li><i>7</i><div><strong>多条资料可以编成学习专题</strong><small>节点保留来源；新增资料后的新版脉络先看差异，采用后才覆盖旧版。</small></div></li>
               <li><i>8</i><div><strong>证据星图会展开已有关系</strong><small>从专题或复习反向追到知识、视频和画面，并明确标出悬空节点。</small></div></li>
               <li><i>9</i><div><strong>想真正记住再进入记忆复习</strong><small>从知识卡生成闪卡和测验，按到期时间主动回忆。</small></div></li>
             </ol>

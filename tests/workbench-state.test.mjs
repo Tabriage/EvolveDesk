@@ -13,6 +13,7 @@ import {
   buildWeeklySnapshot,
   buildEvidenceGraph,
   completeRoutePhase,
+  compareLearningMaps,
   createBoardRecordTask,
   createCreatorIdeaTask,
   createInitialWorkbench,
@@ -253,6 +254,13 @@ test("learning topics keep only real sources, grounded nodes, and valid relation
   assert.equal(saved.learningTopics[0].map.edges.length, 1);
   assert.deepEqual(saved.learningTopics[0].map.nodes[1].sourceRefs, [{ kind: "knowledge", id: knowledge.id }]);
   assert.equal(saved.activity.at(-1)?.source, "agent");
+  const rejectedOverwrite = saveLearningTopic(saved, {
+    ...saved.learningTopics[0],
+    goal: "一个尚未审阅的新问题",
+    map: null,
+  });
+  assert.equal(rejectedOverwrite, saved);
+  assert.equal(rejectedOverwrite.learningTopics[0].map.thesis, "先统一输入，再随使用逐步增加结构。");
   const weekly = buildWeeklySnapshot(saved, new Date(2026, 7, 11, 12));
   assert.equal(weekly.sourceStats.learningTopics, 1);
   const restored = parseWorkbenchState(JSON.stringify(saved));
@@ -409,6 +417,38 @@ test("evidence graph connects only canonical sources and traces a bounded path",
     ],
   });
   assert.equal(findEvidencePath(graph, "frame:video-graph:frame-graph", "study:missing"), null);
+});
+
+test("learning map diffs separate preserved, changed, added, and removed nodes", () => {
+  const source = { kind: "knowledge", id: "knowledge-diff" };
+  const previous = {
+    thesis: "旧中心理解",
+    nodes: [
+      { id: "old-1", kind: "method", title: "保留来源", summary: "每条理解保留引用。", sourceRefs: [source] },
+      { id: "old-2", kind: "idea", title: "渐进整理", summary: "使用时再增加结构。", sourceRefs: [source] },
+      { id: "old-3", kind: "contrast", title: "旧边界", summary: "旧资料中的限制。", sourceRefs: [source] },
+    ],
+    edges: [],
+    openQuestions: [],
+  };
+  const next = {
+    thesis: "新版中心理解",
+    nodes: [
+      { id: "new-1", kind: "method", title: "保留来源", summary: "每条理解保留引用。", sourceRefs: [source] },
+      { id: "new-2", kind: "idea", title: "渐进整理", summary: "需要使用时再增加结构，并明确审阅。", sourceRefs: [source] },
+      { id: "new-3", kind: "evidence", title: "新增核对", summary: "新版加入核对步骤。", sourceRefs: [source] },
+    ],
+    edges: [],
+    openQuestions: [],
+  };
+
+  assert.deepEqual(compareLearningMaps(previous, next), {
+    added: ["新增核对"],
+    removed: ["旧边界"],
+    changed: ["渐进整理"],
+    preserved: ["保留来源"],
+    thesisChanged: true,
+  });
 });
 
 test("study cards stay grounded, schedule real reviews, and survive migration", () => {

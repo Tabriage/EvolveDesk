@@ -285,6 +285,44 @@ function sanitizeLearningMap(map, sourceIndex, topicSources) {
   return thesis ? { thesis, nodes, edges, openQuestions } : null;
 }
 
+function learningMapNodeKey(node) {
+  return cleanText(node?.title, 100).toLocaleLowerCase("zh-CN");
+}
+
+function learningMapNodeFingerprint(node) {
+  return JSON.stringify({
+    kind: ["idea", "method", "evidence", "contrast"].includes(node?.kind) ? node.kind : "idea",
+    summary: cleanText(node?.summary, 600),
+    sources: validArray(node?.sourceRefs).map(learningSourceKey).filter(Boolean).sort(),
+  });
+}
+
+export function compareLearningMaps(previous, next) {
+  const previousValue = previous && typeof previous === "object" ? previous : {};
+  const nextValue = next && typeof next === "object" ? next : {};
+  const previousNodes = validArray(previousValue.nodes).filter((node) => learningMapNodeKey(node));
+  const nextNodes = validArray(nextValue.nodes).filter((node) => learningMapNodeKey(node));
+  const previousIndex = new Map(previousNodes.map((node) => [learningMapNodeKey(node), node]));
+  const nextIndex = new Map(nextNodes.map((node) => [learningMapNodeKey(node), node]));
+  const added = nextNodes.filter((node) => !previousIndex.has(learningMapNodeKey(node))).map((node) => cleanText(node.title, 100));
+  const removed = previousNodes.filter((node) => !nextIndex.has(learningMapNodeKey(node))).map((node) => cleanText(node.title, 100));
+  const changed = nextNodes.filter((node) => {
+    const oldNode = previousIndex.get(learningMapNodeKey(node));
+    return oldNode && learningMapNodeFingerprint(oldNode) !== learningMapNodeFingerprint(node);
+  }).map((node) => cleanText(node.title, 100));
+  const preserved = nextNodes.filter((node) => {
+    const oldNode = previousIndex.get(learningMapNodeKey(node));
+    return oldNode && learningMapNodeFingerprint(oldNode) === learningMapNodeFingerprint(node);
+  }).map((node) => cleanText(node.title, 100));
+  return {
+    added,
+    removed,
+    changed,
+    preserved,
+    thesisChanged: cleanText(previousValue.thesis, 600) !== cleanText(nextValue.thesis, 600),
+  };
+}
+
 function sanitizeLearningTopic(topic, sourceIndex) {
   const value = topic && typeof topic === "object" ? topic : {};
   const sources = [];
@@ -1041,6 +1079,7 @@ export function saveLearningTopic(state, input, actor = "human") {
     updatedAt: now,
   }, sourceIndex);
   if (!topic.title || topic.goal.length < 4 || topic.sources.length < 2) return state;
+  if (existing?.map && !topic.map) return state;
   const mapped = Boolean(topic.map);
   return {
     ...state,

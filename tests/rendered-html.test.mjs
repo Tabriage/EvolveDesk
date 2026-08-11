@@ -99,6 +99,34 @@ test("learning topic Agent requires at least two real source digests", async () 
   assert.match((await response.json()).error, /至少选择两条/);
 });
 
+test("learning topic revision requires a reviewable previous map", async () => {
+  const worker = await createWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/agent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "revise-learning-topic",
+        baseURL: "http://localhost:62783/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        title: "学习系统",
+        goal: "新增资料后哪些理解仍然成立？",
+        sources: [
+          { kind: "video", id: "video-1", title: "来源一", digest: "第一条真实摘要包含可执行方法。" },
+          { kind: "knowledge", id: "knowledge-1", title: "来源二", digest: "第二条真实卡片补充了适用边界。" },
+        ],
+        previousTopic: { title: "旧专题", goal: "旧问题", sources: [], map: null },
+      }),
+    }),
+    env,
+    context,
+  );
+
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /缺少可审阅的旧脉络/);
+});
+
 test("route designer requires a concrete direction before calling a model", async () => {
   const worker = await createWorker();
   const response = await worker.fetch(

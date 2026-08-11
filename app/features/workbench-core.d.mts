@@ -298,6 +298,14 @@ export type LearningMap = {
   openQuestions: Array<{ id: string; question: string; reason: string }>;
 };
 
+export type LearningMapDiff = {
+  added: string[];
+  removed: string[];
+  changed: string[];
+  preserved: string[];
+  thesisChanged: boolean;
+};
+
 export type LearningTopic = {
   id: string;
   title: string;
@@ -559,6 +567,7 @@ export function saveLearningTopic(
   input: Omit<LearningTopic, "id" | "createdAt" | "updatedAt"> & { id?: string; map?: LearningMap | null },
   actor?: "human" | "agent",
 ): WorkbenchState;
+export function compareLearningMaps(previous: LearningMap, next: LearningMap): LearningMapDiff;
 export function removeLearningTopic(state: WorkbenchState, topicId: string): WorkbenchState;
 export function saveStudyCards(state: WorkbenchState, cards: StudyCardDraft[], actor?: "agent" | "human"): WorkbenchState;
 export function rateStudyCard(
