@@ -600,7 +600,7 @@ export default function Home() {
         <aside className="agent-panel lab-guardrail">
           <header><div className="agent-glyph"><span>⌁</span></div><div><strong>执行边界</strong><small>写死在本地服务中</small></div><button aria-label="打开连接设置" onClick={() => setSettingsOpen(true)}>•••</button></header>
           <div className="guardrail-intro"><span>原则 02</span><h3>Agent 可以写代码，<br />不能扩大自己的权力。</h3><p>它没有终端工具，也无法修改模型连接、沙箱规则、依赖或构建配置。</p></div>
-          <ol className="guardrail-gates"><li><i>1</i><div><strong>路径门</strong><p>只允许产品界面、组件和测试文件。</p></div></li><li><i>2</i><div><strong>内容门</strong><p>阻断密钥、外部网络和动态执行。</p></div></li><li><i>3</i><div><strong>指纹门</strong><p>文件有变化就拒绝覆盖，避免踩掉人工编辑。</p></div></li><li><i>4</i><div><strong>确认门</strong><p>逐文件看完差异，由你触发最终写入。</p></div></li></ol>
+          <ol className="guardrail-gates"><li><i>1</i><div><strong>路径门</strong><p>只允许产品界面、组件和测试文件。</p></div></li><li><i>2</i><div><strong>内容门</strong><p>阻断密钥、外部网络和动态执行。</p></div></li><li><i>3</i><div><strong>指纹门</strong><p>文件有变化就拒绝覆盖，避免踩掉人工编辑。</p></div></li><li><i>4</i><div><strong>隔离门</strong><p>临时 worktree 验证通过后才形成独立提交。</p></div></li><li><i>5</i><div><strong>远端门</strong><p>推送和草稿 PR 需要再次明确确认。</p></div></li></ol>
           <div className="protected-zone"><span>永不开放</span><code>tools/</code><code>app/api/</code><code>EvolutionLab.tsx</code><code>.env*</code><code>package.json</code><code>.git/</code></div>
           <div className="guardrail-footer"><i className={connected ? "online" : ""} /><div><strong>{connected ? "模型已连接" : "等待模型连接"}</strong><p>密钥只停留在当前页面内存</p></div><button onClick={() => setSettingsOpen(true)}>设置</button></div>
         </aside>
@@ -643,7 +643,7 @@ export default function Home() {
             <label>Base URL<input value={baseURL} onChange={(event) => setBaseURL(event.target.value)} /></label>
             <label>API 密钥<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="输入本地服务密钥" autoComplete="off" /></label>
             <label>模型{models.length ? <select value={model} onChange={(event) => setModel(event.target.value)}>{models.map((item) => <option key={item}>{item}</option>)}</select> : <input value={model} onChange={(event) => setModel(event.target.value)} placeholder="连接后自动发现，也可手动填写" />}</label>
-            <div className="settings-note"><span>安全边界</span><p>只允许连接 localhost / 127.0.0.1。行动 Agent 只能提出结构化动作；源码 Agent 只能在白名单内生成可审阅差异。</p></div>
+            <div className="settings-note"><span>安全边界</span><p>只允许连接 localhost / 127.0.0.1。行动 Agent 只能提出结构化动作；源码 Agent 只返回白名单文件内容，不能自行提交或推送。</p></div>
             <button className="connect-button" onClick={connect}>{connected ? "重新检查连接" : "检查连接"}</button>
           </section>
         </div>

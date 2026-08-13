@@ -3,10 +3,13 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { Output, ToolLoopAgent } from "ai";
 import { z } from "zod";
 import {
-  applyProposal,
+  assertEvolutionGitReady,
+  commitProposal,
   createProposal,
   discardProposal,
   latestProposal,
+  publishProposal,
+  refreshProposalReview,
   rollbackProposal,
   sourceContext,
 } from "./evolution-core.mjs";
@@ -31,6 +34,7 @@ let localMediaImportBusy = false;
 let modelDownloadBusy = false;
 let videoTranscriptionBusy = false;
 let visualEvidenceBusy = false;
+let sourceEvolutionBusy = false;
 
 const outputSchema = z.object({
   title: z.string().min(2).max(80),
@@ -92,6 +96,7 @@ async function listModels(baseURL, apiKey) {
 }
 
 async function propose(body) {
+  await assertEvolutionGitReady();
   const baseURL = validateLocalBaseURL(body.baseURL);
   const apiKey = String(body.apiKey || "").trim();
   if (!apiKey) throw new Error("缺少 API 密钥");
@@ -127,6 +132,16 @@ async function propose(body) {
   });
   if (!result.output) throw new Error("模型没有返回结构化源码提案");
   return { proposal: await createProposal(result.output), model: modelId };
+}
+
+async function handleSourceEvolution(operation) {
+  if (sourceEvolutionBusy) throw new Error("源码实验室正在处理另一项操作，请等待它完成");
+  sourceEvolutionBusy = true;
+  try {
+    return await operation();
+  } finally {
+    sourceEvolutionBusy = false;
+  }
 }
 
 async function handleVideoImport(body) {
@@ -215,8 +230,9 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/health") {
       send(response, 200, {
         ok: true,
-        version: "0.7.0",
-        capabilities: ["source-evolution", "video-import", "local-media-upload", "local-transcription", "visual-evidence", "local-ocr"],
+        version: "0.8.0",
+        capabilities: ["source-evolution", "isolated-proposal-branches", "github-draft-review", "video-import", "local-media-upload", "local-transcription", "visual-evidence", "local-ocr"],
+        sourceEvolutionBusy,
         latest: await latestProposal(),
       }, origin);
       return;
@@ -236,7 +252,7 @@ const server = createServer(async (request, response) => {
       }
       const body = await readBody(request);
       if (url.pathname === "/api/propose") {
-        send(response, 200, await propose(body), origin);
+        send(response, 200, await handleSourceEvolution(() => propose(body)), origin);
         return;
       }
       if (url.pathname === "/api/video/import") {
@@ -259,16 +275,24 @@ const server = createServer(async (request, response) => {
         send(response, 200, { discarded: await discardLocalMedia(body.uploadId) }, origin);
         return;
       }
-      if (url.pathname === "/api/apply") {
-        send(response, 200, { proposal: await applyProposal(body.id) }, origin);
+      if (url.pathname === "/api/commit") {
+        send(response, 200, await handleSourceEvolution(async () => ({ proposal: await commitProposal(body.id) })), origin);
+        return;
+      }
+      if (url.pathname === "/api/publish") {
+        send(response, 200, await handleSourceEvolution(async () => ({ proposal: await publishProposal(body.id) })), origin);
+        return;
+      }
+      if (url.pathname === "/api/review/refresh") {
+        send(response, 200, await handleSourceEvolution(async () => ({ proposal: await refreshProposalReview(body.id) })), origin);
         return;
       }
       if (url.pathname === "/api/rollback") {
-        send(response, 200, { proposal: await rollbackProposal(body.id) }, origin);
+        send(response, 200, await handleSourceEvolution(async () => ({ proposal: await rollbackProposal(body.id) })), origin);
         return;
       }
       if (url.pathname === "/api/discard") {
-        send(response, 200, { proposal: await discardProposal(body.id) }, origin);
+        send(response, 200, await handleSourceEvolution(async () => ({ proposal: await discardProposal(body.id) })), origin);
         return;
       }
     }

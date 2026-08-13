@@ -30,6 +30,8 @@ test("local source agent exposes health and rejects foreign origins", async (con
   assert.equal(health.status, 200);
   const healthPayload = await health.json();
   assert.equal(healthPayload.ok, true);
+  assert.ok(healthPayload.capabilities.includes("isolated-proposal-branches"));
+  assert.ok(healthPayload.capabilities.includes("github-draft-review"));
   assert.ok(healthPayload.capabilities.includes("video-import"));
   assert.ok(healthPayload.capabilities.includes("local-transcription"));
   assert.ok(healthPayload.capabilities.includes("local-media-upload"));
@@ -56,6 +58,22 @@ test("local source agent exposes health and rejects foreign origins", async (con
   });
   assert.equal(blocked.status, 400);
   assert.match((await blocked.json()).error, /请求来源/);
+
+  const invalidCommit = await fetch(`http://127.0.0.1:${port}/api/commit`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "http://localhost:3000" },
+    body: JSON.stringify({ id: "not-a-proposal" }),
+  });
+  assert.equal(invalidCommit.status, 400);
+  assert.match((await invalidCommit.json()).error, /无效的提案编号/);
+
+  const invalidPublish = await fetch(`http://127.0.0.1:${port}/api/publish`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "http://localhost:3000" },
+    body: JSON.stringify({ id: "not-a-proposal" }),
+  });
+  assert.equal(invalidPublish.status, 400);
+  assert.match((await invalidPublish.json()).error, /无效的提案编号/);
 
   const unsafeVideo = await fetch(`http://127.0.0.1:${port}/api/video/import`, {
     method: "POST",
