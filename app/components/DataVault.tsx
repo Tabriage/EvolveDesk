@@ -7,9 +7,11 @@ import {
   MAX_MERGE_DECISION_RECEIPT_BYTES,
   applyBackupMerge,
   applyBackupMergeChoiceBatch,
+  assessBackupMergeDecisionReceiptTrust,
   compareBackupMergeDecisionReceiptToPreview,
   createBackupMergeDecisionReceipt,
   createBackupMergePreview,
+  createSignedBackupMergeDecisionReceipt,
   inspectBackupMergeDecisionReceiptText,
   serializeBackupMergeDecisionReceipt,
 } from "../features/backup-merge.mjs";
@@ -17,7 +19,8 @@ import type {
   BackupMergeChoice,
   BackupMergeDecisionComparison,
   BackupMergeDecisionInspection,
-  BackupMergeDecisionReceipt,
+  BackupMergeDecisionTrustAssessment,
+  AnyBackupMergeDecisionReceipt,
   BackupMergeEntry,
   BackupMergePreview,
 } from "../features/backup-merge.mjs";
@@ -46,7 +49,9 @@ import type {
   BackupSummary,
 } from "../features/backup-core.mjs";
 import { exportSourceArchive, replaceSourceArchive } from "../features/transcript-store.mjs";
-import { setSyncChannelHead } from "../features/sync-device-store.mjs";
+import { listSyncChannels, loadOrCreateSyncIdentity, setSyncChannelHead } from "../features/sync-device-store.mjs";
+import { formatDeviceFingerprint } from "../features/sync-core.mjs";
+import type { SyncChannel } from "../features/sync-core.mjs";
 import type { WorkbenchState } from "../features/workbench-core.mjs";
 
 type DataVaultProps = {
@@ -100,13 +105,14 @@ type RestoreReceipt = {
   restoredAt: string;
   checksum: string;
   merged: boolean;
-  mergeDecision?: BackupMergeDecisionReceipt;
+  mergeDecision?: AnyBackupMergeDecisionReceipt;
 };
 
 type MergeDecisionAudit = {
   fileName: string;
   inspection: BackupMergeDecisionInspection;
   comparison?: BackupMergeDecisionComparison;
+  trust: BackupMergeDecisionTrustAssessment;
 };
 
 const summaryLabels: Record<string, string> = {
@@ -260,6 +266,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
     if (!auditedMergeDecisionReceipt || !pending?.merge || !pending.sync) return;
     let active = true;
     compareBackupMergeDecisionReceiptToPreview(auditedMergeDecisionReceipt, pending.merge, {
+      channelId: pending.sync.channelId,
       baseRevisionId: pending.sync.parentRevisionId || "",
       localRevisionId: pending.sync.previousHeadRevisionId || "",
       incomingRevisionId: pending.sync.revisionId || "",
@@ -435,12 +442,29 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
     let previousSources: BackupSources | null = null;
     try {
       const restoredAt = new Date().toISOString();
-      const mergeDecision = useMerge && pending.merge ? await createBackupMergeDecisionReceipt(pending.merge, mergeChoices, {
-        baseRevisionId: pending.sync?.parentRevisionId || "",
-        localRevisionId: pending.sync?.previousHeadRevisionId || "",
-        incomingRevisionId: pending.sync?.revisionId || "",
-        sourceChecksum: pending.envelope.checksum,
-      }, restoredAt) : undefined;
+      let mergeDecision: AnyBackupMergeDecisionReceipt | undefined;
+      if (useMerge && pending.merge) {
+        const receiptContext = {
+          baseRevisionId: pending.sync?.parentRevisionId || "",
+          localRevisionId: pending.sync?.previousHeadRevisionId || "",
+          incomingRevisionId: pending.sync?.revisionId || "",
+          sourceChecksum: pending.envelope.checksum,
+        };
+        mergeDecision = await createBackupMergeDecisionReceipt(pending.merge, mergeChoices, receiptContext, restoredAt);
+        if (pending.sync) {
+          try {
+            const identity = await loadOrCreateSyncIdentity();
+            const channels = await listSyncChannels();
+            const channel = channels.find((candidate) => candidate.channelId === pending.sync?.channelId);
+            const trusted = identity && channel && !channel.retiredAt && channel.authorizedDevices.some((device) => device.deviceId === identity.device.deviceId && device.fingerprint === identity.device.fingerprint);
+            if (trusted) {
+              mergeDecision = await createSignedBackupMergeDecisionReceipt(pending.merge, mergeChoices, { ...receiptContext, channelId: channel.channelId }, identity, restoredAt);
+            }
+          } catch {
+            // Recovery must remain available; the receipt stays v2 and the UI labels it unsigned.
+          }
+        }
+      }
       previousSources = await exportSourceArchive();
       const previousWorkspace = state;
       const replaced = await replaceSourceArchive(targetSources);
@@ -481,7 +505,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
       setRestoreArmed(false);
       setMessage(syncHeadSaved
         ? useMerge
-          ? "三方合并已写入；下一次生成同步包会带上两条父版本线。刷新前仍可一步撤回。 "
+          ? `三方合并已写入；${mergeDecision?.formatVersion === 3 ? "设备签名回执已就绪" : "回执仅有 SHA-256 封签、未获得设备签名"}。下一次生成同步包会带上两条父版本线。刷新前仍可一步撤回。 `
           : "恢复完成。关闭或刷新页面前，你仍可一步撤回到恢复前状态。 "
         : "数据已恢复，但同步版本头未能写入本地密钥库；请保留原同步包并刷新后检查。 ");
     } catch (error) {
@@ -575,18 +599,32 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
     try {
       if (file.size > MAX_MERGE_DECISION_RECEIPT_BYTES) throw new Error("决策回执超过 512KB 上限");
       const inspection = await inspectBackupMergeDecisionReceiptText(await file.text());
+      let localChannels: SyncChannel[] = [];
+      if (inspection.signed) {
+        try {
+          localChannels = await listSyncChannels();
+        } catch {
+          // A valid offline signature remains useful even when the local trust store cannot be read.
+        }
+      }
+      const trust = await assessBackupMergeDecisionReceiptTrust(inspection.receipt, localChannels);
       let comparison: BackupMergeDecisionComparison | undefined;
       if (pending?.merge && pending.sync) {
         comparison = await compareBackupMergeDecisionReceiptToPreview(inspection.receipt, pending.merge, {
+          channelId: pending.sync.channelId,
           baseRevisionId: pending.sync.parentRevisionId || "",
           localRevisionId: pending.sync.previousHeadRevisionId || "",
           incomingRevisionId: pending.sync.revisionId || "",
           sourceChecksum: pending.envelope.checksum,
         });
       }
-      setDecisionAudit({ fileName: file.name, inspection, comparison });
-      setMessage(inspection.sealed
-        ? "决策回执的 SHA-256 完整性封签有效；它能发现改动，但不证明签发设备身份。 "
+      setDecisionAudit({ fileName: file.name, inspection, comparison, trust });
+      setMessage(inspection.signed
+        ? trust.trusted
+          ? "决策回执的完整性封签和设备签名有效；签发者也在本机保存的该空间授权清单中。 "
+          : `决策回执的完整性封签和设备签名有效；${trust.reason}。`
+        : inspection.sealed
+        ? "决策回执的 SHA-256 完整性封签有效，但它没有设备签名。 "
         : "旧版决策回执结构可读，但没有完整性封签，不能核对文件是否被改动。 ");
     } catch (error) {
       setDecisionAudit(null);
@@ -596,7 +634,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
     }
   }
 
-  function downloadMergeDecision(receipt: BackupMergeDecisionReceipt) {
+  function downloadMergeDecision(receipt: AnyBackupMergeDecisionReceipt) {
     const serialized = serializeBackupMergeDecisionReceipt(receipt);
     const url = URL.createObjectURL(new Blob([serialized], { type: "application/json;charset=utf-8" }));
     const anchor = document.createElement("a");
@@ -689,10 +727,16 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
         </header>
         <p>只读取版本号、对象 ID、字段路径与选择方向，不包含冲突字段内容；校验不会自动重放任何选择。</p>
         {decisionAudit ? (
-          <div className={`merge-receipt-proof ${decisionAudit.inspection.sealed ? "sealed" : "legacy"}`}>
-            <div className="merge-proof-mark"><i>{decisionAudit.inspection.sealed ? "✓" : "!"}</i><span><strong>{decisionAudit.inspection.sealed ? "完整性封签有效" : "旧版 · 无封签"}</strong><small>{decisionAudit.fileName}</small></span></div>
+          <div className={`merge-receipt-proof ${decisionAudit.trust.trusted ? "trusted" : decisionAudit.inspection.signed ? "signed-untrusted" : decisionAudit.inspection.sealed ? "sealed" : "legacy"}`}>
+            <div className="merge-proof-mark"><i>{decisionAudit.inspection.sealed ? "✓" : "!"}</i><span><strong>{decisionAudit.trust.trusted ? "设备签名 · 成员可信" : decisionAudit.inspection.signed ? "设备签名有效 · 成员未确认" : decisionAudit.inspection.sealed ? "完整性封签有效 · 未签名" : "旧版 · 无封签"}</strong><small>{decisionAudit.fileName}</small></span></div>
             <div className="merge-proof-counts"><span><small>明确选择</small><strong>{decisionAudit.inspection.conflictDecisions}</strong></span><span><small>冲突对象</small><strong>{decisionAudit.inspection.objectDecisions}</strong></span><span><small>涉及分类</small><strong>{decisionAudit.inspection.categoryCount}</strong></span></div>
             <code>{decisionAudit.inspection.digest ? `${decisionAudit.inspection.digest.slice(0, 20)}…${decisionAudit.inspection.digest.slice(-10)}` : "NO SHA-256 SEAL"}</code>
+            {decisionAudit.inspection.signer && (
+              <div className={`merge-proof-trust ${decisionAudit.trust.trusted ? "trusted" : "untrusted"}`}>
+                <span><strong>{decisionAudit.inspection.signer.name}</strong><code>{formatDeviceFingerprint(decisionAudit.inspection.signer.fingerprint)}</code></span>
+                <p>{decisionAudit.trust.reason}{decisionAudit.trust.channelLabel ? ` · ${decisionAudit.trust.channelLabel}` : ""}</p>
+              </div>
+            )}
             {pending?.merge && decisionAudit.comparison && (
               <div className={decisionAudit.comparison.matches ? "merge-proof-match" : "merge-proof-mismatch"}>
                 <strong>{decisionAudit.comparison.matches ? "与当前合并预览精确匹配" : "不属于当前合并预览"}</strong>
@@ -700,7 +744,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
               </div>
             )}
           </div>
-        ) : <small>SHA-256 可发现文件改动，但不是设备签名，也不能证明回执来自哪台设备。</small>}
+        ) : <small>v3 回执会先离线验签，再用空间 ID、设备 ID 与完整公钥指纹对照本机授权清单；自带公钥本身不等于可信成员。</small>}
       </section>
 
       {lastExport && !pending && !lockedBackup && (
@@ -804,7 +848,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
       {restoreReceipt && (
         <article className="vault-receipt restore-receipt">
           <div className="receipt-stamp">RESTORED<small>{formatDate(restoreReceipt.restoredAt)}</small></div>
-          <div><span>{restoreReceipt.merged ? "字段合并回执" : "恢复回执"}</span><strong>{restoreReceipt.fileName}</strong><small>源卷校验 {restoreReceipt.checksum.slice(0, 12)}… · {restoreReceipt.merged ? "三方结果" : "迁移卷"}已写入当前浏览器{restoreReceipt.mergeDecision ? `；${restoreReceipt.mergeDecision.totals.conflictDecisions} 个明确选择已记入无字段内容回执` : ""}</small></div>
+          <div><span>{restoreReceipt.merged ? "字段合并回执" : "恢复回执"}</span><strong>{restoreReceipt.fileName}</strong><small>源卷校验 {restoreReceipt.checksum.slice(0, 12)}… · {restoreReceipt.merged ? "三方结果" : "迁移卷"}已写入当前浏览器{restoreReceipt.mergeDecision ? `；${restoreReceipt.mergeDecision.totals.conflictDecisions} 个明确选择已记入无字段内容${restoreReceipt.mergeDecision.formatVersion === 3 ? "设备签名" : "未签名"}回执` : ""}</small></div>
           <div className="restore-receipt-actions">{restoreReceipt.mergeDecision && <button onClick={() => downloadMergeDecision(restoreReceipt.mergeDecision!)} disabled={Boolean(busy)}>下载决策回执<span>↓</span></button>}{undo && <button onClick={undoRestore} disabled={Boolean(busy)}>{busy === "undo" ? "正在撤回…" : "撤回整次恢复"}<span>↶</span></button>}</div>
         </article>
       )}

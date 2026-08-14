@@ -3,12 +3,16 @@ import test from "node:test";
 import {
   applyBackupMerge,
   applyBackupMergeChoiceBatch,
+  assessBackupMergeDecisionReceiptTrust,
   compareBackupMergeDecisionReceiptToPreview,
   createBackupMergeDecisionReceipt,
   createBackupMergePreview,
+  createSignedBackupMergeDecisionReceipt,
   inspectBackupMergeDecisionReceiptText,
   serializeBackupMergeDecisionReceipt,
 } from "../app/features/backup-merge.mjs";
+import { sha256Text } from "../app/features/backup-core.mjs";
+import { createSyncChannel, createSyncIdentity } from "../app/features/sync-core.mjs";
 import { createInitialWorkbench, parseWorkbenchState } from "../app/features/workbench-core.mjs";
 
 const noSources = { transcripts: [], visualFrames: [] };
@@ -222,6 +226,79 @@ test("offline receipt inspection rejects modified choices and detects another me
   assert.equal(wrongConflictSet.matches, false);
 });
 
+test("device-signed receipts verify offline and bind trust to the exact sync space", async () => {
+  const identity = await createSyncIdentity("签发设备", "2026-08-22T09:30:00.000Z");
+  const channel = await createSyncChannel(identity, "审计空间", "2026-08-22T09:31:00.000Z");
+  const base = workspace({ tasks: [task("task-signed", "原始")] });
+  const local = workspace({ tasks: [task("task-signed", "本机")] });
+  const incoming = workspace({ tasks: [task("task-signed", "迁入")] });
+  const preview = createBackupMergePreview(base, local, incoming, noSources, noSources, noSources);
+  const field = preview.entries[0].fieldConflicts[0];
+  const context = {
+    channelId: channel.channelId,
+    baseRevisionId: "revision_base",
+    localRevisionId: "revision_local",
+    incomingRevisionId: "revision_incoming",
+    sourceChecksum: "e".repeat(64),
+  };
+  const receipt = await createSignedBackupMergeDecisionReceipt(preview, { [field.key]: "incoming" }, context, identity, "2026-08-22T09:32:00.000Z");
+  const inspection = await inspectBackupMergeDecisionReceiptText(serializeBackupMergeDecisionReceipt(receipt));
+  const trusted = await assessBackupMergeDecisionReceiptTrust(inspection.receipt, [channel]);
+  const unknown = await assessBackupMergeDecisionReceiptTrust(inspection.receipt, []);
+  const stranger = await createSyncIdentity("未授权设备", "2026-08-22T09:33:00.000Z");
+  const untrusted = await assessBackupMergeDecisionReceiptTrust(inspection.receipt, [{
+    ...channel,
+    authorizedDevices: [{ ...stranger.device, authorizedAt: "2026-08-22T09:34:00.000Z", authorizedBy: stranger.device.deviceId }],
+  }]);
+  const comparison = await compareBackupMergeDecisionReceiptToPreview(inspection.receipt, preview, context);
+
+  assert.equal(receipt.formatVersion, 3);
+  assert.equal(receipt.context.channelId, channel.channelId);
+  assert.equal(receipt.signer.fingerprint, identity.device.fingerprint);
+  assert.equal(inspection.sealed, true);
+  assert.equal(inspection.signed, true);
+  assert.equal(inspection.signatureValid, true);
+  assert.equal(trusted.trusted, true);
+  assert.equal(trusted.channelLabel, "审计空间");
+  assert.equal(unknown.trusted, false);
+  assert.equal(unknown.channelKnown, false);
+  assert.equal(untrusted.trusted, false);
+  assert.equal(untrusted.channelKnown, true);
+  assert.equal(comparison.matches, true);
+});
+
+test("a recomputed SHA seal cannot forge a device-signed receipt", async () => {
+  const identity = await createSyncIdentity("原签发设备", "2026-08-22T09:40:00.000Z");
+  const channel = await createSyncChannel(identity, "防伪空间", "2026-08-22T09:41:00.000Z");
+  const preview = createBackupMergePreview(
+    workspace({ tasks: [task("task-forgery", "原始")] }),
+    workspace({ tasks: [task("task-forgery", "本机")] }),
+    workspace({ tasks: [task("task-forgery", "迁入")] }),
+    noSources,
+    noSources,
+    noSources,
+  );
+  const field = preview.entries[0].fieldConflicts[0];
+  const receipt = await createSignedBackupMergeDecisionReceipt(preview, { [field.key]: "local" }, {
+    channelId: channel.channelId,
+    baseRevisionId: "revision_base",
+    localRevisionId: "revision_local",
+    incomingRevisionId: "revision_incoming",
+    sourceChecksum: "f".repeat(64),
+  }, identity, "2026-08-22T09:42:00.000Z");
+  const forged = structuredClone(receipt);
+  forged.decisions[0].fields[0].choice = "incoming";
+  const content = structuredClone(forged);
+  delete content.receiptId;
+  delete content.integrity;
+  delete content.proof;
+  const digest = await sha256Text(JSON.stringify(content));
+  forged.receiptId = `decision_${digest.slice(0, 32)}`;
+  forged.integrity = { algorithm: "SHA-256", digest };
+
+  await assert.rejects(inspectBackupMergeDecisionReceiptText(JSON.stringify(forged)), /设备声明签名无效/);
+});
+
 test("legacy decision receipts remain structurally inspectable but are clearly unsealed", async () => {
   const legacy = {
     format: "evolve-desk.merge-decision",
@@ -233,6 +310,7 @@ test("legacy decision receipts remain structurally inspectable but are clearly u
   };
   const inspection = await inspectBackupMergeDecisionReceiptText(`${JSON.stringify(legacy)}\n`);
   assert.equal(inspection.sealed, false);
+  assert.equal(inspection.signed, false);
   assert.equal(inspection.digest, "");
   assert.equal(inspection.conflictDecisions, 1);
 });

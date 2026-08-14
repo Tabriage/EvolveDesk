@@ -29,6 +29,8 @@ const GCM_TAG_BITS = 128;
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 const BASE64_URL = /^[A-Za-z0-9_-]+$/;
 const SAFE_ID = /^[A-Za-z0-9_-]{8,100}$/;
+const DEVICE_STATEMENT_PURPOSE = /^[a-z0-9][a-z0-9._/-]{0,79}$/;
+const MAX_DEVICE_STATEMENT_BYTES = 1024 * 1024;
 
 function requireCrypto() {
   if (!globalThis.crypto?.subtle || typeof globalThis.crypto.getRandomValues !== "function") {
@@ -166,6 +168,13 @@ async function verifyContent(publicKeyValue, proofValue, value, errorMessage) {
   const verified = await requireCrypto().subtle.verify({ name: "ECDSA", hash: "SHA-256" }, publicKey, base64Bytes(proof.signature, 64), textBytes(value));
   if (!verified) throw new Error(errorMessage);
   return proof;
+}
+
+function deviceStatementContent(purposeValue, payloadValue) {
+  const purpose = text(purposeValue, 80);
+  if (!DEVICE_STATEMENT_PURPOSE.test(purpose)) throw new Error("设备签名用途无效");
+  if (typeof payloadValue !== "string" || !payloadValue || byteLength(payloadValue) > MAX_DEVICE_STATEMENT_BYTES) throw new Error("设备签名载荷为空或超过 1 MiB 上限");
+  return JSON.stringify({ domain: "evolve-desk.sync-device-statement", formatVersion: 1, purpose, payload: payloadValue });
 }
 
 async function deriveGrantKey(privateKey, publicKeyValue, salt, info) {
@@ -324,6 +333,21 @@ async function validatePairingRequest(value, now = new Date()) {
 export function formatDeviceFingerprint(value) {
   const fingerprint = text(value, 64).toUpperCase();
   return fingerprint.match(/.{1,4}/g)?.join(" ") || "";
+}
+
+export function normalizeSyncPublicDevice(value) {
+  return normalizePublicDevice(value);
+}
+
+export async function signSyncDeviceStatement(identity, purpose, payload) {
+  await normalizePublicDevice(identity?.device);
+  return signContent(identity?.signingPrivateKey, deviceStatementContent(purpose, payload));
+}
+
+export async function verifySyncDeviceStatement(deviceValue, proofValue, purpose, payload) {
+  const device = await normalizePublicDevice(deviceValue);
+  const proof = await verifyContent(device.signingPublicKey, proofValue, deviceStatementContent(purpose, payload), "设备声明签名无效，可能已被冒充或修改");
+  return { device, proof };
 }
 
 export async function createSyncIdentity(nameValue = "这台设备", createdAtValue = new Date().toISOString()) {

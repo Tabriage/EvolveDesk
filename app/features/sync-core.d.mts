@@ -155,6 +155,9 @@ export type SyncTransportAdapter = {
 
 export function formatDeviceFingerprint(value: string): string;
 export function createSyncIdentity(name?: string, createdAt?: string): Promise<SyncIdentity>;
+export function normalizeSyncPublicDevice(value: unknown): Promise<SyncPublicDevice>;
+export function signSyncDeviceStatement(identity: SyncIdentity, purpose: string, payload: string): Promise<DeviceProof>;
+export function verifySyncDeviceStatement(device: SyncPublicDevice, proof: DeviceProof, purpose: string, payload: string): Promise<{ device: SyncPublicDevice; proof: DeviceProof }>;
 export function createPairingRequest(identity: SyncIdentity, createdAt?: string): Promise<PairingRequest>;
 export function serializePairingRequest(value: PairingRequest): string;
 export function inspectPairingRequestText(raw: string, now?: Date): Promise<PairingRequest>;

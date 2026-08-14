@@ -1,9 +1,16 @@
 import { parseWorkbenchState } from "./workbench-core.mjs";
 import { sanitizeBackupSources, sha256Text, summarizeBackup } from "./backup-core.mjs";
+import {
+  normalizeSyncPublicDevice,
+  signSyncDeviceStatement,
+  verifySyncDeviceStatement,
+} from "./sync-core.mjs";
 
 export const MAX_MERGE_DECISION_RECEIPT_BYTES = 512 * 1024;
 const MERGE_DECISION_FORMAT = "evolve-desk.merge-decision";
-const MERGE_DECISION_FORMAT_VERSION = 2;
+const MERGE_DECISION_FORMAT_VERSION = 3;
+const SEALED_MERGE_DECISION_FORMAT_VERSION = 2;
+const MERGE_DECISION_SIGNATURE_PURPOSE = "merge-decision/v3";
 const SAFE_REVISION_ID = /^[A-Za-z0-9_-]{8,100}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 
@@ -357,16 +364,26 @@ function previewConflictManifest(preview) {
   });
 }
 
-function receiptContent(value) {
+function receiptContent(value, formatVersion = SEALED_MERGE_DECISION_FORMAT_VERSION) {
   return {
     format: MERGE_DECISION_FORMAT,
-    formatVersion: MERGE_DECISION_FORMAT_VERSION,
+    formatVersion,
     createdAt: value.createdAt,
     context: value.context,
     manifest: value.manifest,
     totals: value.totals,
     decisions: value.decisions,
+    ...(formatVersion === MERGE_DECISION_FORMAT_VERSION ? { signer: value.signer } : {}),
   };
+}
+
+function receiptSignaturePayload(value) {
+  return JSON.stringify({
+    format: MERGE_DECISION_FORMAT,
+    formatVersion: MERGE_DECISION_FORMAT_VERSION,
+    receiptId: value.receiptId,
+    integrity: value.integrity,
+  });
 }
 
 function byteLength(value) {
@@ -403,11 +420,12 @@ function nonNegativeInteger(value, label) {
   return candidate;
 }
 
-function normalizeContext(value, legacy = false) {
-  exactKeys(value, ["baseRevisionId", "localRevisionId", "incomingRevisionId", "sourceChecksum"], "决策回执版本上下文");
+function normalizeContext(value, legacy = false, channelBound = false) {
+  exactKeys(value, [...(channelBound ? ["channelId"] : []), "baseRevisionId", "localRevisionId", "incomingRevisionId", "sourceChecksum"], "决策回执版本上下文");
   const sourceChecksum = boundedText(value.sourceChecksum, 128, "决策回执源卷校验", legacy);
   if (!legacy && !SHA256.test(sourceChecksum)) throw new Error("决策回执源卷校验无效");
   return {
+    ...(channelBound ? { channelId: revisionId(value.channelId, "同步空间标识") } : {}),
     baseRevisionId: revisionId(value.baseRevisionId, "共同父版本标识", legacy),
     localRevisionId: revisionId(value.localRevisionId, "本机版本标识", legacy),
     incomingRevisionId: revisionId(value.incomingRevisionId, "迁入版本标识", legacy),
@@ -504,6 +522,35 @@ async function normalizeSealedReceipt(value) {
   return { ...content, receiptId: value.receiptId, integrity: { algorithm: "SHA-256", digest } };
 }
 
+async function normalizeSignedReceipt(value) {
+  exactKeys(value, ["format", "formatVersion", "receiptId", "createdAt", "context", "manifest", "totals", "decisions", "signer", "integrity", "proof"], "设备签名决策回执");
+  if (value.format !== MERGE_DECISION_FORMAT || value.formatVersion !== MERGE_DECISION_FORMAT_VERSION) throw new Error("设备签名决策回执格式无效");
+  const normalized = normalizeDecisions(value.decisions);
+  exactKeys(value.manifest, ["algorithm", "conflictSetHash", "conflictCount"], "决策回执冲突清单");
+  if (value.manifest.algorithm !== "SHA-256" || !SHA256.test(String(value.manifest.conflictSetHash || ""))) throw new Error("决策回执冲突清单校验无效");
+  const manifest = { algorithm: "SHA-256", conflictSetHash: value.manifest.conflictSetHash, conflictCount: nonNegativeInteger(value.manifest.conflictCount, "决策回执冲突清单数量") };
+  if (manifest.conflictCount !== normalized.conflictDecisions) throw new Error("决策回执冲突清单数量不一致");
+  const expectedManifestHash = await sha256Text(JSON.stringify(decisionManifest(normalized.decisions)));
+  if (expectedManifestHash !== manifest.conflictSetHash) throw new Error("决策回执冲突清单已被修改");
+  const signer = await normalizeSyncPublicDevice(value.signer);
+  const content = receiptContent({
+    createdAt: isoDate(value.createdAt),
+    context: normalizeContext(value.context, false, true),
+    manifest,
+    totals: normalizeTotals(value.totals, normalized.conflictDecisions),
+    decisions: normalized.decisions,
+    signer,
+  }, MERGE_DECISION_FORMAT_VERSION);
+  exactKeys(value.integrity, ["algorithm", "digest"], "决策回执完整性封签");
+  if (value.integrity.algorithm !== "SHA-256" || !SHA256.test(String(value.integrity.digest || ""))) throw new Error("决策回执完整性封签无效");
+  const digest = await sha256Text(JSON.stringify(content));
+  const receiptId = `decision_${digest.slice(0, 32)}`;
+  if (digest !== value.integrity.digest || value.receiptId !== receiptId) throw new Error("决策回执完整性封签不一致，文件可能已被修改");
+  const integrity = { algorithm: "SHA-256", digest };
+  const verified = await verifySyncDeviceStatement(signer, value.proof, MERGE_DECISION_SIGNATURE_PURPOSE, receiptSignaturePayload({ receiptId, integrity }));
+  return { ...content, receiptId, integrity, proof: verified.proof };
+}
+
 export async function createBackupMergeDecisionReceipt(preview, choices = {}, contextValue = {}, createdAtValue = new Date().toISOString()) {
   if (!preview?.localWorkspace || !Array.isArray(preview.entries)) throw new Error("合并预览无效");
   const unresolved = preview.conflictKeys?.filter((key) => choices[key] !== "local" && choices[key] !== "incoming") || [];
@@ -542,6 +589,23 @@ export async function createBackupMergeDecisionReceipt(preview, choices = {}, co
   return { ...content, receiptId: `decision_${digest.slice(0, 32)}`, integrity: { algorithm: "SHA-256", digest } };
 }
 
+export async function createSignedBackupMergeDecisionReceipt(preview, choices = {}, contextValue = {}, identity, createdAtValue = new Date().toISOString()) {
+  const context = normalizeContext(contextValue, false, true);
+  const unsigned = await createBackupMergeDecisionReceipt(preview, choices, {
+    baseRevisionId: context.baseRevisionId,
+    localRevisionId: context.localRevisionId,
+    incomingRevisionId: context.incomingRevisionId,
+    sourceChecksum: context.sourceChecksum,
+  }, createdAtValue);
+  const signer = await normalizeSyncPublicDevice(identity?.device);
+  const content = receiptContent({ ...unsigned, context, signer }, MERGE_DECISION_FORMAT_VERSION);
+  const digest = await sha256Text(JSON.stringify(content));
+  const receiptId = `decision_${digest.slice(0, 32)}`;
+  const integrity = { algorithm: "SHA-256", digest };
+  const proof = await signSyncDeviceStatement(identity, MERGE_DECISION_SIGNATURE_PURPOSE, receiptSignaturePayload({ receiptId, integrity }));
+  return { ...content, receiptId, integrity, proof };
+}
+
 export function serializeBackupMergeDecisionReceipt(receipt) {
   const serialized = `${JSON.stringify(receipt, null, 2)}\n`;
   if (byteLength(serialized) > MAX_MERGE_DECISION_RECEIPT_BYTES) throw new Error("合并决策回执超过 512 KiB 上限");
@@ -557,13 +621,20 @@ export async function inspectBackupMergeDecisionReceiptText(raw) {
     throw new Error("合并决策回执不是有效的 JSON 文件");
   }
   if (value?.format !== MERGE_DECISION_FORMAT) throw new Error("这不是 Evolve Desk 合并决策回执");
-  if (value.formatVersion !== 1 && value.formatVersion !== MERGE_DECISION_FORMAT_VERSION) throw new Error("合并决策回执版本不受支持");
-  const receipt = value.formatVersion === 1 ? normalizeLegacyReceipt(value) : await normalizeSealedReceipt(value);
+  if (![1, SEALED_MERGE_DECISION_FORMAT_VERSION, MERGE_DECISION_FORMAT_VERSION].includes(value.formatVersion)) throw new Error("合并决策回执版本不受支持");
+  const receipt = value.formatVersion === 1
+    ? normalizeLegacyReceipt(value)
+    : value.formatVersion === SEALED_MERGE_DECISION_FORMAT_VERSION
+      ? await normalizeSealedReceipt(value)
+      : await normalizeSignedReceipt(value);
   const categories = new Set(receipt.decisions.map((decision) => decision.categoryKey));
   return {
     receipt,
-    sealed: receipt.formatVersion === MERGE_DECISION_FORMAT_VERSION,
-    digest: receipt.formatVersion === MERGE_DECISION_FORMAT_VERSION ? receipt.integrity.digest : "",
+    sealed: receipt.formatVersion >= SEALED_MERGE_DECISION_FORMAT_VERSION,
+    signed: receipt.formatVersion === MERGE_DECISION_FORMAT_VERSION,
+    signatureValid: receipt.formatVersion === MERGE_DECISION_FORMAT_VERSION,
+    signer: receipt.formatVersion === MERGE_DECISION_FORMAT_VERSION ? receipt.signer : null,
+    digest: receipt.formatVersion >= SEALED_MERGE_DECISION_FORMAT_VERSION ? receipt.integrity.digest : "",
     conflictDecisions: receipt.totals.conflictDecisions,
     objectDecisions: receipt.decisions.length,
     categoryCount: categories.size,
@@ -572,9 +643,15 @@ export async function inspectBackupMergeDecisionReceiptText(raw) {
 
 export async function compareBackupMergeDecisionReceiptToPreview(receipt, preview, contextValue) {
   if (!preview?.localWorkspace || !Array.isArray(preview.entries)) throw new Error("合并预览无效");
-  const context = normalizeContext(contextValue);
+  const channelBound = receipt?.formatVersion === MERGE_DECISION_FORMAT_VERSION;
+  const context = normalizeContext(channelBound ? contextValue : {
+    baseRevisionId: contextValue?.baseRevisionId,
+    localRevisionId: contextValue?.localRevisionId,
+    incomingRevisionId: contextValue?.incomingRevisionId,
+    sourceChecksum: contextValue?.sourceChecksum,
+  }, false, channelBound);
   const contextReasons = [];
-  for (const key of ["baseRevisionId", "localRevisionId", "incomingRevisionId", "sourceChecksum"]) {
+  for (const key of [...(channelBound ? ["channelId"] : []), "baseRevisionId", "localRevisionId", "incomingRevisionId", "sourceChecksum"]) {
     if (receipt.context?.[key] !== context[key]) contextReasons.push(`${key} 与当前三方预览不一致`);
   }
   const expectedManifest = previewConflictManifest(preview);
@@ -589,5 +666,39 @@ export async function compareBackupMergeDecisionReceiptToPreview(receipt, previe
     reasons,
     expectedConflictDecisions: preview.conflictCount,
     receiptConflictDecisions: receipt.totals?.conflictDecisions || 0,
+  };
+}
+
+export async function assessBackupMergeDecisionReceiptTrust(receiptValue, channelsValue = []) {
+  if (receiptValue?.formatVersion !== MERGE_DECISION_FORMAT_VERSION) {
+    return { signed: false, signatureValid: false, trusted: false, channelKnown: false, channelLabel: "", channelRetired: false, signer: null, reason: "这份回执没有设备签名" };
+  }
+  const receipt = await normalizeSignedReceipt(receiptValue);
+  const channel = (Array.isArray(channelsValue) ? channelsValue : []).find((candidate) => candidate?.channelId === receipt.context.channelId);
+  if (!channel) return { signed: true, signatureValid: true, trusted: false, channelKnown: false, channelLabel: "", channelRetired: false, signer: receipt.signer, reason: "本机没有保存这份回执对应的同步空间，无法确认成员关系" };
+  const authorized = [];
+  for (const candidate of Array.isArray(channel.authorizedDevices) ? channel.authorizedDevices : []) {
+    try {
+      authorized.push(await normalizeSyncPublicDevice(candidate));
+    } catch {
+      // Ignore malformed local membership entries instead of trusting their identifiers.
+    }
+  }
+  const revoked = Array.isArray(channel.revokedDeviceIds) && channel.revokedDeviceIds.includes(receipt.signer.deviceId);
+  const member = authorized.find((candidate) => candidate.deviceId === receipt.signer.deviceId && candidate.fingerprint === receipt.signer.fingerprint);
+  const trusted = Boolean(member && !revoked);
+  return {
+    signed: true,
+    signatureValid: true,
+    trusted,
+    channelKnown: true,
+    channelLabel: String(channel.label || "").slice(0, 80),
+    channelRetired: Boolean(channel.retiredAt),
+    signer: receipt.signer,
+    reason: revoked
+      ? "签发设备已在本机保存的该空间记录中撤销"
+      : member
+        ? `签发者属于本机保存的该空间授权清单${channel.retiredAt ? "；该空间现已停用" : ""}`
+        : "签发者不在本机保存的该空间授权清单中",
   };
 }

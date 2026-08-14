@@ -1,4 +1,5 @@
 import type { BackupSources, BackupSummary } from "./backup-core.mjs";
+import type { DeviceProof, SyncChannel, SyncIdentity, SyncPublicDevice } from "./sync-core.mjs";
 import type { WorkbenchState } from "./workbench-core.mjs";
 
 export type BackupMergeChoice = "local" | "incoming";
@@ -77,11 +78,20 @@ export type BackupMergeDecisionReceipt = {
   integrity: { algorithm: "SHA-256"; digest: string };
 };
 
+export type SignedBackupMergeDecisionReceipt = Omit<BackupMergeDecisionReceipt, "formatVersion" | "context"> & {
+  formatVersion: 3;
+  context: BackupMergeDecisionReceipt["context"] & { channelId: string };
+  signer: SyncPublicDevice;
+  proof: DeviceProof;
+};
 export type LegacyBackupMergeDecisionReceipt = Omit<BackupMergeDecisionReceipt, "formatVersion" | "receiptId" | "manifest" | "integrity"> & { formatVersion: 1 };
-export type AnyBackupMergeDecisionReceipt = BackupMergeDecisionReceipt | LegacyBackupMergeDecisionReceipt;
+export type AnyBackupMergeDecisionReceipt = SignedBackupMergeDecisionReceipt | BackupMergeDecisionReceipt | LegacyBackupMergeDecisionReceipt;
 export type BackupMergeDecisionInspection = {
   receipt: AnyBackupMergeDecisionReceipt;
   sealed: boolean;
+  signed: boolean;
+  signatureValid: boolean;
+  signer: SyncPublicDevice | null;
   digest: string;
   conflictDecisions: number;
   objectDecisions: number;
@@ -94,6 +104,16 @@ export type BackupMergeDecisionComparison = {
   reasons: string[];
   expectedConflictDecisions: number;
   receiptConflictDecisions: number;
+};
+export type BackupMergeDecisionTrustAssessment = {
+  signed: boolean;
+  signatureValid: boolean;
+  trusted: boolean;
+  channelKnown: boolean;
+  channelLabel: string;
+  channelRetired: boolean;
+  signer: SyncPublicDevice | null;
+  reason: string;
 };
 
 export const MAX_MERGE_DECISION_RECEIPT_BYTES: number;
@@ -119,6 +139,14 @@ export function createBackupMergeDecisionReceipt(
   context?: Partial<BackupMergeDecisionReceipt["context"]>,
   createdAt?: string,
 ): Promise<BackupMergeDecisionReceipt>;
+export function createSignedBackupMergeDecisionReceipt(
+  preview: BackupMergePreview,
+  choices: Record<string, BackupMergeChoice>,
+  context: BackupMergeDecisionReceipt["context"] & { channelId: string },
+  identity: SyncIdentity,
+  createdAt?: string,
+): Promise<SignedBackupMergeDecisionReceipt>;
 export function serializeBackupMergeDecisionReceipt(receipt: AnyBackupMergeDecisionReceipt): string;
 export function inspectBackupMergeDecisionReceiptText(raw: string): Promise<BackupMergeDecisionInspection>;
-export function compareBackupMergeDecisionReceiptToPreview(receipt: AnyBackupMergeDecisionReceipt, preview: BackupMergePreview, context: BackupMergeDecisionReceipt["context"]): Promise<BackupMergeDecisionComparison>;
+export function compareBackupMergeDecisionReceiptToPreview(receipt: AnyBackupMergeDecisionReceipt, preview: BackupMergePreview, context: BackupMergeDecisionReceipt["context"] & { channelId?: string }): Promise<BackupMergeDecisionComparison>;
+export function assessBackupMergeDecisionReceiptTrust(receipt: AnyBackupMergeDecisionReceipt, channels?: SyncChannel[]): Promise<BackupMergeDecisionTrustAssessment>;
