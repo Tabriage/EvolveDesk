@@ -3,11 +3,16 @@ import { sha256Text } from "./backup-core.mjs";
 export const RECOVERY_MAINTENANCE_RECORD_VERSION = 1;
 export const RECOVERY_DRILL_INTERVAL_DAYS = 90;
 export const RECOVERY_REPLACEMENT_REVIEW_DAYS = 180;
+export const MAX_RECOVERY_MAINTENANCE_AUDIT_BYTES = 128 * 1024;
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const SAFE_ID = /^[A-Za-z0-9_-]{8,100}$/;
 const HASH = /^[0-9a-f]{64}$/;
 const CONFIRMATION_IDS = new Set(["separate-storage", "retire-old-copies"]);
+const AUDIT_FORMAT = "evolve-desk.recovery-maintenance-audit";
+const AUDIT_FORMAT_VERSION = 1;
+const RECORD_KEYS = ["recordVersion", "channelId", "generation", "recoveryId", "ownerFingerprint", "kitCreatedAt", "kitBoundRevisionId", "securityProfileHash", "authorizedDeviceCount", "revokedDeviceCount", "trackedAt", "previousRecoveryId", "separateStorageConfirmedAt", "oldCopiesRetiredAt", "lastDrill"];
+const DRILL_KEYS = ["drilledAt", "packetRevisionId", "packetCreatedAt", "packetAuthorFingerprint", "workspaceVersion", "securityProfileHash"];
 
 function text(value, limit = 100) {
   return String(value || "").trim().slice(0, limit);
@@ -43,6 +48,20 @@ function positiveVersion(value) {
   const candidate = Number(value);
   if (!Number.isSafeInteger(candidate) || candidate < 1 || candidate >= 1_000_000) throw new Error("恢复演练工作台版本无效");
   return candidate;
+}
+
+function exactKeys(value, expected, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label}不是有效对象`);
+  if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...expected].sort())) throw new Error(`${label}包含缺失或未声明字段`);
+}
+
+function byteLength(value) {
+  return new TextEncoder().encode(String(value || "")).byteLength;
+}
+
+function canonicalIsoDate(value, label) {
+  if (typeof value !== "string" || value.length > 40 || !Number.isFinite(new Date(value).getTime()) || new Date(value).toISOString() !== value) throw new Error(`${label}无效`);
+  return value;
 }
 
 function normalizeDrill(value) {
@@ -83,6 +102,74 @@ export function normalizeSyncRecoveryMaintenanceRecord(value) {
   if (record.lastDrill && (new Date(record.lastDrill.drilledAt).getTime() < new Date(record.kitCreatedAt).getTime() || new Date(record.lastDrill.packetCreatedAt).getTime() > new Date(record.lastDrill.drilledAt).getTime())) throw new Error("恢复维护回执的演练时间线无效");
   if ([record.separateStorageConfirmedAt, record.oldCopiesRetiredAt].some((value) => value && new Date(value).getTime() < new Date(record.trackedAt).getTime())) throw new Error("恢复维护确认早于材料登记时间");
   return record;
+}
+
+function strictSyncRecoveryMaintenanceRecord(value) {
+  exactKeys(value, RECORD_KEYS, "恢复维护审计记录");
+  if (value.lastDrill !== null) exactKeys(value.lastDrill, DRILL_KEYS, "恢复维护审计演练");
+  const normalized = normalizeSyncRecoveryMaintenanceRecord(value);
+  for (const key of RECORD_KEYS) {
+    if (key === "lastDrill") continue;
+    if (value[key] !== normalized[key]) throw new Error("恢复维护审计记录包含非规范字段值");
+  }
+  if (value.lastDrill !== null) {
+    for (const key of DRILL_KEYS) if (value.lastDrill[key] !== normalized.lastDrill[key]) throw new Error("恢复维护审计演练包含非规范字段值");
+  }
+  return normalized;
+}
+
+function auditContent(value) {
+  return { format: AUDIT_FORMAT, formatVersion: AUDIT_FORMAT_VERSION, createdAt: value.createdAt, record: value.record };
+}
+
+export async function createSyncRecoveryMaintenanceAudit(recordValue, createdAtValue = new Date().toISOString()) {
+  const record = normalizeSyncRecoveryMaintenanceRecord(recordValue);
+  const content = auditContent({ createdAt: canonicalIsoDate(new Date(createdAtValue).toISOString(), "恢复维护审计时间"), record });
+  const digest = await sha256Text(JSON.stringify(content));
+  return { ...content, receiptId: `recovery_audit_${digest.slice(0, 32)}`, integrity: { algorithm: "SHA-256", digest } };
+}
+
+export function serializeSyncRecoveryMaintenanceAudit(receipt) {
+  const serialized = `${JSON.stringify(receipt, null, 2)}\n`;
+  if (byteLength(serialized) > MAX_RECOVERY_MAINTENANCE_AUDIT_BYTES) throw new Error("恢复维护审计摘要超过 128 KiB 上限");
+  return serialized;
+}
+
+export async function inspectSyncRecoveryMaintenanceAuditText(raw) {
+  if (typeof raw !== "string" || !raw.trim() || byteLength(raw) > MAX_RECOVERY_MAINTENANCE_AUDIT_BYTES) throw new Error("恢复维护审计摘要为空或超过 128 KiB 上限");
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("恢复维护审计摘要不是有效的 JSON 文件");
+  }
+  exactKeys(value, ["format", "formatVersion", "receiptId", "createdAt", "record", "integrity"], "恢复维护审计摘要");
+  if (value.format !== AUDIT_FORMAT || value.formatVersion !== AUDIT_FORMAT_VERSION) throw new Error("这不是受支持的 Evolve Desk 恢复维护审计摘要");
+  if (!/^recovery_audit_[0-9a-f]{32}$/.test(String(value.receiptId || ""))) throw new Error("恢复维护审计回执标识无效");
+  exactKeys(value.integrity, ["algorithm", "digest"], "恢复维护审计完整性封签");
+  if (value.integrity.algorithm !== "SHA-256" || !HASH.test(String(value.integrity.digest || ""))) throw new Error("恢复维护审计完整性封签无效");
+  const content = auditContent({ createdAt: canonicalIsoDate(value.createdAt, "恢复维护审计时间"), record: strictSyncRecoveryMaintenanceRecord(value.record) });
+  const digest = await sha256Text(JSON.stringify(content));
+  if (digest !== value.integrity.digest || value.receiptId !== `recovery_audit_${digest.slice(0, 32)}`) throw new Error("恢复维护审计完整性封签不一致，文件可能已被修改");
+  return {
+    receipt: { ...content, receiptId: value.receiptId, integrity: { algorithm: "SHA-256", digest } },
+    digest,
+    nextDrillAt: content.record.lastDrill ? addDays(content.record.lastDrill.drilledAt, RECOVERY_DRILL_INTERVAL_DAYS) : "",
+    replacementReviewAt: addDays(content.record.kitCreatedAt, RECOVERY_REPLACEMENT_REVIEW_DAYS),
+    hasDrill: Boolean(content.record.lastDrill),
+    separateStorageConfirmed: Boolean(content.record.separateStorageConfirmedAt),
+    oldCopiesRetired: !content.record.previousRecoveryId || Boolean(content.record.oldCopiesRetiredAt),
+  };
+}
+
+export function compareSyncRecoveryMaintenanceAuditToRecord(receipt, recordValue) {
+  const record = normalizeSyncRecoveryMaintenanceRecord(recordValue);
+  const reasons = [];
+  if (receipt?.record?.channelId !== record.channelId) reasons.push("同步空间标识与本机维护回执不一致");
+  if (receipt?.record?.generation !== record.generation) reasons.push("同步空间世代与本机维护回执不一致");
+  if (receipt?.record?.recoveryId !== record.recoveryId) reasons.push("恢复材料标识与本机维护回执不一致");
+  if (!reasons.length && JSON.stringify(receipt.record) !== JSON.stringify(record)) reasons.push("维护确认、演练版本或时间与本机回执不一致");
+  return { matches: reasons.length === 0, reasons };
 }
 
 export async function createSyncRecoverySecurityProfile(value) {

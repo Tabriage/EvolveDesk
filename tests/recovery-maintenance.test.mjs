@@ -4,10 +4,14 @@ import {
   RECOVERY_DRILL_INTERVAL_DAYS,
   RECOVERY_REPLACEMENT_REVIEW_DAYS,
   assessSyncRecoveryMaintenance,
+  compareSyncRecoveryMaintenanceAuditToRecord,
+  createSyncRecoveryMaintenanceAudit,
   createSyncRecoveryMaintenanceRecord,
   createSyncRecoverySecurityProfile,
+  inspectSyncRecoveryMaintenanceAuditText,
   recordSyncRecoveryDrill,
   setSyncRecoveryMaintenanceConfirmation,
+  serializeSyncRecoveryMaintenanceAudit,
   shouldTrackSyncRecoveryKit,
 } from "../app/features/recovery-maintenance.mjs";
 
@@ -89,6 +93,44 @@ test("a current drill and explicit separate-storage confirmation make the seal r
   assert.equal(assessment.status, "ready");
   assert.equal(assessment.nextDrillAt, `2026-04-03T00:00:00.000Z`);
   assert.equal(RECOVERY_DRILL_INTERVAL_DAYS, 90);
+});
+
+test("recovery maintenance audits seal only non-content metadata for offline inspection", async () => {
+  const current = channel();
+  const profile = await createSyncRecoverySecurityProfile(current);
+  let record = createSyncRecoveryMaintenanceRecord(current, recovery(), profile, "2026-01-02T00:01:00.000Z");
+  record = recordSyncRecoveryDrill(record, drill(profile));
+  record = setSyncRecoveryMaintenanceConfirmation(record, "separate-storage", true, "2026-01-03T00:05:00.000Z");
+  const receipt = await createSyncRecoveryMaintenanceAudit(record, "2026-02-01T00:00:00.000Z");
+  const serialized = serializeSyncRecoveryMaintenanceAudit(receipt);
+  const inspection = await inspectSyncRecoveryMaintenanceAuditText(serialized);
+  const comparison = compareSyncRecoveryMaintenanceAuditToRecord(inspection.receipt, record);
+
+  assert.match(receipt.receiptId, /^recovery_audit_[0-9a-f]{32}$/);
+  assert.match(inspection.digest, /^[0-9a-f]{64}$/);
+  assert.equal(inspection.hasDrill, true);
+  assert.equal(inspection.nextDrillAt, "2026-04-03T00:00:00.000Z");
+  assert.equal(inspection.replacementReviewAt, "2026-07-01T00:00:00.000Z");
+  assert.equal(inspection.separateStorageConfirmed, true);
+  assert.equal(comparison.matches, true);
+  assert.equal(serialized.includes("恢复维护测试"), false);
+  assert.equal(serialized.includes("passphrase"), false);
+  assert.equal(serialized.includes("privateKey"), false);
+});
+
+test("offline recovery audit inspection rejects hidden fields, tampering, and another local record", async () => {
+  const current = channel();
+  const profile = await createSyncRecoverySecurityProfile(current);
+  const record = createSyncRecoveryMaintenanceRecord(current, recovery(), profile, "2026-01-02T00:01:00.000Z");
+  const receipt = await createSyncRecoveryMaintenanceAudit(record, "2026-02-01T00:00:00.000Z");
+  const tampered = structuredClone(receipt);
+  tampered.record.generation = 2;
+  await assert.rejects(inspectSyncRecoveryMaintenanceAuditText(JSON.stringify(tampered)), /完整性封签不一致/);
+  const hidden = structuredClone(receipt);
+  hidden.record.recoveryPassphrase = "不应出现";
+  await assert.rejects(inspectSyncRecoveryMaintenanceAuditText(JSON.stringify(hidden)), /缺失或未声明字段/);
+  const anotherRecord = createSyncRecoveryMaintenanceRecord(current, recovery("recovery_material_02", "2026-02-02T00:00:00.000Z"), profile, "2026-02-02T00:01:00.000Z", record);
+  assert.equal(compareSyncRecoveryMaintenanceAuditToRecord(receipt, anotherRecord).matches, false);
 });
 
 test("head changes request a new packet while authorization changes require a new kit", async () => {
