@@ -114,6 +114,25 @@ export async function saveSyncChannel(channel) {
   }
 }
 
+export async function saveRotatedSyncChannels(retiredChannel, nextChannel) {
+  if (!retiredChannel?.channelId || !retiredChannel?.key || !nextChannel?.channelId || !nextChannel?.key) throw new Error("空间轮换结果缺少标识或密钥");
+  if (retiredChannel.rotatedToChannelId !== nextChannel.channelId || nextChannel.previousChannelId !== retiredChannel.channelId) throw new Error("空间轮换前后世代不一致");
+  const database = await openDatabase();
+  if (!database) throw new Error("当前浏览器不支持本地同步密钥库");
+  try {
+    const transaction = database.transaction(CHANNEL_STORE, "readwrite");
+    const done = transactionDone(transaction);
+    const store = transaction.objectStore(CHANNEL_STORE);
+    store.put(retiredChannel);
+    store.put(nextChannel);
+    await done;
+    notifyChannelsChanged();
+    return { retiredChannel, nextChannel };
+  } finally {
+    database.close();
+  }
+}
+
 export async function setSyncChannelHead(channelId, revisionId, lastPacketAt = new Date().toISOString(), mergeParentRevisionIds = []) {
   const database = await openDatabase();
   if (!database) return null;

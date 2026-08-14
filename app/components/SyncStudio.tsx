@@ -7,6 +7,7 @@ import {
   MAX_SYNC_CONTROL_BYTES,
   MAX_SYNC_PACKET_BYTES,
   acceptDeviceGrant,
+  acceptSyncRotation,
   createDeviceGrant,
   createPairingRequest,
   createSyncChannel,
@@ -16,9 +17,12 @@ import {
   inspectDeviceGrantText,
   inspectPairingRequestText,
   inspectSyncPacketText,
+  inspectSyncRotationText,
+  rotateSyncChannel,
   serializeDeviceGrant,
   serializePairingRequest,
   serializeSyncPacket,
+  serializeSyncRotation,
 } from "../features/sync-core.mjs";
 import type {
   DeviceGrant,
@@ -35,6 +39,7 @@ import {
   getSyncRevisionPacket,
   renameSyncIdentity,
   saveSyncChannel,
+  saveRotatedSyncChannels,
   saveSyncRevisionPacket,
   setSyncChannelHead,
 } from "../features/sync-device-store.mjs";
@@ -119,6 +124,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   const pairingInput = useRef<HTMLInputElement>(null);
   const grantInput = useRef<HTMLInputElement>(null);
   const packetInput = useRef<HTMLInputElement>(null);
+  const rotationInput = useRef<HTMLInputElement>(null);
   const [identity, setIdentity] = useState<SyncIdentity | null>(null);
   const [channels, setChannels] = useState<SyncChannel[]>([]);
   const [selectedChannelId, setSelectedChannelId] = useState("");
@@ -126,6 +132,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   const [channelName, setChannelName] = useState("我的工作台");
   const [pairing, setPairing] = useState<PairingRequest | null>(null);
   const [pendingGrant, setPendingGrant] = useState<DeviceGrant | null>(null);
+  const [pendingRevocationId, setPendingRevocationId] = useState("");
   const [incoming, setIncoming] = useState<IncomingReceipt | null>(null);
   const [remoteObjectUrl, setRemoteObjectUrl] = useState("");
   const [remoteToken, setRemoteToken] = useState("");
@@ -140,6 +147,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
 
   const remotePublishReady = Boolean(
     selectedChannel
+    && !selectedChannel.retiredAt
     && remoteProof
     && (!remoteProof.exists || (remoteProof.revisionId === selectedChannel.headRevisionId && remoteProof.validator)),
   );
@@ -180,6 +188,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   function selectChannel(channelId: string) {
     setSelectedChannelId(channelId);
     setRemoteProof(null);
+    setPendingRevocationId("");
   }
 
   function changeRemoteObjectUrl(value: string) {
@@ -308,6 +317,52 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       setMessage(`已加入“${channel.label}”；设备私钥和同步密钥只保存在本地 IndexedDB。`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "无法接受设备授权回执");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function confirmRevocation() {
+    if (!identity || !selectedChannel || !pendingRevocationId) return;
+    setBusy("rotation");
+    try {
+      const target = selectedChannel.authorizedDevices.find((device) => device.deviceId === pendingRevocationId);
+      if (!target) throw new Error("待撤销设备已不在当前空间中");
+      const result = await rotateSyncChannel(selectedChannel, identity, [pendingRevocationId]);
+      await saveRotatedSyncChannels(result.retiredChannel, result.nextChannel);
+      downloadText(serializeSyncRotation(result.rotation), `evolve-space-rotation-${safeFilePart(selectedChannel.label)}-${fileStamp(new Date(result.rotation.rotatedAt))}.json`);
+      setChannels((current) => [...current.filter((item) => item.channelId !== result.retiredChannel.channelId && item.channelId !== result.nextChannel.channelId), result.retiredChannel, result.nextChannel]);
+      setSelectedChannelId(result.nextChannel.channelId);
+      setPendingRevocationId("");
+      setRemoteProof(null);
+      setIncoming(null);
+      setMessage(`已撤销“${target.name}”并进入第 ${result.nextChannel.generation} 代空间；旧空间已停用。剩余设备需要重新生成授权请求，远端传输需连接新的空对象地址。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "无法完成空间密钥轮换");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function readRotation(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !identity) return;
+    setBusy("rotation-import");
+    try {
+      const rotation = await inspectSyncRotationText(await readJsonFile(file, MAX_SYNC_CONTROL_BYTES, "空间轮换记录"));
+      const oldChannel = channels.find((channel) => channel.channelId === rotation.previous.channelId);
+      if (!oldChannel) throw new Error("当前设备没有这份轮换记录对应的旧同步空间");
+      const result = await acceptSyncRotation(rotation, oldChannel, identity);
+      await saveSyncChannel(result.channel);
+      replaceChannel(result.channel);
+      setRemoteProof(null);
+      setIncoming(null);
+      setMessage(result.status === "revoked"
+        ? "轮换记录签名有效：当前设备已被撤销。旧空间现为只读，本机没有获得新世代密钥。 "
+        : `轮换记录签名有效：旧空间已停用。请生成本机授权请求，交给创建设备加入第 ${rotation.next.generation} 代空间。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "无法读取空间轮换记录");
     } finally {
       setBusy("");
     }
@@ -469,8 +524,8 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       </article>
 
       <div className="sync-channel-bar">
-        <label><span>当前同步空间</span><select value={selectedChannelId} onChange={(event) => selectChannel(event.target.value)} disabled={Boolean(busy)}><option value="">尚未加入</option>{channels.map((channel) => <option key={channel.channelId} value={channel.channelId}>{channel.label} · {channel.role === "owner" ? "创建设备" : "已授权设备"}</option>)}</select></label>
-        <div><span>版本头</span><code>{selectedChannel?.headRevisionId ? `${selectedChannel.headRevisionId.slice(0, 19)}…` : "尚无本地版本"}</code></div>
+        <label><span>当前同步空间</span><select value={selectedChannelId} onChange={(event) => selectChannel(event.target.value)} disabled={Boolean(busy)}><option value="">尚未加入</option>{channels.map((channel) => <option key={channel.channelId} value={channel.channelId}>{channel.label} · 第 {channel.generation || 1} 代 · {channel.retiredAt ? "已停用" : channel.role === "owner" ? "创建设备" : "已授权设备"}</option>)}</select></label>
+        <div><span>版本头</span><code>{selectedChannel?.retiredAt ? "旧世代只读" : selectedChannel?.headRevisionId ? `${selectedChannel.headRevisionId.slice(0, 19)}…` : "尚无本地版本"}</code></div>
         <div><span>已知设备</span><strong>{selectedChannel?.authorizedDevices.length || 0}</strong></div>
       </div>
 
@@ -486,16 +541,18 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
           <header><i>02</i><div><span>AUTHORIZE</span><strong>授权另一台设备</strong></div></header>
           <p>目标设备先生成请求；创建设备核对指纹并确认后，才生成只能由目标私钥解锁的授权回执。</p>
           <div className="sync-button-pair"><button onClick={() => void exportPairingRequest()} disabled={!identity || Boolean(busy)}>生成本机请求 <span>↓</span></button><button onClick={() => grantInput.current?.click()} disabled={!identity || Boolean(busy)}>导入授权回执 <span>↙</span></button></div>
-          <button className="secondary" onClick={() => pairingInput.current?.click()} disabled={!selectedChannel || selectedChannel.role !== "owner" || Boolean(busy)}>读取新设备请求 <span>→</span></button>
+          <button className="secondary" onClick={() => pairingInput.current?.click()} disabled={!selectedChannel || selectedChannel.role !== "owner" || Boolean(selectedChannel.retiredAt) || Boolean(busy)}>读取新设备请求 <span>→</span></button>
+          <button className="secondary rotation-import-button" onClick={() => rotationInput.current?.click()} disabled={!channels.length || Boolean(busy)}>读取空间轮换记录 <span>↻</span></button>
           <input ref={pairingInput} type="file" accept="application/json,.json" onChange={readPairingRequest} hidden />
           <input ref={grantInput} type="file" accept="application/json,.json" onChange={readGrant} hidden />
+          <input ref={rotationInput} type="file" accept="application/json,.json" onChange={readRotation} hidden />
         </article>
 
         <article className="sync-step-card transfer">
           <header><i>03</i><div><span>TRANSFER</span><strong>搬运加密快照</strong></div></header>
           <p>同步包包含父版本和密文。导入后先检查来源与版本关系；有共同父版本时进入逐对象三方合并，否则安全降级为整体预检。</p>
           <div className="sync-chain-readout"><span><i /> AES-256-GCM</span><span><i /> AUTHENTICATED HEAD</span></div>
-          <div className="sync-button-pair"><button onClick={() => void exportPacket()} disabled={!selectedChannel || !identity || Boolean(busy)}>{busy === "export" ? "正在封装…" : "生成同步包"} <span>↗</span></button><button onClick={() => packetInput.current?.click()} disabled={!channels.length || Boolean(busy)}>{busy === "packet" ? "正在解锁…" : "读取同步包"} <span>↙</span></button></div>
+          <div className="sync-button-pair"><button onClick={() => void exportPacket()} disabled={!selectedChannel || !identity || Boolean(selectedChannel.retiredAt) || Boolean(busy)}>{busy === "export" ? "正在封装…" : "生成同步包"} <span>↗</span></button><button onClick={() => packetInput.current?.click()} disabled={!channels.length || Boolean(busy)}>{busy === "packet" ? "正在解锁…" : "读取同步包"} <span>↙</span></button></div>
           <input ref={packetInput} type="file" accept="application/json,.json" onChange={readPacket} hidden />
         </article>
       </div>
@@ -514,7 +571,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
         <article className="pairing-proof">
           <div><span>PAIRING PROOF / 尚未授权</span><h3>{pairing.device.name}</h3><p>请求有效至 {new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(pairing.expiresAt))}</p></div>
           <code>{formatDeviceFingerprint(pairing.device.fingerprint)}</code>
-          <footer><button onClick={() => { setPairing(null); setMessage("已丢弃设备请求，没有共享同步密钥。 "); }} disabled={Boolean(busy)}>丢弃请求</button><button onClick={() => void authorizePairing()} disabled={!selectedChannel || selectedChannel.role !== "owner" || Boolean(busy)}>{busy === "authorize" ? "正在包装同步密钥…" : "指纹一致，授权设备"}<span>→</span></button></footer>
+          <footer><button onClick={() => { setPairing(null); setMessage("已丢弃设备请求，没有共享同步密钥。 "); }} disabled={Boolean(busy)}>丢弃请求</button><button onClick={() => void authorizePairing()} disabled={!selectedChannel || selectedChannel.role !== "owner" || Boolean(selectedChannel.retiredAt) || Boolean(busy)}>{busy === "authorize" ? "正在包装同步密钥…" : "指纹一致，授权设备"}<span>→</span></button></footer>
         </article>
       )}
 
@@ -529,9 +586,17 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       {selectedChannel && (
         <div className="authorized-device-strip">
           <span>AUTHORIZED DEVICES</span>
-          {selectedChannel.authorizedDevices.map((device) => <div key={device.deviceId} className={device.deviceId === identity?.device.deviceId ? "current" : ""}><i>{device.deviceId === selectedChannel.ownerDeviceId ? "O" : "D"}</i><strong>{device.name}</strong><code>{device.fingerprint.slice(0, 8).toUpperCase()}</code></div>)}
-          <small>v1 采用创建设备逐台授权；撤销某台设备需要新建空间并重新授权剩余设备，避免把“从列表隐藏”伪装成密钥撤销。</small>
+          {selectedChannel.authorizedDevices.map((device) => <div key={device.deviceId} className={`${device.deviceId === identity?.device.deviceId ? "current" : ""} ${pendingRevocationId === device.deviceId ? "pending-revoke" : ""}`}><i>{device.deviceId === selectedChannel.ownerDeviceId ? "O" : "D"}</i><strong>{device.name}</strong><code>{device.fingerprint.slice(0, 8).toUpperCase()}</code>{selectedChannel.role === "owner" && !selectedChannel.retiredAt && device.deviceId !== selectedChannel.ownerDeviceId && <button onClick={() => setPendingRevocationId(device.deviceId)} disabled={Boolean(busy)}>撤销</button>}</div>)}
+          <small>{selectedChannel.retiredAt ? `该世代已于 ${new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(selectedChannel.retiredAt))} 停用；只能保留历史证据，不能再授权或发布。` : "撤销会创建全新的空间 ID 和随机密钥；未撤销设备也必须重新请求授权。旧设备无法解锁新世代，但仍可能保有轮换前的旧数据。"}</small>
         </div>
+      )}
+
+      {selectedChannel && pendingRevocationId && (
+        <article className="rotation-proof">
+          <div><span>KEY ROTATION / 尚未执行</span><h3>撤销 {selectedChannel.authorizedDevices.find((device) => device.deviceId === pendingRevocationId)?.name || "目标设备"}</h3><p>将生成第 {(selectedChannel.generation || 1) + 1} 代空间；旧空间立即在本机停用，其他可信设备需要重新授权。</p></div>
+          <code>{formatDeviceFingerprint(selectedChannel.authorizedDevices.find((device) => device.deviceId === pendingRevocationId)?.fingerprint || "")}</code>
+          <footer><button onClick={() => setPendingRevocationId("")} disabled={Boolean(busy)}>取消</button><button onClick={() => void confirmRevocation()} disabled={Boolean(busy)}>{busy === "rotation" ? "正在生成新密钥…" : "确认撤销并轮换"}<span>→</span></button></footer>
+        </article>
       )}
 
       {incoming && <div className={`sync-incoming-receipt ${incoming.relation}`}><span>{relationLabels[incoming.relation]}</span><strong>{incoming.fileName}</strong><small>来自 {incoming.authorName} · {incoming.revisionId.slice(0, 20)}… · 已送入下方{incoming.mergeAvailable ? "三方合并" : "恢复"}预检</small></div>}

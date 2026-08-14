@@ -8,6 +8,7 @@ import {
 
 export const SYNC_PAIRING_FORMAT = "evolve-desk.sync-pairing";
 export const SYNC_GRANT_FORMAT = "evolve-desk.sync-grant";
+export const SYNC_ROTATION_FORMAT = "evolve-desk.sync-rotation";
 export const SYNC_PACKET_FORMAT = "evolve-desk.sync-packet";
 export const SYNC_FORMAT_VERSION = 1;
 export const SYNC_PACKET_FORMAT_VERSION = 2;
@@ -271,6 +272,11 @@ export async function createSyncChannel(identity, labelValue = "我的工作台"
     ownerDeviceId: device.deviceId,
     role: "owner",
     key,
+    generation: 1,
+    previousChannelId: "",
+    retiredAt: "",
+    rotatedToChannelId: "",
+    revokedDeviceIds: [],
     authorizedDevices: [{ ...device, authorizedAt: createdAt, authorizedBy: device.deviceId }],
     headRevisionId: "",
     lastPacketAt: "",
@@ -304,10 +310,16 @@ async function validateGrant(value, now = new Date()) {
   const channelId = text(value.channel?.channelId, 100);
   const label = text(value.channel?.label, 60);
   const createdAt = isoDate(value.channel?.createdAt);
+  const hasLineage = value.channel?.generation !== undefined || value.channel?.previousChannelId !== undefined;
+  const generation = hasLineage ? Number(value.channel?.generation) : 1;
+  const previousChannelId = hasLineage ? text(value.channel?.previousChannelId, 100) : "";
   if (!SAFE_ID.test(grantId) || !SAFE_ID.test(requestId) || !issuedAt || issuedAt !== value.issuedAt || !expiresAt || expiresAt !== value.expiresAt) throw new Error("设备授权回执标识或时间无效");
   const lifetime = new Date(expiresAt).getTime() - new Date(issuedAt).getTime();
   if (lifetime <= 0 || lifetime > PAIRING_LIFETIME_MS || new Date(expiresAt).getTime() <= now.getTime()) throw new Error("设备授权回执已过期");
   if (!SAFE_ID.test(channelId) || !label || !createdAt || createdAt !== value.channel?.createdAt) throw new Error("同步空间信息无效");
+  if (!Number.isSafeInteger(generation) || generation < 1 || generation > 1_000_000 || (generation > 1 && !SAFE_ID.test(previousChannelId)) || (generation === 1 && previousChannelId)) {
+    throw new Error("同步空间世代信息无效");
+  }
   const grantor = await normalizePublicDevice(value.grantor);
   const recipient = await normalizePublicDevice(value.recipient);
   if (value.keyAgreement?.name !== "ECDH" || value.keyAgreement?.namedCurve !== "P-256" || value.keyAgreement?.kdf !== "HKDF-SHA-256") throw new Error("授权回执的密钥协商参数不受支持");
@@ -320,7 +332,7 @@ async function validateGrant(value, now = new Date()) {
     requestId,
     issuedAt,
     expiresAt,
-    channel: { channelId, label, createdAt },
+    channel: { channelId, label, createdAt, ...(hasLineage ? { generation, previousChannelId } : {}) },
     grantor,
     recipient,
     keyAgreement: { salt: value.keyAgreement.salt },
@@ -335,10 +347,17 @@ export async function createDeviceGrant(channel, identity, pairingValue, issuedA
   const pairing = await validatePairingRequest(pairingValue, new Date(issuedAtValue));
   const grantor = await normalizePublicDevice(identity?.device);
   if (channel?.role !== "owner" || channel?.ownerDeviceId !== grantor.deviceId) throw new Error("只有同步空间的创建设备可以授权新设备");
+  if (channel?.retiredAt) throw new Error("旧同步空间已因密钥轮换停用，不能继续授权设备");
   if (!channel?.key || !SAFE_ID.test(text(channel.channelId, 100))) throw new Error("当前同步空间缺少本地密钥");
   if (pairing.device.deviceId === grantor.deviceId) throw new Error("不能再次授权当前设备");
+  if ((Array.isArray(channel.revokedDeviceIds) ? channel.revokedDeviceIds : []).includes(pairing.device.deviceId)) throw new Error("这台设备已被空间密钥轮换撤销，不能重新授权");
   const issuedAt = isoDate(issuedAtValue);
   if (!issuedAt) throw new Error("设备授权时间无效");
+  const generation = Number(channel.generation) || 1;
+  const previousChannelId = text(channel.previousChannelId, 100);
+  if (!Number.isSafeInteger(generation) || generation < 1 || generation > 1_000_000 || (generation > 1 && !SAFE_ID.test(previousChannelId)) || (generation === 1 && previousChannelId)) {
+    throw new Error("当前同步空间世代信息无效");
+  }
   const expiresAt = pairing.expiresAt;
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
@@ -347,7 +366,13 @@ export async function createDeviceGrant(channel, identity, pairingValue, issuedA
     requestId: pairing.requestId,
     issuedAt,
     expiresAt,
-    channel: { channelId: channel.channelId, label: text(channel.label, 60), createdAt: channel.createdAt },
+    channel: {
+      channelId: channel.channelId,
+      label: text(channel.label, 60),
+      createdAt: channel.createdAt,
+      generation,
+      previousChannelId,
+    },
     grantor,
     recipient: pairing.device,
     keyAgreement: { salt: bytesToBase64(salt) },
@@ -407,6 +432,11 @@ export async function acceptDeviceGrant(grantValue, identity, acceptedAtValue = 
     ownerDeviceId: grant.grantor.deviceId,
     role: "member",
     key,
+    generation: Number(grant.channel.generation) || 1,
+    previousChannelId: text(grant.channel.previousChannelId, 100),
+    retiredAt: "",
+    rotatedToChannelId: "",
+    revokedDeviceIds: [],
     authorizedDevices: [
       { ...grant.grantor, authorizedAt: grant.issuedAt, authorizedBy: grant.grantor.deviceId },
       { ...device, authorizedAt: acceptedAt, authorizedBy: grant.grantor.deviceId },
@@ -414,6 +444,135 @@ export async function acceptDeviceGrant(grantValue, identity, acceptedAtValue = 
     headRevisionId: "",
     lastPacketAt: "",
     mergeParentRevisionIds: [],
+  };
+}
+
+function rotationDevice(value) {
+  return { deviceId: value.deviceId, fingerprint: value.fingerprint };
+}
+
+function normalizeRotationDevice(value) {
+  const deviceId = text(value?.deviceId, 100);
+  const fingerprint = text(value?.fingerprint, 64);
+  if (!SAFE_ID.test(deviceId) || !/^[0-9a-f]{64}$/i.test(fingerprint)) throw new Error("空间轮换设备清单无效");
+  return { deviceId, fingerprint };
+}
+
+function rotationContent(value) {
+  return {
+    format: SYNC_ROTATION_FORMAT,
+    formatVersion: SYNC_FORMAT_VERSION,
+    rotationId: value.rotationId,
+    rotatedAt: value.rotatedAt,
+    previous: value.previous,
+    next: value.next,
+    owner: value.owner,
+    revoked: value.revoked,
+    retained: value.retained,
+  };
+}
+
+async function validateSyncRotation(value) {
+  if (!value || typeof value !== "object" || value.format !== SYNC_ROTATION_FORMAT) throw new Error("这不是 Evolve Desk 空间轮换记录");
+  if (value.formatVersion !== SYNC_FORMAT_VERSION) throw new Error("空间轮换记录版本不受支持");
+  const rotationId = text(value.rotationId, 100);
+  const rotatedAt = isoDate(value.rotatedAt);
+  const previous = {
+    channelId: text(value.previous?.channelId, 100),
+    generation: Number(value.previous?.generation),
+    headRevisionId: text(value.previous?.headRevisionId, 100),
+  };
+  const next = {
+    channelId: text(value.next?.channelId, 100),
+    generation: Number(value.next?.generation),
+    label: text(value.next?.label, 60),
+  };
+  if (!SAFE_ID.test(rotationId) || !rotatedAt || rotatedAt !== value.rotatedAt) throw new Error("空间轮换记录标识或时间无效");
+  if (!SAFE_ID.test(previous.channelId) || !Number.isSafeInteger(previous.generation) || previous.generation < 1 || previous.generation > 999_999) throw new Error("旧同步空间世代无效");
+  if (previous.headRevisionId && !SAFE_ID.test(previous.headRevisionId)) throw new Error("旧同步空间版本头无效");
+  if (!SAFE_ID.test(next.channelId) || next.channelId === previous.channelId || next.generation !== previous.generation + 1 || !next.label) throw new Error("新同步空间世代无效");
+  const owner = await normalizePublicDevice(value.owner);
+  const revoked = Array.isArray(value.revoked) ? value.revoked.map(normalizeRotationDevice) : [];
+  const retained = Array.isArray(value.retained) ? value.retained.map(normalizeRotationDevice) : [];
+  if (revoked.length > 64 || retained.length > 64 || !revoked.length) throw new Error("空间轮换必须明确至少一台撤销设备");
+  const listed = [...revoked, ...retained];
+  if (listed.some((device) => device.deviceId === owner.deviceId) || new Set(listed.map((device) => device.deviceId)).size !== listed.length) {
+    throw new Error("空间轮换设备清单重复或包含创建设备");
+  }
+  const content = rotationContent({ rotationId, rotatedAt, previous, next, owner, revoked, retained });
+  const proof = await verifyContent(owner.signingPublicKey, value.proof, JSON.stringify(content), "空间轮换记录签名无效，可能已被替换");
+  return { ...content, proof };
+}
+
+export async function rotateSyncChannel(channel, identity, revokedDeviceIdsValue, rotatedAtValue = new Date().toISOString()) {
+  const owner = await normalizePublicDevice(identity?.device);
+  if (channel?.role !== "owner" || channel?.ownerDeviceId !== owner.deviceId) throw new Error("只有同步空间的创建设备可以轮换空间密钥");
+  if (channel?.retiredAt) throw new Error("这个同步空间已经停用，不能再次轮换");
+  if (!channel?.key || !SAFE_ID.test(text(channel.channelId, 100))) throw new Error("当前同步空间缺少本地密钥");
+  const rotatedAt = isoDate(rotatedAtValue);
+  if (!rotatedAt) throw new Error("空间轮换时间无效");
+  const devices = await Promise.all((Array.isArray(channel.authorizedDevices) ? channel.authorizedDevices : []).map(normalizePublicDevice));
+  const deviceById = new Map(devices.map((device) => [device.deviceId, device]));
+  if (deviceById.get(owner.deviceId)?.fingerprint !== owner.fingerprint) throw new Error("创建设备不在当前同步空间信任清单中");
+  const revokedDeviceIds = [...new Set((Array.isArray(revokedDeviceIdsValue) ? revokedDeviceIdsValue : []).map((item) => text(item, 100)).filter(Boolean))];
+  if (!revokedDeviceIds.length || revokedDeviceIds.some((deviceId) => deviceId === owner.deviceId || !deviceById.has(deviceId))) {
+    throw new Error("请选择至少一台当前已授权的非创建设备进行撤销");
+  }
+  const previousGeneration = Number.isSafeInteger(channel.generation) && channel.generation > 0 ? channel.generation : 1;
+  if (previousGeneration >= 999_999) throw new Error("同步空间世代已达到上限");
+  const nextChannel = await createSyncChannel(identity, channel.label, rotatedAt);
+  nextChannel.generation = previousGeneration + 1;
+  nextChannel.previousChannelId = channel.channelId;
+  nextChannel.revokedDeviceIds = [...new Set([...(Array.isArray(channel.revokedDeviceIds) ? channel.revokedDeviceIds : []), ...revokedDeviceIds])];
+  const revoked = revokedDeviceIds.map((deviceId) => rotationDevice(deviceById.get(deviceId)));
+  const retained = devices.filter((device) => device.deviceId !== owner.deviceId && !revokedDeviceIds.includes(device.deviceId)).map(rotationDevice);
+  const content = rotationContent({
+    rotationId: randomId("rotation"),
+    rotatedAt,
+    previous: { channelId: channel.channelId, generation: previousGeneration, headRevisionId: text(channel.headRevisionId, 100) },
+    next: { channelId: nextChannel.channelId, generation: nextChannel.generation, label: nextChannel.label },
+    owner,
+    revoked,
+    retained,
+  });
+  const rotation = { ...content, proof: await signContent(identity?.signingPrivateKey, JSON.stringify(content)) };
+  const retiredChannel = { ...channel, retiredAt: rotatedAt, rotatedToChannelId: nextChannel.channelId };
+  return { rotation, retiredChannel, nextChannel };
+}
+
+export function serializeSyncRotation(value) {
+  const serialized = `${JSON.stringify(value, null, 2)}\n`;
+  if (byteLength(serialized) > MAX_SYNC_CONTROL_BYTES) throw new Error("空间轮换记录过大");
+  return serialized;
+}
+
+export async function inspectSyncRotationText(raw) {
+  if (typeof raw !== "string" || !raw.trim() || byteLength(raw) > MAX_SYNC_CONTROL_BYTES) throw new Error("空间轮换记录为空或过大");
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("空间轮换记录不是有效的 JSON 文件");
+  }
+  return validateSyncRotation(value);
+}
+
+export async function acceptSyncRotation(rotationValue, channel, identity) {
+  const rotation = await validateSyncRotation(rotationValue);
+  const device = await normalizePublicDevice(identity?.device);
+  if (channel?.channelId !== rotation.previous.channelId || channel?.ownerDeviceId !== rotation.owner.deviceId) throw new Error("空间轮换记录不属于当前旧同步空间");
+  const channelGeneration = Number.isSafeInteger(channel.generation) && channel.generation > 0 ? channel.generation : 1;
+  if (channelGeneration !== rotation.previous.generation) throw new Error("空间轮换记录与本地旧世代不一致");
+  if (channel.retiredAt && channel.rotatedToChannelId !== rotation.next.channelId) throw new Error("本地旧空间已经指向另一份轮换结果");
+  const trustedOwner = (Array.isArray(channel.authorizedDevices) ? channel.authorizedDevices : []).find((candidate) => candidate.deviceId === rotation.owner.deviceId && candidate.fingerprint === rotation.owner.fingerprint);
+  if (!trustedOwner) throw new Error("空间轮换记录的创建设备不在当前信任清单中");
+  const revoked = rotation.revoked.some((candidate) => candidate.deviceId === device.deviceId && candidate.fingerprint === device.fingerprint);
+  const retained = rotation.retained.some((candidate) => candidate.deviceId === device.deviceId && candidate.fingerprint === device.fingerprint);
+  if (!revoked && !retained) throw new Error("当前设备不在这份空间轮换清单中");
+  return {
+    status: revoked ? "revoked" : "reauthorize",
+    channel: { ...channel, retiredAt: rotation.rotatedAt, rotatedToChannelId: rotation.next.channelId },
+    rotation,
   };
 }
 
@@ -477,6 +636,7 @@ export async function createSyncPacket(backupText, channel, identity, createdAtV
   const device = await normalizePublicDevice(identity?.device);
   const trusted = (Array.isArray(channel?.authorizedDevices) ? channel.authorizedDevices : []).find((candidate) => candidate.deviceId === device.deviceId && candidate.fingerprint === device.fingerprint);
   if (!trusted) throw new Error("当前设备未被这个同步空间授权");
+  if (channel?.retiredAt) throw new Error("旧同步空间已因密钥轮换停用，不能再生成新同步包");
   if (!channel?.key || !SAFE_ID.test(text(channel.channelId, 100))) throw new Error("当前同步空间缺少本地密钥");
   const createdAt = isoDate(createdAtValue);
   if (!createdAt) throw new Error("同步包创建时间无效");

@@ -4,6 +4,7 @@ import { createBackupEnvelope, serializeBackupEnvelope } from "../app/features/b
 import {
   SYNC_PACKET_FORMAT,
   acceptDeviceGrant,
+  acceptSyncRotation,
   classifySyncRevision,
   createDeviceGrant,
   createPairingRequest,
@@ -14,9 +15,12 @@ import {
   inspectDeviceGrantText,
   inspectPairingRequestText,
   inspectSyncPacketText,
+  inspectSyncRotationText,
+  rotateSyncChannel,
   serializeDeviceGrant,
   serializePairingRequest,
   serializeSyncPacket,
+  serializeSyncRotation,
 } from "../app/features/sync-core.mjs";
 import { addTask, createInitialWorkbench } from "../app/features/workbench-core.mjs";
 
@@ -143,4 +147,71 @@ test("unknown device packets and diverged version chains are surfaced", async ()
   const impersonated = structuredClone(localPacket);
   impersonated.author = packet.author;
   await assert.rejects(decryptSyncPacket(impersonated, ownerChannel), /签名无效/);
+});
+
+test("revoking a device rotates the channel key and requires retained devices to reauthorize", async () => {
+  const owner = await createSyncIdentity("创建设备", "2026-08-20T07:00:00.000Z");
+  const revokedDevice = await createSyncIdentity("遗失设备", "2026-08-20T07:01:00.000Z");
+  const retainedDevice = await createSyncIdentity("保留设备", "2026-08-20T07:02:00.000Z");
+  let ownerChannel = await createSyncChannel(owner, "轮换空间", "2026-08-20T07:03:00.000Z");
+
+  const revokedRequest = await createPairingRequest(revokedDevice, "2026-08-20T07:04:00.000Z");
+  const revokedGrant = await createDeviceGrant(ownerChannel, owner, revokedRequest, "2026-08-20T07:05:00.000Z");
+  ownerChannel = revokedGrant.channel;
+  const revokedChannel = await acceptDeviceGrant(revokedGrant.grant, revokedDevice, "2026-08-20T07:06:00.000Z");
+
+  const retainedRequest = await createPairingRequest(retainedDevice, "2026-08-20T07:07:00.000Z");
+  const retainedGrant = await createDeviceGrant(ownerChannel, owner, retainedRequest, "2026-08-20T07:08:00.000Z");
+  ownerChannel = retainedGrant.channel;
+  const retainedChannel = await acceptDeviceGrant(retainedGrant.grant, retainedDevice, "2026-08-20T07:09:00.000Z");
+
+  const oldSecret = Buffer.from(await crypto.subtle.exportKey("raw", ownerChannel.key)).toString("hex");
+  const rotated = await rotateSyncChannel(ownerChannel, owner, [revokedDevice.device.deviceId], "2026-08-20T07:10:00.000Z");
+  const newSecret = Buffer.from(await crypto.subtle.exportKey("raw", rotated.nextChannel.key)).toString("hex");
+  const rotationText = serializeSyncRotation(rotated.rotation);
+  const inspected = await inspectSyncRotationText(rotationText);
+
+  assert.notEqual(oldSecret, newSecret);
+  assert.equal(rotationText.includes(oldSecret), false);
+  assert.equal(rotationText.includes(newSecret), false);
+  assert.equal(rotated.retiredChannel.rotatedToChannelId, rotated.nextChannel.channelId);
+  assert.equal(rotated.nextChannel.generation, 2);
+  assert.equal(rotated.nextChannel.previousChannelId, ownerChannel.channelId);
+  assert.deepEqual(rotated.nextChannel.revokedDeviceIds, [revokedDevice.device.deviceId]);
+  assert.deepEqual(rotated.nextChannel.authorizedDevices.map((device) => device.deviceId), [owner.device.deviceId]);
+  await assert.rejects(createSyncPacket(await backupText(), rotated.retiredChannel, owner, "2026-08-20T07:11:00.000Z"), /停用/);
+
+  const revokedResult = await acceptSyncRotation(inspected, revokedChannel, revokedDevice);
+  const retainedResult = await acceptSyncRotation(inspected, retainedChannel, retainedDevice);
+  assert.equal(revokedResult.status, "revoked");
+  assert.equal(retainedResult.status, "reauthorize");
+  assert.equal(retainedResult.channel.retiredAt, "2026-08-20T07:10:00.000Z");
+
+  const nextRequest = await createPairingRequest(retainedDevice, "2026-08-20T07:12:00.000Z");
+  const nextGrant = await createDeviceGrant(rotated.nextChannel, owner, nextRequest, "2026-08-20T07:13:00.000Z");
+  const nextRetainedChannel = await acceptDeviceGrant(nextGrant.grant, retainedDevice, "2026-08-20T07:14:00.000Z");
+  assert.equal(nextRetainedChannel.generation, 2);
+  assert.equal(nextRetainedChannel.previousChannelId, ownerChannel.channelId);
+  const revokedRetry = await createPairingRequest(revokedDevice, "2026-08-20T07:14:30.000Z");
+  await assert.rejects(createDeviceGrant(nextGrant.channel, owner, revokedRetry, "2026-08-20T07:14:40.000Z"), /已被空间密钥轮换撤销/);
+
+  const nextPacket = await createSyncPacket(await backupText("只有新世代可以解锁"), nextGrant.channel, owner, "2026-08-20T07:15:00.000Z");
+  const opened = await decryptSyncPacket(nextPacket, nextRetainedChannel);
+  assert.equal(opened.parsed.workspace.tasks[0].title, "只有新世代可以解锁");
+  await assert.rejects(decryptSyncPacket(nextPacket, revokedChannel), /不属于当前设备已加入的同步空间/);
+});
+
+test("rotation records reject tampering and non-owner rotation attempts", async () => {
+  const owner = await createSyncIdentity("创建设备", "2026-08-20T08:00:00.000Z");
+  const member = await createSyncIdentity("成员设备", "2026-08-20T08:01:00.000Z");
+  const ownerChannel = await createSyncChannel(owner, "签名轮换", "2026-08-20T08:02:00.000Z");
+  const request = await createPairingRequest(member, "2026-08-20T08:03:00.000Z");
+  const granted = await createDeviceGrant(ownerChannel, owner, request, "2026-08-20T08:04:00.000Z");
+  const memberChannel = await acceptDeviceGrant(granted.grant, member, "2026-08-20T08:05:00.000Z");
+
+  await assert.rejects(rotateSyncChannel(memberChannel, member, [owner.device.deviceId], "2026-08-20T08:06:00.000Z"), /创建设备/);
+  const rotated = await rotateSyncChannel(granted.channel, owner, [member.device.deviceId], "2026-08-20T08:06:00.000Z");
+  const tampered = structuredClone(rotated.rotation);
+  tampered.next.label = "被替换的空间名称";
+  await assert.rejects(inspectSyncRotationText(serializeSyncRotation(tampered)), /签名无效/);
 });

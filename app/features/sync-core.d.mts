@@ -3,6 +3,7 @@ import type { WorkbenchState } from "./workbench-core.mjs";
 
 export const SYNC_PAIRING_FORMAT: "evolve-desk.sync-pairing";
 export const SYNC_GRANT_FORMAT: "evolve-desk.sync-grant";
+export const SYNC_ROTATION_FORMAT: "evolve-desk.sync-rotation";
 export const SYNC_PACKET_FORMAT: "evolve-desk.sync-packet";
 export const SYNC_FORMAT_VERSION: 1;
 export const SYNC_PACKET_FORMAT_VERSION: 2;
@@ -29,6 +30,11 @@ export type SyncChannel = {
   ownerDeviceId: string;
   role: "owner" | "member";
   key: CryptoKey;
+  generation: number;
+  previousChannelId: string;
+  retiredAt: string;
+  rotatedToChannelId: string;
+  revokedDeviceIds: string[];
   authorizedDevices: AuthorizedSyncDevice[];
   headRevisionId: string;
   lastPacketAt: string;
@@ -52,12 +58,25 @@ export type DeviceGrant = {
   requestId: string;
   issuedAt: string;
   expiresAt: string;
-  channel: { channelId: string; label: string; createdAt: string };
+  channel: { channelId: string; label: string; createdAt: string; generation?: number; previousChannelId?: string };
   grantor: SyncPublicDevice;
   recipient: SyncPublicDevice;
   keyAgreement: { name: "ECDH"; namedCurve: "P-256"; kdf: "HKDF-SHA-256"; salt: string };
   cipher: { name: "AES-GCM"; keyLength: 256; iv: string; tagLength: 128 };
   ciphertext: string;
+  proof: DeviceProof;
+};
+
+export type SyncRotation = {
+  format: typeof SYNC_ROTATION_FORMAT;
+  formatVersion: 1;
+  rotationId: string;
+  rotatedAt: string;
+  previous: { channelId: string; generation: number; headRevisionId: string };
+  next: { channelId: string; generation: number; label: string };
+  owner: SyncPublicDevice;
+  revoked: Array<{ deviceId: string; fingerprint: string }>;
+  retained: Array<{ deviceId: string; fingerprint: string }>;
   proof: DeviceProof;
 };
 
@@ -107,6 +126,10 @@ export function createDeviceGrant(channel: SyncChannel, identity: SyncIdentity, 
 export function serializeDeviceGrant(value: DeviceGrant): string;
 export function inspectDeviceGrantText(raw: string, now?: Date): Promise<DeviceGrant>;
 export function acceptDeviceGrant(grant: DeviceGrant, identity: SyncIdentity, acceptedAt?: string): Promise<SyncChannel>;
+export function rotateSyncChannel(channel: SyncChannel, identity: SyncIdentity, revokedDeviceIds: string[], rotatedAt?: string): Promise<{ rotation: SyncRotation; retiredChannel: SyncChannel; nextChannel: SyncChannel }>;
+export function serializeSyncRotation(value: SyncRotation): string;
+export function inspectSyncRotationText(raw: string): Promise<SyncRotation>;
+export function acceptSyncRotation(rotation: SyncRotation, channel: SyncChannel, identity: SyncIdentity): Promise<{ status: "revoked" | "reauthorize"; channel: SyncChannel; rotation: SyncRotation }>;
 export function classifySyncRevision(headRevisionId: string, packet: SyncPacket): SyncRevisionRelation;
 export function createSyncPacket(backupText: string, channel: SyncChannel, identity: SyncIdentity, createdAt?: string): Promise<SyncPacket>;
 export function serializeSyncPacket(value: SyncPacket): string;
