@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyBackupMerge, createBackupMergePreview } from "../app/features/backup-merge.mjs";
+import { applyBackupMerge, createBackupMergeDecisionReceipt, createBackupMergePreview } from "../app/features/backup-merge.mjs";
 import { createInitialWorkbench, parseWorkbenchState } from "../app/features/workbench-core.mjs";
 
 const noSources = { transcripts: [], visualFrames: [] };
@@ -35,8 +35,46 @@ test("concurrent edits to the same stable object require an explicit side", () =
   const conflict = preview.entries.find((entry) => entry.objectId === "task-shared");
 
   assert.equal(preview.conflictCount, 1);
+  assert.equal(conflict.resolution, "fields");
+  assert.deepEqual(conflict.fieldConflicts[0].path, ["title"]);
   assert.equal(applyBackupMerge(preview).workspace.tasks[0].title, "本机标题");
-  assert.equal(applyBackupMerge(preview, { [conflict.key]: "incoming" }).workspace.tasks[0].title, "远端标题");
+  assert.equal(applyBackupMerge(preview, { [conflict.fieldConflicts[0].key]: "incoming" }).workspace.tasks[0].title, "远端标题");
+});
+
+test("different fields on the same object merge without an object-level conflict", () => {
+  const baseTask = { ...task("task-fields", "原始标题"), note: "原始备注" };
+  const localTask = { ...baseTask, title: "本机标题", priority: "high" };
+  const incomingTask = { ...baseTask, note: "迁入备注" };
+  const preview = createBackupMergePreview(
+    workspace({ tasks: [baseTask] }),
+    workspace({ tasks: [localTask] }),
+    workspace({ tasks: [incomingTask] }),
+    noSources,
+    noSources,
+    noSources,
+  );
+  const merged = applyBackupMerge(preview).workspace.tasks[0];
+
+  assert.equal(preview.conflictCount, 0);
+  assert.equal(preview.autoFieldMergedCount, 1);
+  assert.equal(merged.title, "本机标题");
+  assert.equal(merged.note, "迁入备注");
+  assert.equal(merged.priority, "high");
+});
+
+test("field choices change only the disputed field and preserve automatic fields", () => {
+  const baseTask = { ...task("task-mixed", "原始标题"), note: "原始备注" };
+  const localTask = { ...baseTask, title: "本机标题", priority: "high" };
+  const incomingTask = { ...baseTask, title: "迁入标题", note: "迁入备注" };
+  const preview = createBackupMergePreview(workspace({ tasks: [baseTask] }), workspace({ tasks: [localTask] }), workspace({ tasks: [incomingTask] }), noSources, noSources, noSources);
+  const conflict = preview.entries.find((entry) => entry.objectId === "task-mixed");
+  const titleConflict = conflict.fieldConflicts.find((field) => field.path.join(".") === "title");
+  const merged = applyBackupMerge(preview, { [titleConflict.key]: "incoming" }).workspace.tasks[0];
+
+  assert.equal(preview.conflictCount, 1);
+  assert.equal(merged.title, "迁入标题");
+  assert.equal(merged.note, "迁入备注");
+  assert.equal(merged.priority, "high");
 });
 
 test("delete versus modify is a conflict and can keep the deletion", () => {
@@ -94,4 +132,28 @@ test("merged state is re-sanitized so orphaned source data cannot survive choice
   const merged = applyBackupMerge(preview);
 
   assert.equal(merged.sources.transcripts.length, 0);
+});
+
+test("merge decision receipts record choices without copying disputed content", () => {
+  const base = workspace({ tasks: [task("task-receipt", "原始秘密标题")] });
+  const local = workspace({ tasks: [task("task-receipt", "本机秘密标题")] });
+  const incoming = workspace({ tasks: [task("task-receipt", "迁入秘密标题")] });
+  const preview = createBackupMergePreview(base, local, incoming, noSources, noSources, noSources);
+  const field = preview.entries[0].fieldConflicts[0];
+  const receipt = createBackupMergeDecisionReceipt(preview, { [field.key]: "incoming" }, {
+    baseRevisionId: "revision_base",
+    localRevisionId: "revision_local",
+    incomingRevisionId: "revision_incoming",
+    sourceChecksum: "checksum-example",
+  }, "2026-08-22T08:00:00.000Z");
+
+  assert.equal(receipt.format, "evolve-desk.merge-decision");
+  assert.equal(receipt.totals.conflictDecisions, 1);
+  assert.equal(receipt.decisions[0].fields[0].choice, "incoming");
+  assert.deepEqual(receipt.decisions[0].fields[0].path, ["title"]);
+  assert.equal(JSON.stringify(receipt).includes("秘密标题"), false);
+  assert.throws(
+    () => createBackupMergeDecisionReceipt(preview, {}, {}, "2026-08-22T08:00:00.000Z"),
+    /1 个合并冲突没有明确选择/,
+  );
 });

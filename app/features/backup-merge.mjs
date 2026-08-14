@@ -62,6 +62,10 @@ function stateLabel(value) {
   return value === undefined ? "不存在" : "存在";
 }
 
+function plainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
 function decide(baseValue, localValue, incomingValue) {
   const base = json(baseValue);
   const local = json(localValue);
@@ -70,6 +74,67 @@ function decide(baseValue, localValue, incomingValue) {
   if (local === base) return { kind: "incoming", defaultChoice: "incoming" };
   if (incoming === base) return { kind: "local", defaultChoice: "local" };
   return { kind: "conflict", defaultChoice: "local" };
+}
+
+function fieldKey(entryKey, path) {
+  return `${entryKey}#${path.map((part) => encodeURIComponent(part)).join("/")}`;
+}
+
+function mergeObjectFields(baseValue, localValue, incomingValue, entryKey, path = []) {
+  const mergedValue = {};
+  const fieldConflicts = [];
+  let autoLocalFields = 0;
+  let autoIncomingFields = 0;
+  const keys = [...new Set([...Object.keys(localValue), ...Object.keys(incomingValue), ...Object.keys(baseValue)])];
+  for (const key of keys) {
+    const base = baseValue[key];
+    const local = localValue[key];
+    const incoming = incomingValue[key];
+    const decision = decide(base, local, incoming);
+    let selected;
+    if (decision.kind === "conflict" && plainObject(base) && plainObject(local) && plainObject(incoming)) {
+      const nested = mergeObjectFields(base, local, incoming, entryKey, [...path, key]);
+      selected = nested.mergedValue;
+      fieldConflicts.push(...nested.fieldConflicts);
+      autoLocalFields += nested.autoLocalFields;
+      autoIncomingFields += nested.autoIncomingFields;
+    } else if (decision.kind === "conflict") {
+      selected = local;
+      fieldConflicts.push({
+        key: fieldKey(entryKey, [...path, key]),
+        path: [...path, key],
+        label: [...path, key].join(" › "),
+        baseValue: base,
+        localValue: local,
+        incomingValue: incoming,
+        localState: stateLabel(local),
+        incomingState: stateLabel(incoming),
+      });
+    } else if (decision.defaultChoice === "incoming") {
+      selected = incoming;
+      if (decision.kind === "incoming") autoIncomingFields += 1;
+    } else {
+      selected = local;
+      if (decision.kind === "local") autoLocalFields += 1;
+    }
+    if (selected !== undefined) mergedValue[key] = clone(selected);
+  }
+  return { mergedValue, fieldConflicts, autoLocalFields, autoIncomingFields };
+}
+
+function enrichDecision(entryKey, baseValue, localValue, incomingValue) {
+  const decision = decide(baseValue, localValue, incomingValue);
+  if (decision.kind !== "conflict" || !plainObject(baseValue) || !plainObject(localValue) || !plainObject(incomingValue)) {
+    return { ...decision, resolution: "object", fieldConflicts: [], mergedValue: undefined, autoLocalFields: 0, autoIncomingFields: 0, conflictCount: decision.kind === "conflict" ? 1 : 0 };
+  }
+  const fields = mergeObjectFields(baseValue, localValue, incomingValue, entryKey);
+  return {
+    kind: fields.fieldConflicts.length ? "conflict" : "merged",
+    defaultChoice: "local",
+    resolution: "fields",
+    ...fields,
+    conflictCount: fields.fieldConflicts.length,
+  };
 }
 
 function orderedIds(baseItems, localItems, incomingItems, idKey) {
@@ -92,9 +157,10 @@ function collectionEntries(spec, baseItems, localItems, incomingItems, idKey = "
     const baseValue = base.get(objectId);
     const localValue = local.get(objectId);
     const incomingValue = incoming.get(objectId);
-    const decision = decide(baseValue, localValue, incomingValue);
+    const key = `${spec.key}:${encodeURIComponent(objectId)}`;
+    const decision = enrichDecision(key, baseValue, localValue, incomingValue);
     return {
-      key: `${spec.key}:${encodeURIComponent(objectId)}`,
+      key,
       categoryKey: spec.key,
       categoryLabel: spec.label,
       objectId,
@@ -120,7 +186,7 @@ function singletonEntry(spec, baseRoot, localRoot, incomingRoot) {
     categoryLabel: spec.label,
     objectId: spec.key,
     title: spec.title,
-    ...decide(baseValue, localValue, incomingValue),
+    ...enrichDecision(spec.key, baseValue, localValue, incomingValue),
     baseState: stateLabel(baseValue),
     localState: stateLabel(localValue),
     incomingState: stateLabel(incomingValue),
@@ -137,9 +203,10 @@ function summarizeEntries(entries, spec) {
     label: spec.label,
     total: entries.length,
     changed: changed.length,
-    conflicts: changed.filter((entry) => entry.kind === "conflict").length,
+    conflicts: changed.reduce((total, entry) => total + entry.conflictCount, 0),
     local: changed.filter((entry) => entry.kind === "local").length,
     incoming: changed.filter((entry) => entry.kind === "incoming").length,
+    merged: changed.filter((entry) => entry.kind === "merged").length,
   };
 }
 
@@ -184,10 +251,33 @@ export function createBackupMergePreview(baseWorkspaceValue, localWorkspaceValue
     groups,
     rows: groups.map((group) => summarizeEntries(group.entries, group.spec)).filter((row) => row.changed > 0),
     entries: changedEntries,
-    conflictCount: changedEntries.filter((entry) => entry.kind === "conflict").length,
+    conflictCount: changedEntries.reduce((total, entry) => total + entry.conflictCount, 0),
+    conflictKeys: changedEntries.flatMap((entry) => entry.resolution === "fields" ? entry.fieldConflicts.map((field) => field.key) : entry.kind === "conflict" ? [entry.key] : []),
     autoLocalCount: changedEntries.filter((entry) => entry.kind === "local").length,
     autoIncomingCount: changedEntries.filter((entry) => entry.kind === "incoming").length,
+    autoFieldMergedCount: changedEntries.filter((entry) => entry.kind === "merged" || entry.resolution === "fields").length,
   };
+}
+
+function writeField(value, path, next) {
+  let target = value;
+  for (const key of path.slice(0, -1)) target = target[key];
+  const key = path.at(-1);
+  if (next === undefined) delete target[key];
+  else target[key] = clone(next);
+}
+
+function resolvedEntryValue(entry, choices) {
+  if (entry.resolution !== "fields") {
+    const choice = entry.kind === "conflict" && choices[entry.key] === "incoming" ? "incoming" : entry.defaultChoice;
+    return choice === "incoming" ? entry.incomingValue : entry.localValue;
+  }
+  const merged = clone(entry.mergedValue);
+  for (const field of entry.fieldConflicts) {
+    const selected = choices[field.key] === "incoming" ? field.incomingValue : field.localValue;
+    writeField(merged, field.path, selected);
+  }
+  return merged;
 }
 
 export function applyBackupMerge(preview, choices = {}) {
@@ -197,14 +287,12 @@ export function applyBackupMerge(preview, choices = {}) {
   for (const group of preview.groups) {
     if (group.target === "workspace-singleton") {
       const entry = group.entries[0];
-      const choice = entry.kind === "conflict" && choices[entry.key] === "incoming" ? "incoming" : entry.defaultChoice;
-      writePath(workspace, group.spec.path, clone(choice === "incoming" ? entry.incomingValue : entry.localValue));
+      writePath(workspace, group.spec.path, clone(resolvedEntryValue(entry, choices)));
       continue;
     }
     const merged = [];
     for (const entry of group.entries) {
-      const choice = entry.kind === "conflict" && choices[entry.key] === "incoming" ? "incoming" : entry.defaultChoice;
-      const selected = choice === "incoming" ? entry.incomingValue : entry.localValue;
+      const selected = resolvedEntryValue(entry, choices);
       if (selected !== undefined) merged.push(clone(selected));
     }
     writePath(group.target === "sources" ? sources : workspace, group.spec.path, merged);
@@ -215,5 +303,42 @@ export function applyBackupMerge(preview, choices = {}) {
     workspace: safeMergedWorkspace,
     sources: safeMergedSources,
     summary: summarizeBackup(safeMergedWorkspace, safeMergedSources),
+  };
+}
+
+export function createBackupMergeDecisionReceipt(preview, choices = {}, contextValue = {}, createdAtValue = new Date().toISOString()) {
+  if (!preview?.localWorkspace || !Array.isArray(preview.entries)) throw new Error("合并预览无效");
+  const unresolved = preview.conflictKeys?.filter((key) => choices[key] !== "local" && choices[key] !== "incoming") || [];
+  if (unresolved.length > 0) throw new Error(`仍有 ${unresolved.length} 个合并冲突没有明确选择`);
+  const createdAt = new Date(createdAtValue).toISOString();
+  const context = {
+    baseRevisionId: String(contextValue.baseRevisionId || "").slice(0, 100),
+    localRevisionId: String(contextValue.localRevisionId || "").slice(0, 100),
+    incomingRevisionId: String(contextValue.incomingRevisionId || "").slice(0, 100),
+    sourceChecksum: String(contextValue.sourceChecksum || "").slice(0, 128),
+  };
+  const decisions = preview.entries.filter((entry) => entry.kind === "conflict").map((entry) => entry.resolution === "fields" ? {
+    categoryKey: entry.categoryKey,
+    objectId: entry.objectId,
+    resolution: "fields",
+    fields: entry.fieldConflicts.map((field) => ({ path: field.path, choice: choices[field.key] === "incoming" ? "incoming" : "local" })),
+  } : {
+    categoryKey: entry.categoryKey,
+    objectId: entry.objectId,
+    resolution: "object",
+    choice: choices[entry.key] === "incoming" ? "incoming" : "local",
+  });
+  return {
+    format: "evolve-desk.merge-decision",
+    formatVersion: 1,
+    createdAt,
+    context,
+    totals: {
+      conflictDecisions: preview.conflictCount,
+      autoLocalObjects: preview.autoLocalCount,
+      autoIncomingObjects: preview.autoIncomingCount,
+      fieldMergedObjects: preview.autoFieldMergedCount,
+    },
+    decisions,
   };
 }

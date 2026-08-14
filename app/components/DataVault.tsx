@@ -3,8 +3,8 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { SyncStudio } from "./SyncStudio";
 import type { StagedSyncBackup, StagedSyncMergeBase } from "./SyncStudio";
-import { applyBackupMerge, createBackupMergePreview } from "../features/backup-merge.mjs";
-import type { BackupMergeChoice, BackupMergePreview } from "../features/backup-merge.mjs";
+import { applyBackupMerge, createBackupMergeDecisionReceipt, createBackupMergePreview } from "../features/backup-merge.mjs";
+import type { BackupMergeChoice, BackupMergeDecisionReceipt, BackupMergePreview } from "../features/backup-merge.mjs";
 import { inspectBackupCompatibility } from "../features/backup-compatibility.mjs";
 import type { BackupCompatibilityReport } from "../features/backup-compatibility.mjs";
 import {
@@ -77,6 +77,14 @@ type ExportReceipt = {
   bytes: number;
   summary: BackupSummary;
   protected: boolean;
+};
+
+type RestoreReceipt = {
+  fileName: string;
+  restoredAt: string;
+  checksum: string;
+  merged: boolean;
+  mergeDecision?: BackupMergeDecisionReceipt;
 };
 
 const summaryLabels: Record<string, string> = {
@@ -156,7 +164,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
   const [restoreArmed, setRestoreArmed] = useState(false);
   const [undo, setUndo] = useState<UndoSnapshot | null>(null);
   const [lastExport, setLastExport] = useState<ExportReceipt | null>(null);
-  const [restoreReceipt, setRestoreReceipt] = useState<{ fileName: string; restoredAt: string; checksum: string; merged: boolean } | null>(null);
+  const [restoreReceipt, setRestoreReceipt] = useState<RestoreReceipt | null>(null);
   const [exportProtection, setExportProtection] = useState<"plain" | "encrypted">("encrypted");
   const [exportPassphrase, setExportPassphrase] = useState("");
   const [exportPassphraseConfirm, setExportPassphraseConfirm] = useState("");
@@ -177,6 +185,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
   const currentSummary = useMemo(() => summarizeBackup(state, localSources), [state, localSources]);
   const visibleModules = Object.entries(currentSummary.modules).filter(([, count]) => count > 0);
   const mergedBackup = useMemo(() => pending?.merge ? applyBackupMerge(pending.merge, mergeChoices) : null, [pending, mergeChoices]);
+  const unresolvedMergeCount = useMemo(() => pending?.merge ? pending.merge.conflictKeys.filter((key) => !(key in mergeChoices)).length : 0, [pending, mergeChoices]);
   const previewWorkspace = pending ? pending.merge && mergeMode === "merge" && mergedBackup ? mergedBackup.workspace : pending.workspace : null;
   const previewSummary = pending ? pending.merge && mergeMode === "merge" && mergedBackup ? mergedBackup.summary : pending.summary : null;
   const previewDiff = useMemo(() => previewWorkspace ? compareBackupStates(state, previewWorkspace) : null, [state, previewWorkspace]);
@@ -323,6 +332,11 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
     const useMerge = Boolean(pending.merge && mergeMode === "merge" && mergedBackup);
     const targetWorkspace = useMerge ? mergedBackup!.workspace : pending.workspace;
     const targetSources = useMerge ? mergedBackup!.sources : pending.sources;
+    if (useMerge && unresolvedMergeCount > 0) {
+      setRestoreArmed(false);
+      setMessage(`还有 ${unresolvedMergeCount} 个冲突字段或对象尚未明确选择，完成后才能写入合并。`);
+      return;
+    }
     if (!restoreArmed) {
       setRestoreArmed(true);
       setMessage(useMerge
@@ -334,6 +348,13 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
     setMessage(useMerge ? "正在建立恢复前快照，并写入三方合并结果…" : "正在建立恢复前快照，并写入迁移卷…");
     let previousSources: BackupSources | null = null;
     try {
+      const restoredAt = new Date().toISOString();
+      const mergeDecision = useMerge && pending.merge ? createBackupMergeDecisionReceipt(pending.merge, mergeChoices, {
+        baseRevisionId: pending.sync?.parentRevisionId || "",
+        localRevisionId: pending.sync?.previousHeadRevisionId || "",
+        incomingRevisionId: pending.sync?.revisionId || "",
+        sourceChecksum: pending.envelope.checksum,
+      }, restoredAt) : undefined;
       previousSources = await exportSourceArchive();
       const previousWorkspace = state;
       const replaced = await replaceSourceArchive(targetSources);
@@ -344,7 +365,6 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
         await replaceSourceArchive(previousSources);
         throw error;
       }
-      const restoredAt = new Date().toISOString();
       let syncHeadSaved = true;
       if (pending.sync) {
         try {
@@ -370,7 +390,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
         } : undefined,
       });
       setLocalSources(targetSources);
-      setRestoreReceipt({ fileName: pending.fileName, restoredAt, checksum: pending.envelope.checksum, merged: useMerge });
+      setRestoreReceipt({ fileName: pending.fileName, restoredAt, checksum: pending.envelope.checksum, merged: useMerge, mergeDecision });
       setPending(null);
       setRestoreArmed(false);
       setMessage(syncHeadSaved
@@ -431,6 +451,18 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
   function chooseMergeSide(key: string, choice: BackupMergeChoice) {
     setMergeChoices((current) => ({ ...current, [key]: choice }));
     setRestoreArmed(false);
+  }
+
+  function downloadMergeDecision(receipt: BackupMergeDecisionReceipt) {
+    const serialized = `${JSON.stringify(receipt, null, 2)}\n`;
+    const url = URL.createObjectURL(new Blob([serialized], { type: "application/json;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `evolve-merge-decision-${receipt.createdAt.replace(/[-:]/g, "").slice(0, 13)}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   return (
@@ -535,21 +567,30 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
           {pending.merge && (
             <section className="merge-resolution">
               <header>
-                <div><span>THREE-WAY MERGE / 共同父版本 → 两台设备</span><h3>单边变化自动并入，双边修改同一对象才需要选择。</h3></div>
-                <div role="radiogroup" aria-label="分叉处理方式"><button role="radio" aria-checked={mergeMode === "merge"} className={mergeMode === "merge" ? "active" : ""} onClick={() => { setMergeMode("merge"); setRestoreArmed(false); }}>逐对象合并</button><button role="radio" aria-checked={mergeMode === "replace"} className={mergeMode === "replace" ? "active danger" : ""} onClick={() => { setMergeMode("replace"); setRestoreArmed(false); }}>整体迁入</button></div>
+                <div><span>THREE-WAY MERGE / 共同父版本 → 两台设备</span><h3>不同字段自动拼合，同一字段分歧才需要明确选择。</h3></div>
+                <div role="radiogroup" aria-label="分叉处理方式"><button role="radio" aria-checked={mergeMode === "merge"} className={mergeMode === "merge" ? "active" : ""} onClick={() => { setMergeMode("merge"); setRestoreArmed(false); }}>字段级合并</button><button role="radio" aria-checked={mergeMode === "replace"} className={mergeMode === "replace" ? "active danger" : ""} onClick={() => { setMergeMode("replace"); setRestoreArmed(false); }}>整体迁入</button></div>
               </header>
               {mergeMode === "merge" ? (
                 <>
-                  <div className="merge-totals"><span><small>自动保留本机</small><strong>{pending.merge.autoLocalCount}</strong></span><span><small>自动接入迁入</small><strong>{pending.merge.autoIncomingCount}</strong></span><span className={pending.merge.conflictCount ? "warning" : "ready"}><small>需要选择</small><strong>{pending.merge.conflictCount}</strong></span></div>
+                  <div className="merge-totals"><span><small>自动保留本机</small><strong>{pending.merge.autoLocalCount}</strong></span><span><small>自动接入迁入</small><strong>{pending.merge.autoIncomingCount}</strong></span><span><small>字段自动拼合</small><strong>{pending.merge.autoFieldMergedCount}</strong></span><span className={unresolvedMergeCount ? "warning" : "ready"}><small>尚待选择</small><strong>{unresolvedMergeCount}</strong></span></div>
                   <div className="merge-category-tape">{pending.merge.rows.map((row) => <span key={row.key}><strong>{row.label}</strong><small>{row.changed} 处变化{row.conflicts ? ` · ${row.conflicts} 冲突` : " · 自动"}</small></span>)}</div>
                   {pending.merge.conflictCount > 0 ? (
                     <div className="merge-conflict-list">
                       {pending.merge.entries.filter((entry) => entry.kind === "conflict").map((entry) => {
-                        const selected = mergeChoices[entry.key] || "local";
-                        return <article key={entry.key}><header><span>{entry.categoryLabel}</span><strong>{entry.title}</strong><code>{entry.objectId.slice(0, 24)}</code></header><div><button className={selected === "local" ? "active" : ""} onClick={() => chooseMergeSide(entry.key, "local")} aria-pressed={selected === "local"}><span>保留本机</span><strong>{entry.localState}</strong><p>{describeMergeValue(entry.localValue)}</p></button><button className={selected === "incoming" ? "active incoming" : ""} onClick={() => chooseMergeSide(entry.key, "incoming")} aria-pressed={selected === "incoming"}><span>采用迁入</span><strong>{entry.incomingState}</strong><p>{describeMergeValue(entry.incomingValue)}</p></button></div></article>;
+                        if (entry.resolution === "fields") return (
+                          <article key={entry.key} className="field-resolution">
+                            <header><span>{entry.categoryLabel} · 字段冲突</span><strong>{entry.title}</strong><code>{entry.objectId.slice(0, 24)}</code></header>
+                            <div className="merge-field-conflicts">{entry.fieldConflicts.map((field) => {
+                              const selected = mergeChoices[field.key];
+                              return <section key={field.key}><header><strong>{field.label}</strong><small>{selected ? "已选择" : "等待明确选择"}</small></header><div><button className={selected === "local" ? "active" : ""} onClick={() => chooseMergeSide(field.key, "local")} aria-pressed={selected === "local"}><span>保留本机字段</span><strong>{field.localState}</strong><p>{describeMergeValue(field.localValue)}</p></button><button className={selected === "incoming" ? "active incoming" : ""} onClick={() => chooseMergeSide(field.key, "incoming")} aria-pressed={selected === "incoming"}><span>采用迁入字段</span><strong>{field.incomingState}</strong><p>{describeMergeValue(field.incomingValue)}</p></button></div></section>;
+                            })}</div>
+                          </article>
+                        );
+                        const selected = mergeChoices[entry.key];
+                        return <article key={entry.key}><header><span>{entry.categoryLabel} · 对象冲突</span><strong>{entry.title}</strong><code>{entry.objectId.slice(0, 24)}</code></header><div className="merge-object-options"><button className={selected === "local" ? "active" : ""} onClick={() => chooseMergeSide(entry.key, "local")} aria-pressed={selected === "local"}><span>保留本机对象</span><strong>{entry.localState}</strong><p>{describeMergeValue(entry.localValue)}</p></button><button className={selected === "incoming" ? "active incoming" : ""} onClick={() => chooseMergeSide(entry.key, "incoming")} aria-pressed={selected === "incoming"}><span>采用迁入对象</span><strong>{entry.incomingState}</strong><p>{describeMergeValue(entry.incomingValue)}</p></button></div></article>;
                       })}
                     </div>
-                  ) : <p className="merge-no-conflict"><i>✓</i><span><strong>没有双边对象冲突。</strong>两台设备的独立变化已经按稳定 ID 组成合并结果。</span></p>}
+                  ) : <p className="merge-no-conflict"><i>✓</i><span><strong>没有同字段或删除冲突。</strong>两台设备的独立对象与字段变化已经按稳定 ID 组成合并结果。</span></p>}
                 </>
               ) : <p className="merge-replace-warning"><i>!</i><span><strong>整体迁入会忽略自动合并和上方选择。</strong>当前设备独有的对象会按下方差异被移除；仍需再次点击确认。</span></p>}
             </section>
@@ -576,7 +617,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
           </div>
           <footer>
             <button onClick={discardPreview} disabled={Boolean(busy)}>丢弃预检</button>
-            <button className={restoreArmed ? "armed" : ""} onClick={restoreBackup} disabled={Boolean(busy)}>{busy === "restore" ? pending.merge && mergeMode === "merge" ? "正在写入合并…" : "正在恢复…" : restoreArmed ? pending.merge && mergeMode === "merge" ? "再次点击，确认写入合并" : "再次点击，确认整体替换" : pending.merge && mergeMode === "merge" ? "准备写入合并" : "准备恢复"}<span>{restoreArmed ? "!" : "→"}</span></button>
+            <button className={restoreArmed ? "armed" : ""} onClick={restoreBackup} disabled={Boolean(busy) || Boolean(pending.merge && mergeMode === "merge" && unresolvedMergeCount)}>{busy === "restore" ? pending.merge && mergeMode === "merge" ? "正在写入合并…" : "正在恢复…" : pending.merge && mergeMode === "merge" && unresolvedMergeCount ? `先选择 ${unresolvedMergeCount} 个冲突` : restoreArmed ? pending.merge && mergeMode === "merge" ? "再次点击，确认写入合并" : "再次点击，确认整体替换" : pending.merge && mergeMode === "merge" ? "准备写入合并" : "准备恢复"}<span>{restoreArmed ? "!" : "→"}</span></button>
           </footer>
         </section>
       )}
@@ -584,8 +625,8 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
       {restoreReceipt && (
         <article className="vault-receipt restore-receipt">
           <div className="receipt-stamp">RESTORED<small>{formatDate(restoreReceipt.restoredAt)}</small></div>
-          <div><span>{restoreReceipt.merged ? "合并回执" : "恢复回执"}</span><strong>{restoreReceipt.fileName}</strong><small>源卷校验 {restoreReceipt.checksum.slice(0, 12)}… · {restoreReceipt.merged ? "三方结果" : "迁移卷"}已完整写入当前浏览器</small></div>
-          {undo && <button onClick={undoRestore} disabled={Boolean(busy)}>{busy === "undo" ? "正在撤回…" : "撤回整次恢复"}<span>↶</span></button>}
+          <div><span>{restoreReceipt.merged ? "字段合并回执" : "恢复回执"}</span><strong>{restoreReceipt.fileName}</strong><small>源卷校验 {restoreReceipt.checksum.slice(0, 12)}… · {restoreReceipt.merged ? "三方结果" : "迁移卷"}已写入当前浏览器{restoreReceipt.mergeDecision ? `；${restoreReceipt.mergeDecision.totals.conflictDecisions} 个明确选择已记入无字段内容回执` : ""}</small></div>
+          <div className="restore-receipt-actions">{restoreReceipt.mergeDecision && <button onClick={() => downloadMergeDecision(restoreReceipt.mergeDecision!)} disabled={Boolean(busy)}>下载决策回执<span>↓</span></button>}{undo && <button onClick={undoRestore} disabled={Boolean(busy)}>{busy === "undo" ? "正在撤回…" : "撤回整次恢复"}<span>↶</span></button>}</div>
         </article>
       )}
     </section>
