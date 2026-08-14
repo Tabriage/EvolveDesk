@@ -10,6 +10,7 @@ export const SYNC_PAIRING_FORMAT = "evolve-desk.sync-pairing";
 export const SYNC_GRANT_FORMAT = "evolve-desk.sync-grant";
 export const SYNC_PACKET_FORMAT = "evolve-desk.sync-packet";
 export const SYNC_FORMAT_VERSION = 1;
+export const SYNC_PACKET_FORMAT_VERSION = 2;
 export const MAX_SYNC_CONTROL_BYTES = 128 * 1024;
 export const MAX_SYNC_PACKET_BYTES = 132 * 1024 * 1024;
 export const PAIRING_LIFETIME_MS = 24 * 60 * 60 * 1_000;
@@ -273,6 +274,7 @@ export async function createSyncChannel(identity, labelValue = "我的工作台"
     authorizedDevices: [{ ...device, authorizedAt: createdAt, authorizedBy: device.deviceId }],
     headRevisionId: "",
     lastPacketAt: "",
+    mergeParentRevisionIds: [],
   };
 }
 
@@ -411,16 +413,21 @@ export async function acceptDeviceGrant(grantValue, identity, acceptedAtValue = 
     ],
     headRevisionId: "",
     lastPacketAt: "",
+    mergeParentRevisionIds: [],
   };
 }
 
 function packetHeader(value) {
-  return {
+  const lineage = {
     format: SYNC_PACKET_FORMAT,
-    formatVersion: SYNC_FORMAT_VERSION,
+    formatVersion: value.formatVersion || SYNC_PACKET_FORMAT_VERSION,
     channelId: value.channelId,
     revisionId: value.revisionId,
     parentRevisionId: value.parentRevisionId,
+  };
+  return {
+    ...lineage,
+    ...(Array.isArray(value.mergeParentRevisionIds) ? { mergeParentRevisionIds: value.mergeParentRevisionIds } : {}),
     createdAt: value.createdAt,
     author: value.author,
     innerFormat: BACKUP_FORMAT,
@@ -431,10 +438,17 @@ function packetHeader(value) {
 
 function validatePacket(value) {
   if (!value || typeof value !== "object" || value.format !== SYNC_PACKET_FORMAT) throw new Error("这不是 Evolve Desk 加密同步包");
-  if (value.formatVersion !== SYNC_FORMAT_VERSION) throw new Error("同步包版本不受支持");
+  const formatVersion = Number(value.formatVersion);
+  if (![1, SYNC_PACKET_FORMAT_VERSION].includes(formatVersion)) throw new Error("同步包版本不受支持");
   const channelId = text(value.channelId, 100);
   const revisionId = text(value.revisionId, 100);
   const parentRevisionId = text(value.parentRevisionId, 100);
+  let mergeParentRevisionIds;
+  if (formatVersion === SYNC_PACKET_FORMAT_VERSION) {
+    if (!Array.isArray(value.mergeParentRevisionIds)) throw new Error("同步包合并父版本格式无效");
+    mergeParentRevisionIds = [...new Set(value.mergeParentRevisionIds.map((item) => text(item, 100)))];
+    if (mergeParentRevisionIds.length > 4 || mergeParentRevisionIds.some((item) => !SAFE_ID.test(item) || item === revisionId || item === parentRevisionId)) throw new Error("同步包合并父版本标识无效");
+  } else if (value.mergeParentRevisionIds !== undefined) throw new Error("旧版同步包不能声明合并父版本");
   const createdAt = isoDate(value.createdAt);
   const author = { deviceId: text(value.author?.deviceId, 100), fingerprint: text(value.author?.fingerprint, 64) };
   if (!SAFE_ID.test(channelId) || !SAFE_ID.test(revisionId) || (parentRevisionId && !SAFE_ID.test(parentRevisionId))) throw new Error("同步包版本链标识无效");
@@ -445,7 +459,7 @@ function validatePacket(value) {
   const encryptedBytes = decodedBase64Length(value.ciphertext);
   if (encryptedBytes < GCM_TAG_BITS / 8 || encryptedBytes > MAX_BACKUP_BYTES + GCM_TAG_BITS / 8) throw new Error("同步包的密文大小无效");
   const proof = normalizeProof(value.proof);
-  return { ...packetHeader({ channelId, revisionId, parentRevisionId, createdAt, author, cipher: { iv: value.cipher.iv } }), ciphertext: value.ciphertext, proof };
+  return { ...packetHeader({ formatVersion, channelId, revisionId, parentRevisionId, ...(mergeParentRevisionIds ? { mergeParentRevisionIds } : {}), createdAt, author, cipher: { iv: value.cipher.iv } }), ciphertext: value.ciphertext, proof };
 }
 
 export function classifySyncRevision(headRevisionIdValue, packetValue) {
@@ -453,7 +467,7 @@ export function classifySyncRevision(headRevisionIdValue, packetValue) {
   const packet = validatePacket(packetValue);
   if (!headRevisionId) return "initial";
   if (packet.revisionId === headRevisionId) return "duplicate";
-  if (packet.parentRevisionId === headRevisionId) return "forward";
+  if (packet.parentRevisionId === headRevisionId || packet.mergeParentRevisionIds?.includes(headRevisionId)) return "forward";
   return "diverged";
 }
 
@@ -471,6 +485,7 @@ export async function createSyncPacket(backupText, channel, identity, createdAtV
     channelId: channel.channelId,
     revisionId: randomId("revision"),
     parentRevisionId: text(channel.headRevisionId, 100),
+    mergeParentRevisionIds: Array.isArray(channel.mergeParentRevisionIds) ? channel.mergeParentRevisionIds : [],
     createdAt,
     author: { deviceId: device.deviceId, fingerprint: device.fingerprint },
     cipher: { iv: bytesToBase64(iv) },

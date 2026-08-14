@@ -1,9 +1,11 @@
-import { createSyncIdentity } from "./sync-core.mjs";
+import { createSyncIdentity, inspectSyncPacketText } from "./sync-core.mjs";
 
 const DATABASE_NAME = "evolve-desk-sync";
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 const IDENTITY_STORE = "identity";
 const CHANNEL_STORE = "channels";
+const REVISION_STORE = "revisions";
+const MAX_REVISIONS_PER_CHANNEL = 4;
 export const SYNC_CHANNELS_CHANGED_EVENT = "evolve-desk-sync-channels-changed";
 
 function notifyChannelsChanged() {
@@ -34,6 +36,10 @@ async function openDatabase() {
     const database = request.result;
     if (!database.objectStoreNames.contains(IDENTITY_STORE)) database.createObjectStore(IDENTITY_STORE, { keyPath: "id" });
     if (!database.objectStoreNames.contains(CHANNEL_STORE)) database.createObjectStore(CHANNEL_STORE, { keyPath: "channelId" });
+    if (!database.objectStoreNames.contains(REVISION_STORE)) {
+      const revisions = database.createObjectStore(REVISION_STORE, { keyPath: "key" });
+      revisions.createIndex("channelId", "channelId", { unique: false });
+    }
   };
   return requestResult(request);
 }
@@ -50,10 +56,11 @@ export async function loadOrCreateSyncIdentity(name = "这台设备") {
       return { device: existing.device, exchangePrivateKey: existing.exchangePrivateKey, signingPrivateKey: existing.signingPrivateKey };
     }
     const identity = await createSyncIdentity(name);
-    const write = database.transaction([IDENTITY_STORE, CHANNEL_STORE], "readwrite");
+    const write = database.transaction([IDENTITY_STORE, CHANNEL_STORE, REVISION_STORE], "readwrite");
     const writeDone = transactionDone(write);
     write.objectStore(IDENTITY_STORE).put({ id: "local", cryptoVersion: 2, ...identity });
     write.objectStore(CHANNEL_STORE).clear();
+    write.objectStore(REVISION_STORE).clear();
     await writeDone;
     return identity;
   } finally {
@@ -107,7 +114,7 @@ export async function saveSyncChannel(channel) {
   }
 }
 
-export async function setSyncChannelHead(channelId, revisionId, lastPacketAt = new Date().toISOString()) {
+export async function setSyncChannelHead(channelId, revisionId, lastPacketAt = new Date().toISOString(), mergeParentRevisionIds = []) {
   const database = await openDatabase();
   if (!database) return null;
   try {
@@ -119,11 +126,64 @@ export async function setSyncChannelHead(channelId, revisionId, lastPacketAt = n
       await done;
       return null;
     }
-    const updated = { ...channel, headRevisionId: String(revisionId || ""), lastPacketAt };
+    const updated = {
+      ...channel,
+      headRevisionId: String(revisionId || ""),
+      lastPacketAt,
+      mergeParentRevisionIds: [...new Set((Array.isArray(mergeParentRevisionIds) ? mergeParentRevisionIds : []).map((item) => String(item || "").trim()).filter(Boolean))].slice(0, 4),
+    };
     store.put(updated);
     await done;
     notifyChannelsChanged();
     return updated;
+  } finally {
+    database.close();
+  }
+}
+
+export async function saveSyncRevisionPacket(raw) {
+  const packet = inspectSyncPacketText(raw);
+  const database = await openDatabase();
+  if (!database) return false;
+  try {
+    const transaction = database.transaction(REVISION_STORE, "readwrite");
+    const done = transactionDone(transaction);
+    const store = transaction.objectStore(REVISION_STORE);
+    const previous = await requestResult(store.index("channelId").getAll(packet.channelId));
+    const record = {
+      key: `${packet.channelId}:${packet.revisionId}`,
+      channelId: packet.channelId,
+      revisionId: packet.revisionId,
+      parentRevisionId: packet.parentRevisionId,
+      mergeParentRevisionIds: packet.mergeParentRevisionIds || [],
+      createdAt: packet.createdAt,
+      packetText: raw,
+    };
+    store.put(record);
+    const retained = [...previous.filter((item) => item.revisionId !== packet.revisionId), record]
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, MAX_REVISIONS_PER_CHANNEL);
+    const retainedKeys = new Set(retained.map((item) => item.key));
+    for (const item of [...previous, record]) if (!retainedKeys.has(item.key)) store.delete(item.key);
+    await done;
+    return true;
+  } finally {
+    database.close();
+  }
+}
+
+export async function getSyncRevisionPacket(channelId, revisionId) {
+  const channel = String(channelId || "").trim();
+  const revision = String(revisionId || "").trim();
+  if (!channel || !revision) return null;
+  const database = await openDatabase();
+  if (!database) return null;
+  try {
+    const transaction = database.transaction(REVISION_STORE, "readonly");
+    const done = transactionDone(transaction);
+    const record = await requestResult(transaction.objectStore(REVISION_STORE).get(`${channel}:${revision}`));
+    await done;
+    return typeof record?.packetText === "string" ? record.packetText : null;
   } finally {
     database.close();
   }

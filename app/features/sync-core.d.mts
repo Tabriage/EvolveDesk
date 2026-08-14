@@ -5,6 +5,7 @@ export const SYNC_PAIRING_FORMAT: "evolve-desk.sync-pairing";
 export const SYNC_GRANT_FORMAT: "evolve-desk.sync-grant";
 export const SYNC_PACKET_FORMAT: "evolve-desk.sync-packet";
 export const SYNC_FORMAT_VERSION: 1;
+export const SYNC_PACKET_FORMAT_VERSION: 2;
 export const MAX_SYNC_CONTROL_BYTES: number;
 export const MAX_SYNC_PACKET_BYTES: number;
 export const PAIRING_LIFETIME_MS: number;
@@ -31,6 +32,7 @@ export type SyncChannel = {
   authorizedDevices: AuthorizedSyncDevice[];
   headRevisionId: string;
   lastPacketAt: string;
+  mergeParentRevisionIds: string[];
 };
 
 export type PairingRequest = {
@@ -61,10 +63,11 @@ export type DeviceGrant = {
 
 export type SyncPacket = {
   format: typeof SYNC_PACKET_FORMAT;
-  formatVersion: 1;
+  formatVersion: 1 | 2;
   channelId: string;
   revisionId: string;
   parentRevisionId: string;
+  mergeParentRevisionIds?: string[];
   createdAt: string;
   author: { deviceId: string; fingerprint: string };
   innerFormat: "evolve-desk.backup";

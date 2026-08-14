@@ -31,8 +31,10 @@ import {
   SYNC_CHANNELS_CHANGED_EVENT,
   listSyncChannels,
   loadOrCreateSyncIdentity,
+  getSyncRevisionPacket,
   renameSyncIdentity,
   saveSyncChannel,
+  saveSyncRevisionPacket,
   setSyncChannelHead,
 } from "../features/sync-device-store.mjs";
 import type { WorkbenchState } from "../features/workbench-core.mjs";
@@ -45,12 +47,18 @@ export type StagedSyncBackup = {
   relation: SyncRevisionRelation;
   previousHeadRevisionId: string;
   previousLastPacketAt: string;
+  previousMergeParentRevisionIds: string[];
+};
+
+export type StagedSyncMergeBase = {
+  workspace: WorkbenchState;
+  sources: BackupSources;
 };
 
 type SyncStudioProps = {
   state: WorkbenchState;
   sources: BackupSources;
-  onStageBackup: (raw: string, fileName: string, fileBytes: number, sync: StagedSyncBackup) => Promise<void>;
+  onStageBackup: (raw: string, fileName: string, fileBytes: number, sync: StagedSyncBackup, mergeBase?: StagedSyncMergeBase) => Promise<void>;
 };
 
 type IncomingReceipt = {
@@ -58,6 +66,7 @@ type IncomingReceipt = {
   authorName: string;
   relation: SyncRevisionRelation;
   revisionId: string;
+  mergeAvailable: boolean;
 };
 
 const relationLabels: Record<SyncRevisionRelation, string> = {
@@ -280,10 +289,18 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       const packet = await createSyncPacket(serializeBackupEnvelope(backup), selectedChannel, identity);
       const serialized = serializeSyncPacket(packet);
       downloadText(serialized, `evolve-sync-${safeFilePart(selectedChannel.label)}-${fileStamp(new Date(packet.createdAt))}.json`);
+      let historySaved = false;
+      try {
+        historySaved = await saveSyncRevisionPacket(serialized);
+      } catch {
+        historySaved = false;
+      }
       const updated = await setSyncChannelHead(selectedChannel.channelId, packet.revisionId, packet.createdAt);
       if (updated) replaceChannel(updated);
       setIncoming(null);
-      setMessage("加密同步包已生成。存储位置只能看到认证版本头和密文，看不到工作台内容。 ");
+      setMessage(historySaved
+        ? "加密同步包已生成，密文父版本也已留作后续三方冲突预览。 "
+        : "加密同步包已生成，但浏览器未能保留密文父版本；后续分叉只能整体预检。 ");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "无法生成加密同步包");
     } finally {
@@ -304,6 +321,20 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       if (!channel) throw new Error("当前设备尚未加入这个同步空间，不能解锁该同步包");
       const opened = await decryptSyncPacket(packet, channel);
       if (opened.relation === "duplicate") throw new Error("这个同步版本已经是当前版本，无需重复恢复");
+      let mergeBase: StagedSyncMergeBase | undefined;
+      if (opened.relation === "diverged" && packet.parentRevisionId) {
+        const baseRaw = await getSyncRevisionPacket(channel.channelId, packet.parentRevisionId);
+        if (baseRaw) {
+          const basePacket = inspectSyncPacketText(baseRaw);
+          const baseOpened = await decryptSyncPacket(basePacket, channel);
+          mergeBase = { workspace: baseOpened.parsed.workspace, sources: baseOpened.parsed.sources };
+        }
+      }
+      try {
+        await saveSyncRevisionPacket(raw);
+      } catch {
+        // The packet can still be previewed and restored when browser quota cannot retain history.
+      }
       await onStageBackup(opened.backupText, file.name, file.size, {
         channelId: channel.channelId,
         revisionId: packet.revisionId,
@@ -312,11 +343,14 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
         relation: opened.relation,
         previousHeadRevisionId: channel.headRevisionId,
         previousLastPacketAt: channel.lastPacketAt,
-      });
+        previousMergeParentRevisionIds: channel.mergeParentRevisionIds || [],
+      }, mergeBase);
       replaceChannel(channel);
-      setIncoming({ fileName: file.name, authorName: opened.author.name, relation: opened.relation, revisionId: packet.revisionId });
+      setIncoming({ fileName: file.name, authorName: opened.author.name, relation: opened.relation, revisionId: packet.revisionId, mergeAvailable: Boolean(mergeBase) });
       setMessage(opened.relation === "diverged"
-        ? "同步包已解锁，但版本链已经分叉。下方只展示整体替换预检，不会自动合并或写入。 "
+        ? mergeBase
+          ? "同步包已解锁，并找到共同父版本；下方可以逐对象审阅三方合并。 "
+          : "同步包已解锁，但缺少共同父版本；下方只展示整体替换预检，不会猜测合并。 "
         : "同步包已解锁并送入恢复预检；再次确认前，当前工作台没有变化。 ");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "无法读取加密同步包");
@@ -365,7 +399,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
 
         <article className="sync-step-card transfer">
           <header><i>03</i><div><span>TRANSFER</span><strong>搬运加密快照</strong></div></header>
-          <p>同步包包含父版本和密文。导入后先检查来源与版本关系，再复用迁移舱的整体差异预检。</p>
+          <p>同步包包含父版本和密文。导入后先检查来源与版本关系；有共同父版本时进入逐对象三方合并，否则安全降级为整体预检。</p>
           <div className="sync-chain-readout"><span><i /> AES-256-GCM</span><span><i /> AUTHENTICATED HEAD</span></div>
           <div className="sync-button-pair"><button onClick={() => void exportPacket()} disabled={!selectedChannel || !identity || Boolean(busy)}>{busy === "export" ? "正在封装…" : "生成同步包"} <span>↗</span></button><button onClick={() => packetInput.current?.click()} disabled={!channels.length || Boolean(busy)}>{busy === "packet" ? "正在解锁…" : "读取同步包"} <span>↙</span></button></div>
           <input ref={packetInput} type="file" accept="application/json,.json" onChange={readPacket} hidden />
@@ -396,7 +430,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
         </div>
       )}
 
-      {incoming && <div className={`sync-incoming-receipt ${incoming.relation}`}><span>{relationLabels[incoming.relation]}</span><strong>{incoming.fileName}</strong><small>来自 {incoming.authorName} · {incoming.revisionId.slice(0, 20)}… · 已送入下方整体替换预检</small></div>}
+      {incoming && <div className={`sync-incoming-receipt ${incoming.relation}`}><span>{relationLabels[incoming.relation]}</span><strong>{incoming.fileName}</strong><small>来自 {incoming.authorName} · {incoming.revisionId.slice(0, 20)}… · 已送入下方{incoming.mergeAvailable ? "三方合并" : "恢复"}预检</small></div>}
     </section>
   );
 }

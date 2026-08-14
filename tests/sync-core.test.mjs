@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createBackupEnvelope, serializeBackupEnvelope } from "../app/features/backup-core.mjs";
 import {
+  SYNC_PACKET_FORMAT,
   acceptDeviceGrant,
   classifySyncRevision,
   createDeviceGrant,
@@ -66,6 +67,32 @@ test("sync packets hide workspace plaintext and round-trip on an authorized devi
   assert.equal(classifySyncRevision(packet.parentRevisionId, packet), packet.parentRevisionId ? "forward" : "initial");
 });
 
+test("v2 readers retain authenticated compatibility with v1 sync packets", async () => {
+  const { owner, memberChannel, ownerChannel } = await pairedDevices();
+  const plaintext = await backupText("旧版同步包仍可恢复");
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const header = {
+    format: SYNC_PACKET_FORMAT,
+    formatVersion: 1,
+    channelId: ownerChannel.channelId,
+    revisionId: "revision_legacy_v1",
+    parentRevisionId: "",
+    createdAt: "2026-08-16T08:00:30.000Z",
+    author: { deviceId: owner.device.deviceId, fingerprint: owner.device.fingerprint },
+    innerFormat: "evolve-desk.backup",
+    innerFormatVersion: 1,
+    cipher: { name: "AES-GCM", keyLength: 256, iv: Buffer.from(iv).toString("base64"), tagLength: 128 },
+  };
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: new TextEncoder().encode(JSON.stringify(header)), tagLength: 128 }, ownerChannel.key, new TextEncoder().encode(plaintext));
+  const unsigned = { ...header, ciphertext: Buffer.from(ciphertext).toString("base64") };
+  const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, owner.signingPrivateKey, new TextEncoder().encode(JSON.stringify(unsigned)));
+  const legacy = { ...unsigned, proof: { name: "ECDSA", hash: "SHA-256", signature: Buffer.from(signature).toString("base64") } };
+  const opened = await decryptSyncPacket(inspectSyncPacketText(JSON.stringify(legacy)), memberChannel);
+
+  assert.equal(opened.packet.formatVersion, 1);
+  assert.equal(opened.parsed.workspace.tasks[0].title, "旧版同步包仍可恢复");
+});
+
 test("authenticated sync header and ciphertext reject modification", async () => {
   const { owner, ownerChannel, memberChannel } = await pairedDevices();
   const packet = await createSyncPacket(await backupText(), ownerChannel, owner, "2026-08-16T08:01:00.000Z");
@@ -107,6 +134,11 @@ test("unknown device packets and diverged version chains are surfaced", async ()
 
   const localPacket = await createSyncPacket(await backupText("本地分支"), memberChannel, member, "2026-08-16T08:02:00.000Z");
   assert.equal(classifySyncRevision(localPacket.revisionId, packet), "diverged");
+
+  const mergeChannel = { ...memberChannel, headRevisionId: localPacket.revisionId, mergeParentRevisionIds: [packet.revisionId] };
+  const mergePacket = await createSyncPacket(await backupText("已审阅的合并结果"), mergeChannel, member, "2026-08-16T08:03:00.000Z");
+  assert.equal(classifySyncRevision(packet.revisionId, mergePacket), "forward");
+  assert.deepEqual(mergePacket.mergeParentRevisionIds, [packet.revisionId]);
 
   const impersonated = structuredClone(localPacket);
   impersonated.author = packet.author;

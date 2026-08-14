@@ -2,7 +2,9 @@
 
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { SyncStudio } from "./SyncStudio";
-import type { StagedSyncBackup } from "./SyncStudio";
+import type { StagedSyncBackup, StagedSyncMergeBase } from "./SyncStudio";
+import { applyBackupMerge, createBackupMergePreview } from "../features/backup-merge.mjs";
+import type { BackupMergeChoice, BackupMergePreview } from "../features/backup-merge.mjs";
 import {
   BACKUP_KDF_ITERATIONS,
   MAX_ENCRYPTED_BACKUP_BYTES,
@@ -45,6 +47,7 @@ type PendingBackup = {
   diff: BackupDiff;
   protected: boolean;
   sync?: StagedSyncBackup;
+  merge?: BackupMergePreview;
 };
 
 type LockedBackup = {
@@ -62,6 +65,7 @@ type UndoSnapshot = {
     channelId: string;
     headRevisionId: string;
     lastPacketAt: string;
+    mergeParentRevisionIds: string[];
   };
 };
 
@@ -106,6 +110,26 @@ function formatDate(value: string) {
   }).format(date);
 }
 
+function describeMergeValue(value: unknown) {
+  if (value === undefined) return "删除这个对象";
+  if (value === null) return "空值";
+  if (typeof value !== "object") return String(value).slice(0, 180) || "空值";
+  const source = value as Record<string, unknown>;
+  const preferred = ["title", "name", "content", "question", "prompt", "status", "done", "updatedAt", "completedAt"];
+  const keys = [...preferred.filter((key) => key in source), ...Object.keys(source).filter((key) => !preferred.includes(key) && !["id", "createdAt"].includes(key))];
+  const parts: string[] = [];
+  for (const key of keys) {
+    const item = source[key];
+    if (item === "" || item === null || item === undefined) continue;
+    const rendered = Array.isArray(item)
+      ? `${item.length} 项`
+      : typeof item === "object" ? `${Object.keys(item as object).length} 个字段` : String(item);
+    parts.push(`${key}: ${rendered.slice(0, 90)}`);
+    if (parts.length >= 4) break;
+  }
+  return parts.join(" · ") || "保留这个对象";
+}
+
 function backupFileName(date = new Date(), protectedBackup = false) {
   const parts = new Intl.DateTimeFormat("zh-CN", {
     year: "numeric",
@@ -130,11 +154,13 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
   const [restoreArmed, setRestoreArmed] = useState(false);
   const [undo, setUndo] = useState<UndoSnapshot | null>(null);
   const [lastExport, setLastExport] = useState<ExportReceipt | null>(null);
-  const [restoreReceipt, setRestoreReceipt] = useState<{ fileName: string; restoredAt: string; checksum: string } | null>(null);
+  const [restoreReceipt, setRestoreReceipt] = useState<{ fileName: string; restoredAt: string; checksum: string; merged: boolean } | null>(null);
   const [exportProtection, setExportProtection] = useState<"plain" | "encrypted">("encrypted");
   const [exportPassphrase, setExportPassphrase] = useState("");
   const [exportPassphraseConfirm, setExportPassphraseConfirm] = useState("");
   const [unlockPassphrase, setUnlockPassphrase] = useState("");
+  const [mergeMode, setMergeMode] = useState<"merge" | "replace">("merge");
+  const [mergeChoices, setMergeChoices] = useState<Record<string, BackupMergeChoice>>({});
 
   useEffect(() => {
     let active = true;
@@ -148,10 +174,19 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
 
   const currentSummary = useMemo(() => summarizeBackup(state, localSources), [state, localSources]);
   const visibleModules = Object.entries(currentSummary.modules).filter(([, count]) => count > 0);
+  const mergedBackup = useMemo(() => pending?.merge ? applyBackupMerge(pending.merge, mergeChoices) : null, [pending, mergeChoices]);
+  const previewWorkspace = pending ? pending.merge && mergeMode === "merge" && mergedBackup ? mergedBackup.workspace : pending.workspace : null;
+  const previewSummary = pending ? pending.merge && mergeMode === "merge" && mergedBackup ? mergedBackup.summary : pending.summary : null;
+  const previewDiff = useMemo(() => previewWorkspace ? compareBackupStates(state, previewWorkspace) : null, [state, previewWorkspace]);
 
-  function stagePreview(raw: string, fileName: string, fileBytes: number, protectedBackup: boolean, sync?: StagedSyncBackup) {
+  function stagePreview(raw: string, fileName: string, fileBytes: number, protectedBackup: boolean, sync?: StagedSyncBackup, mergeBase?: StagedSyncMergeBase) {
     return parseBackupText(raw).then((parsed) => {
       const diff = compareBackupStates(state, parsed.workspace);
+      const merge = sync?.relation === "diverged" && mergeBase
+        ? createBackupMergePreview(mergeBase.workspace, state, parsed.workspace, mergeBase.sources, localSources, parsed.sources)
+        : undefined;
+      setMergeMode(merge ? "merge" : "replace");
+      setMergeChoices({});
       setPending({
         fileName,
         fileBytes,
@@ -162,17 +197,20 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
         diff,
         protected: protectedBackup,
         sync,
+        merge,
       });
     });
   }
 
-  async function stageSyncBackup(raw: string, fileName: string, fileBytes: number, sync: StagedSyncBackup) {
+  async function stageSyncBackup(raw: string, fileName: string, fileBytes: number, sync: StagedSyncBackup, mergeBase?: StagedSyncMergeBase) {
     setPending(null);
     setLockedBackup(null);
     setRestoreArmed(false);
-    await stagePreview(raw, fileName, fileBytes, false, sync);
+    await stagePreview(raw, fileName, fileBytes, false, sync, mergeBase);
     setMessage(sync.relation === "diverged"
-      ? "同步包通过加密与内层校验，但版本链已分叉；下方只做整体替换预览，不会自动合并。 "
+      ? mergeBase
+        ? "同步包通过校验并找到共同父版本；请审阅自动合并与逐对象冲突。 "
+        : "同步包通过校验但缺少共同父版本；下方只做整体替换预览，不会猜测合并。 "
       : "同步包通过加密、来源和内层校验。当前工作台尚未被修改。 ");
   }
 
@@ -279,21 +317,26 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
 
   async function restoreBackup() {
     if (!pending) return;
+    const useMerge = Boolean(pending.merge && mergeMode === "merge" && mergedBackup);
+    const targetWorkspace = useMerge ? mergedBackup!.workspace : pending.workspace;
+    const targetSources = useMerge ? mergedBackup!.sources : pending.sources;
     if (!restoreArmed) {
       setRestoreArmed(true);
-      setMessage("已进入确认状态：再次点击会用迁移卷整体替换当前本地工作台。 ");
+      setMessage(useMerge
+        ? "已进入确认状态：再次点击会写入上方逐对象合并结果，并保留本次撤回快照。 "
+        : "已进入确认状态：再次点击会用迁移卷整体替换当前本地工作台。 ");
       return;
     }
     setBusy("restore");
-    setMessage("正在建立恢复前快照，并写入迁移卷…");
+    setMessage(useMerge ? "正在建立恢复前快照，并写入三方合并结果…" : "正在建立恢复前快照，并写入迁移卷…");
     let previousSources: BackupSources | null = null;
     try {
       previousSources = await exportSourceArchive();
       const previousWorkspace = state;
-      const replaced = await replaceSourceArchive(pending.sources);
+      const replaced = await replaceSourceArchive(targetSources);
       if (!replaced) throw new Error("当前浏览器不支持本地媒体库恢复");
       try {
-        onRestore(pending.workspace);
+        onRestore(targetWorkspace);
       } catch (error) {
         await replaceSourceArchive(previousSources);
         throw error;
@@ -302,7 +345,10 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
       let syncHeadSaved = true;
       if (pending.sync) {
         try {
-          const updated = await setSyncChannelHead(pending.sync.channelId, pending.sync.revisionId, restoredAt);
+          const mergeParents = useMerge && pending.sync.previousHeadRevisionId && pending.sync.previousHeadRevisionId !== pending.sync.revisionId
+            ? [pending.sync.previousHeadRevisionId]
+            : [];
+          const updated = await setSyncChannelHead(pending.sync.channelId, pending.sync.revisionId, restoredAt, mergeParents);
           syncHeadSaved = Boolean(updated);
         } catch {
           syncHeadSaved = false;
@@ -317,14 +363,17 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
           channelId: pending.sync.channelId,
           headRevisionId: pending.sync.previousHeadRevisionId,
           lastPacketAt: pending.sync.previousLastPacketAt,
+          mergeParentRevisionIds: pending.sync.previousMergeParentRevisionIds,
         } : undefined,
       });
-      setLocalSources(pending.sources);
-      setRestoreReceipt({ fileName: pending.fileName, restoredAt, checksum: pending.envelope.checksum });
+      setLocalSources(targetSources);
+      setRestoreReceipt({ fileName: pending.fileName, restoredAt, checksum: pending.envelope.checksum, merged: useMerge });
       setPending(null);
       setRestoreArmed(false);
       setMessage(syncHeadSaved
-        ? "恢复完成。关闭或刷新页面前，你仍可一步撤回到恢复前状态。 "
+        ? useMerge
+          ? "三方合并已写入；下一次生成同步包会带上两条父版本线。刷新前仍可一步撤回。 "
+          : "恢复完成。关闭或刷新页面前，你仍可一步撤回到恢复前状态。 "
         : "数据已恢复，但同步版本头未能写入本地密钥库；请保留原同步包并刷新后检查。 ");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "恢复失败，原工作台未被替换");
@@ -350,7 +399,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
       let syncHeadRestored = true;
       if (undo.sync) {
         try {
-          const updated = await setSyncChannelHead(undo.sync.channelId, undo.sync.headRevisionId, undo.sync.lastPacketAt);
+          const updated = await setSyncChannelHead(undo.sync.channelId, undo.sync.headRevisionId, undo.sync.lastPacketAt, undo.sync.mergeParentRevisionIds);
           syncHeadRestored = Boolean(updated);
         } catch {
           syncHeadRestored = false;
@@ -371,8 +420,14 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
 
   function discardPreview() {
     setPending(null);
+    setMergeChoices({});
     setRestoreArmed(false);
     setMessage("已丢弃预检结果，没有写入任何数据。 ");
+  }
+
+  function chooseMergeSide(key: string, choice: BackupMergeChoice) {
+    setMergeChoices((current) => ({ ...current, [key]: choice }));
+    setRestoreArmed(false);
   }
 
   return (
@@ -466,18 +521,40 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
             <div className={`sync-preview-chain ${pending.sync.relation}`}>
               <span>{pending.sync.relation === "initial" ? "首次版本" : pending.sync.relation === "forward" ? "顺序后继" : "版本已分叉"}</span>
               <code>{pending.sync.parentRevisionId ? `${pending.sync.parentRevisionId.slice(0, 18)}…` : "ROOT"} <i>→</i> {pending.sync.revisionId.slice(0, 18)}…</code>
-              <p>来自 <strong>{pending.sync.authorName}</strong>{pending.sync.relation === "diverged" ? "；不会自动合并，确认恢复将明确选择迁入版本。" : "；确认恢复后才更新本机版本头。"}</p>
+              <p>来自 <strong>{pending.sync.authorName}</strong>{pending.sync.relation === "diverged" ? pending.merge ? "；共同父版本已找到，可审阅三方合并。" : "；缺少共同父版本，只能明确选择整体迁入。" : "；确认恢复后才更新本机版本头。"}</p>
             </div>
           )}
+          {pending.merge && (
+            <section className="merge-resolution">
+              <header>
+                <div><span>THREE-WAY MERGE / 共同父版本 → 两台设备</span><h3>单边变化自动并入，双边修改同一对象才需要选择。</h3></div>
+                <div role="radiogroup" aria-label="分叉处理方式"><button role="radio" aria-checked={mergeMode === "merge"} className={mergeMode === "merge" ? "active" : ""} onClick={() => { setMergeMode("merge"); setRestoreArmed(false); }}>逐对象合并</button><button role="radio" aria-checked={mergeMode === "replace"} className={mergeMode === "replace" ? "active danger" : ""} onClick={() => { setMergeMode("replace"); setRestoreArmed(false); }}>整体迁入</button></div>
+              </header>
+              {mergeMode === "merge" ? (
+                <>
+                  <div className="merge-totals"><span><small>自动保留本机</small><strong>{pending.merge.autoLocalCount}</strong></span><span><small>自动接入迁入</small><strong>{pending.merge.autoIncomingCount}</strong></span><span className={pending.merge.conflictCount ? "warning" : "ready"}><small>需要选择</small><strong>{pending.merge.conflictCount}</strong></span></div>
+                  <div className="merge-category-tape">{pending.merge.rows.map((row) => <span key={row.key}><strong>{row.label}</strong><small>{row.changed} 处变化{row.conflicts ? ` · ${row.conflicts} 冲突` : " · 自动"}</small></span>)}</div>
+                  {pending.merge.conflictCount > 0 ? (
+                    <div className="merge-conflict-list">
+                      {pending.merge.entries.filter((entry) => entry.kind === "conflict").map((entry) => {
+                        const selected = mergeChoices[entry.key] || "local";
+                        return <article key={entry.key}><header><span>{entry.categoryLabel}</span><strong>{entry.title}</strong><code>{entry.objectId.slice(0, 24)}</code></header><div><button className={selected === "local" ? "active" : ""} onClick={() => chooseMergeSide(entry.key, "local")} aria-pressed={selected === "local"}><span>保留本机</span><strong>{entry.localState}</strong><p>{describeMergeValue(entry.localValue)}</p></button><button className={selected === "incoming" ? "active incoming" : ""} onClick={() => chooseMergeSide(entry.key, "incoming")} aria-pressed={selected === "incoming"}><span>采用迁入</span><strong>{entry.incomingState}</strong><p>{describeMergeValue(entry.incomingValue)}</p></button></div></article>;
+                      })}
+                    </div>
+                  ) : <p className="merge-no-conflict"><i>✓</i><span><strong>没有双边对象冲突。</strong>两台设备的独立变化已经按稳定 ID 组成合并结果。</span></p>}
+                </>
+              ) : <p className="merge-replace-warning"><i>!</i><span><strong>整体迁入会忽略自动合并和上方选择。</strong>当前设备独有的对象会按下方差异被移除；仍需再次点击确认。</span></p>}
+            </section>
+          )}
           <div className="vault-delta-total">
-            <span className="added"><small>新增</small><strong>+{pending.diff.added}</strong></span>
-            <span className="changed"><small>改写</small><strong>{pending.diff.changed}</strong></span>
-            <span className="removed"><small>移除</small><strong>−{pending.diff.removed}</strong></span>
-            <span><small>保持</small><strong>{pending.diff.unchanged}</strong></span>
+            <span className="added"><small>新增</small><strong>+{previewDiff?.added || 0}</strong></span>
+            <span className="changed"><small>改写</small><strong>{previewDiff?.changed || 0}</strong></span>
+            <span className="removed"><small>移除</small><strong>−{previewDiff?.removed || 0}</strong></span>
+            <span><small>保持</small><strong>{previewDiff?.unchanged || 0}</strong></span>
           </div>
           <div className="vault-diff-table" role="table" aria-label="恢复差异">
-            <div className="vault-diff-head" role="row"><span>模块</span><span>当前 → 迁入</span><span>变化</span></div>
-            {pending.diff.rows.map((row) => (
+            <div className="vault-diff-head" role="row"><span>模块</span><span>当前 → {pending.merge && mergeMode === "merge" ? "合并" : "迁入"}</span><span>变化</span></div>
+            {previewDiff?.rows.map((row) => (
               <div role="row" key={row.key} className={row.added || row.removed || row.changed ? "has-delta" : ""}>
                 <strong>{row.label}</strong>
                 <span>{row.current} <i>→</i> {row.incoming}</span>
@@ -486,12 +563,12 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
             ))}
           </div>
           <div className="vault-media-proof">
-            <div><span>本机资料库</span><strong>字幕 {currentSummary.transcriptCount} → {pending.summary.transcriptCount}</strong><strong>画面 {currentSummary.frameCount} → {pending.summary.frameCount}</strong></div>
-            <p><i>!</i><span><strong>这是整体替换。</strong>当前工作台和资料库会先留作内存撤销快照；页面刷新后撤销入口消失。</span></p>
+            <div><span>本机资料库</span><strong>字幕 {currentSummary.transcriptCount} → {previewSummary?.transcriptCount || 0}</strong><strong>画面 {currentSummary.frameCount} → {previewSummary?.frameCount || 0}</strong></div>
+            <p><i>{pending.merge && mergeMode === "merge" ? "✓" : "!"}</i><span><strong>{pending.merge && mergeMode === "merge" ? "写入审阅后的合并结果。" : "这是整体替换。"}</strong>当前工作台和资料库会先留作内存撤销快照；页面刷新后撤销入口消失。</span></p>
           </div>
           <footer>
             <button onClick={discardPreview} disabled={Boolean(busy)}>丢弃预检</button>
-            <button className={restoreArmed ? "armed" : ""} onClick={restoreBackup} disabled={Boolean(busy)}>{busy === "restore" ? "正在恢复…" : restoreArmed ? "再次点击，确认整体替换" : "准备恢复"}<span>{restoreArmed ? "!" : "→"}</span></button>
+            <button className={restoreArmed ? "armed" : ""} onClick={restoreBackup} disabled={Boolean(busy)}>{busy === "restore" ? pending.merge && mergeMode === "merge" ? "正在写入合并…" : "正在恢复…" : restoreArmed ? pending.merge && mergeMode === "merge" ? "再次点击，确认写入合并" : "再次点击，确认整体替换" : pending.merge && mergeMode === "merge" ? "准备写入合并" : "准备恢复"}<span>{restoreArmed ? "!" : "→"}</span></button>
           </footer>
         </section>
       )}
@@ -499,7 +576,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
       {restoreReceipt && (
         <article className="vault-receipt restore-receipt">
           <div className="receipt-stamp">RESTORED<small>{formatDate(restoreReceipt.restoredAt)}</small></div>
-          <div><span>恢复回执</span><strong>{restoreReceipt.fileName}</strong><small>校验 {restoreReceipt.checksum.slice(0, 12)}… · 已完整写入当前浏览器</small></div>
+          <div><span>{restoreReceipt.merged ? "合并回执" : "恢复回执"}</span><strong>{restoreReceipt.fileName}</strong><small>源卷校验 {restoreReceipt.checksum.slice(0, 12)}… · {restoreReceipt.merged ? "三方结果" : "迁移卷"}已完整写入当前浏览器</small></div>
           {undo && <button onClick={undoRestore} disabled={Boolean(busy)}>{busy === "undo" ? "正在撤回…" : "撤回整次恢复"}<span>↶</span></button>}
         </article>
       )}
