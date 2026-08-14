@@ -3,8 +3,7 @@ import { parseWorkbenchState } from "./workbench-core.mjs";
 export const BACKUP_FORMAT = "evolve-desk.backup";
 export const BACKUP_FORMAT_VERSION = 1;
 export const MAX_BACKUP_BYTES = 96 * 1024 * 1024;
-
-const CURRENT_WORKSPACE_VERSION = 11;
+export const CURRENT_WORKSPACE_VERSION = 11;
 const MAX_SOURCE_RECORDS = 80;
 const MAX_SOURCE_KEY_CHARS = 2_000;
 const MAX_TRANSCRIPT_CHARS = 100_000;

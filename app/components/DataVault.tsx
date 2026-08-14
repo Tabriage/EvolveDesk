@@ -5,6 +5,8 @@ import { SyncStudio } from "./SyncStudio";
 import type { StagedSyncBackup, StagedSyncMergeBase } from "./SyncStudio";
 import { applyBackupMerge, createBackupMergePreview } from "../features/backup-merge.mjs";
 import type { BackupMergeChoice, BackupMergePreview } from "../features/backup-merge.mjs";
+import { inspectBackupCompatibility } from "../features/backup-compatibility.mjs";
+import type { BackupCompatibilityReport } from "../features/backup-compatibility.mjs";
 import {
   BACKUP_KDF_ITERATIONS,
   MAX_ENCRYPTED_BACKUP_BYTES,
@@ -18,7 +20,6 @@ import {
   MAX_BACKUP_BYTES,
   compareBackupStates,
   createBackupEnvelope,
-  parseBackupText,
   serializeBackupEnvelope,
   summarizeBackup,
 } from "../features/backup-core.mjs";
@@ -48,6 +49,7 @@ type PendingBackup = {
   protected: boolean;
   sync?: StagedSyncBackup;
   merge?: BackupMergePreview;
+  compatibility: BackupCompatibilityReport;
 };
 
 type LockedBackup = {
@@ -180,7 +182,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
   const previewDiff = useMemo(() => previewWorkspace ? compareBackupStates(state, previewWorkspace) : null, [state, previewWorkspace]);
 
   function stagePreview(raw: string, fileName: string, fileBytes: number, protectedBackup: boolean, sync?: StagedSyncBackup, mergeBase?: StagedSyncMergeBase) {
-    return parseBackupText(raw).then((parsed) => {
+    return inspectBackupCompatibility(raw).then(({ parsed, report: compatibility }) => {
       const diff = compareBackupStates(state, parsed.workspace);
       const merge = sync?.relation === "diverged" && mergeBase
         ? createBackupMergePreview(mergeBase.workspace, state, parsed.workspace, mergeBase.sources, localSources, parsed.sources)
@@ -198,6 +200,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
         protected: protectedBackup,
         sync,
         merge,
+        compatibility,
       });
     });
   }
@@ -517,6 +520,11 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
             <div><span>{pending.sync ? "SYNC PROOF / 同步密文已验证 · 未写入" : pending.protected ? "UNLOCKED PROOF / 加密层已验证 · 未写入" : "RESTORE PROOF / 未写入"}</span><h2>{pending.fileName}</h2><p>{formatBytes(pending.fileBytes)} · 导出于 {formatDate(pending.envelope.exportedAt)} · 工作台 v{pending.envelope.workspaceVersion}</p></div>
             <code>{pending.envelope.checksum.slice(0, 14)}…</code>
           </header>
+          <section className={`compatibility-proof ${pending.compatibility.status}`}>
+            <header><div><span>COMPATIBILITY CHECK / 写入前兼容证明</span><h3>工作台 v{pending.compatibility.sourceVersion} <i>→</i> v{pending.compatibility.targetVersion}</h3></div><strong>{pending.compatibility.status === "attention" ? "需要注意" : pending.compatibility.migrationRequired ? "将在内存迁移" : "可直接写入"}</strong></header>
+            <div className="compatibility-summary"><span><small>规范化对象</small><strong>{pending.compatibility.normalizedObjects}</strong></span><span><small>忽略对象</small><strong>{pending.compatibility.droppedObjects}</strong></span><span><small>修复引用</small><strong>{pending.compatibility.repairedReferences}</strong></span><p>{pending.compatibility.migrationRequired ? "源文件保持不变；确认写入时使用已经迁移到当前版本的内存结果。" : pending.compatibility.warningCount ? "下列不兼容内容不会进入写入结果；源文件不会被改写。" : "格式、对象数量与引用边界已通过当前版本检查。"}</p></div>
+            {pending.compatibility.changes.length > 0 && <div className="compatibility-changes">{pending.compatibility.changes.map((change) => <div key={change.key} className={change.severity}><strong>{change.label}</strong><span>{change.before} <i>→</i> {change.after}</span><p>{change.dropped > 0 ? `忽略 ${change.dropped}` : ""}{change.dropped > 0 && change.normalized > 0 ? " · " : ""}{change.normalized > 0 ? `规范化 ${change.normalized}` : ""}</p></div>)}</div>}
+          </section>
           {pending.sync && (
             <div className={`sync-preview-chain ${pending.sync.relation}`}>
               <span>{pending.sync.relation === "initial" ? "首次版本" : pending.sync.relation === "forward" ? "顺序后继" : "版本已分叉"}</span>

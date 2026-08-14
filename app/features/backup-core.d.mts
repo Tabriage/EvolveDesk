@@ -3,6 +3,7 @@ import type { WorkbenchState } from "./workbench-core.mjs";
 export const BACKUP_FORMAT: "evolve-desk.backup";
 export const BACKUP_FORMAT_VERSION: 1;
 export const MAX_BACKUP_BYTES: number;
+export const CURRENT_WORKSPACE_VERSION: 11;
 
 export type BackupTranscript = { sourceKey: string; transcript: string; updatedAt: string };
 export type BackupVisualFrames = { sourceKey: string; frames: Array<{ id: string; imageDataUrl: string }>; updatedAt: string };
