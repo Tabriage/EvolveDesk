@@ -4,6 +4,7 @@ import { createBackupEnvelope, serializeBackupEnvelope } from "../app/features/b
 import {
   SYNC_PACKET_FORMAT,
   acceptDeviceGrant,
+  acceptSyncOwnershipTransfer,
   acceptSyncRotation,
   classifySyncRevision,
   createDeviceGrant,
@@ -11,15 +12,21 @@ import {
   createSyncChannel,
   createSyncIdentity,
   createSyncPacket,
+  createSyncRecoveryKit,
   decryptSyncPacket,
   inspectDeviceGrantText,
   inspectPairingRequestText,
   inspectSyncPacketText,
+  inspectSyncOwnershipTransferText,
+  inspectSyncRecoveryKitText,
   inspectSyncRotationText,
+  recoverSyncOwnership,
   rotateSyncChannel,
   serializeDeviceGrant,
   serializePairingRequest,
   serializeSyncPacket,
+  serializeSyncOwnershipTransfer,
+  serializeSyncRecoveryKit,
   serializeSyncRotation,
 } from "../app/features/sync-core.mjs";
 import { addTask, createInitialWorkbench } from "../app/features/workbench-core.mjs";
@@ -214,4 +221,67 @@ test("rotation records reject tampering and non-owner rotation attempts", async 
   const tampered = structuredClone(rotated.rotation);
   tampered.next.label = "被替换的空间名称";
   await assert.rejects(inspectSyncRotationText(serializeSyncRotation(tampered)), /签名无效/);
+});
+
+test("an owner-authorized recovery kit migrates ownership and rotates the channel key", async () => {
+  const { owner, member, ownerChannel, memberChannel } = await pairedDevices();
+  const packet = await createSyncPacket(await backupText("离线恢复后的真实工作台"), ownerChannel, owner, "2026-08-16T08:01:00.000Z");
+  const channelAtHead = { ...ownerChannel, headRevisionId: packet.revisionId, lastPacketAt: packet.createdAt };
+  const memberAtHead = { ...memberChannel, headRevisionId: packet.revisionId, lastPacketAt: packet.createdAt };
+  const oldSecret = Buffer.from(await crypto.subtle.exportKey("raw", ownerChannel.key)).toString("base64");
+  const recovery = await createSyncRecoveryKit(channelAtHead, owner, "correct horse battery staple", "2026-08-16T08:02:00.000Z");
+  const recoveryText = serializeSyncRecoveryKit(recovery);
+  const inspectedRecovery = await inspectSyncRecoveryKitText(recoveryText);
+  const replacement = await createSyncIdentity("接任设备", "2026-08-16T08:03:00.000Z");
+  const result = await recoverSyncOwnership(inspectedRecovery, "correct horse battery staple", replacement, serializeSyncPacket(packet), "2026-08-16T08:04:00.000Z");
+  const newSecret = Buffer.from(await crypto.subtle.exportKey("raw", result.nextChannel.key)).toString("base64");
+  const transferText = serializeSyncOwnershipTransfer(result.transfer);
+  const transfer = await inspectSyncOwnershipTransferText(transferText);
+  const accepted = await acceptSyncOwnershipTransfer(transfer, memberAtHead, member);
+  const replacedOwner = await acceptSyncOwnershipTransfer(transfer, channelAtHead, owner);
+
+  assert.equal(recoveryText.includes(oldSecret), false);
+  assert.equal(recoveryText.includes("离线恢复后的真实工作台"), false);
+  assert.notEqual(oldSecret, newSecret);
+  assert.equal(transferText.includes(oldSecret), false);
+  assert.equal(transferText.includes(newSecret), false);
+  assert.equal(result.retiredChannel.retiredAt, "2026-08-16T08:04:00.000Z");
+  assert.equal(result.retiredChannel.rotatedToChannelId, result.nextChannel.channelId);
+  assert.equal(result.nextChannel.ownerDeviceId, replacement.device.deviceId);
+  assert.equal(result.nextChannel.role, "owner");
+  assert.equal(result.nextChannel.generation, 2);
+  assert.equal(result.nextChannel.previousChannelId, ownerChannel.channelId);
+  assert.deepEqual(result.nextChannel.authorizedDevices.map((device) => device.deviceId), [replacement.device.deviceId]);
+  assert.equal(result.nextChannel.revokedDeviceIds.includes(owner.device.deviceId), true);
+  assert.equal(result.recovered.parsed.workspace.tasks[0].title, "离线恢复后的真实工作台");
+  assert.equal(accepted.status, "reauthorize");
+  assert.equal(accepted.channel.retiredAt, result.transfer.transferredAt);
+  assert.equal(replacedOwner.status, "owner-replaced");
+
+  const request = await createPairingRequest(member, "2026-08-16T08:05:00.000Z");
+  const granted = await createDeviceGrant(result.nextChannel, replacement, request, "2026-08-16T08:06:00.000Z");
+  const reauthorized = await acceptDeviceGrant(granted.grant, member, "2026-08-16T08:07:00.000Z");
+  assert.equal(reauthorized.ownerDeviceId, replacement.device.deviceId);
+  assert.equal(reauthorized.generation, 2);
+  const replacedRequest = await createPairingRequest(owner, "2026-08-16T08:08:00.000Z");
+  await assert.rejects(createDeviceGrant(granted.channel, replacement, replacedRequest, "2026-08-16T08:09:00.000Z"), /已被空间密钥轮换撤销/);
+  await assert.rejects(acceptSyncOwnershipTransfer(transfer, { ...memberAtHead, headRevisionId: "revision_another_head" }, member), /版本头.*不一致/);
+});
+
+test("recovery rejects wrong passwords, stale packets, original-owner reuse, and transfer tampering", async () => {
+  const { owner, member, ownerChannel, memberChannel } = await pairedDevices();
+  const currentPacket = await createSyncPacket(await backupText("恢复版本"), ownerChannel, owner, "2026-08-16T09:01:00.000Z");
+  const stalePacket = await createSyncPacket(await backupText("过旧版本"), ownerChannel, owner, "2026-08-16T08:30:00.000Z");
+  const recovery = await createSyncRecoveryKit({ ...ownerChannel, headRevisionId: currentPacket.revisionId }, owner, "a sufficiently long recovery passphrase", "2026-08-16T09:02:00.000Z");
+  const replacement = await createSyncIdentity("恢复设备", "2026-08-16T09:03:00.000Z");
+
+  await assert.rejects(createSyncRecoveryKit(memberChannel, member, "a sufficiently long recovery passphrase", "2026-08-16T09:02:30.000Z"), /创建设备/);
+  await assert.rejects(recoverSyncOwnership(recovery, "this is the wrong passphrase", replacement, serializeSyncPacket(currentPacket), "2026-08-16T09:04:00.000Z"), /口令不正确/);
+  await assert.rejects(recoverSyncOwnership(recovery, "a sufficiently long recovery passphrase", replacement, serializeSyncPacket(stalePacket), "2026-08-16T09:04:00.000Z"), /拒绝回退恢复/);
+  await assert.rejects(recoverSyncOwnership(recovery, "a sufficiently long recovery passphrase", owner, serializeSyncPacket(currentPacket), "2026-08-16T09:04:00.000Z"), /仍在使用/);
+
+  const result = await recoverSyncOwnership(recovery, "a sufficiently long recovery passphrase", replacement, serializeSyncPacket(currentPacket), "2026-08-16T09:04:00.000Z");
+  const tampered = structuredClone(result.transfer);
+  tampered.next.label = "被替换的恢复空间";
+  await assert.rejects(inspectSyncOwnershipTransferText(serializeSyncOwnershipTransfer(tampered)), /新空间世代无效|签名无效/);
 });

@@ -32,6 +32,7 @@ import type {
   SyncRevisionRelation,
 } from "../features/sync-core.mjs";
 import { createHttpSyncTransport } from "../features/sync-remote-transport.mjs";
+import { SyncRecoveryConsole } from "./SyncRecoveryConsole";
 import {
   SYNC_CHANNELS_CHANGED_EVENT,
   listSyncChannels,
@@ -188,6 +189,21 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   function selectChannel(channelId: string) {
     setSelectedChannelId(channelId);
     setRemoteProof(null);
+    setPendingRevocationId("");
+  }
+
+  function installRecoveredChannels(retiredChannel: SyncChannel, nextChannel: SyncChannel) {
+    setChannels((current) => [...current.filter((item) => item.channelId !== retiredChannel.channelId && item.channelId !== nextChannel.channelId), retiredChannel, nextChannel]);
+    setSelectedChannelId(nextChannel.channelId);
+    setRemoteProof(null);
+    setIncoming(null);
+    setPendingRevocationId("");
+  }
+
+  function retireTransferredChannel(channel: SyncChannel) {
+    replaceChannel(channel);
+    setRemoteProof(null);
+    setIncoming(null);
     setPendingRevocationId("");
   }
 
@@ -566,6 +582,18 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
         </div>
         <footer><p><i />只会传输已经加密和签名的同步包；GET/PUT 均需当前用户点击。远端必须支持 CORS、强 ETag 与 HTTP 条件请求。</p><div><button onClick={() => void inspectRemoteObject()} disabled={!selectedChannel || !remoteObjectUrl.trim() || Boolean(busy)}>{busy === "remote-read" ? "正在检查…" : "连接并检查"}</button><button onClick={() => void publishRemoteObject()} disabled={!identity || !remotePublishReady || Boolean(busy)}>{busy === "remote-write" ? "正在条件发布…" : "条件发布密文"}<span>↗</span></button></div></footer>
       </article>
+
+      <SyncRecoveryConsole
+        identity={identity}
+        channels={channels}
+        selectedChannel={selectedChannel}
+        busy={busy}
+        setBusy={setBusy}
+        setMessage={setMessage}
+        onRecoveredChannels={installRecoveredChannels}
+        onRetiredChannel={retireTransferredChannel}
+        onStageBackup={onStageBackup}
+      />
 
       {pairing && (
         <article className="pairing-proof">

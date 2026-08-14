@@ -4,12 +4,16 @@ import type { WorkbenchState } from "./workbench-core.mjs";
 export const SYNC_PAIRING_FORMAT: "evolve-desk.sync-pairing";
 export const SYNC_GRANT_FORMAT: "evolve-desk.sync-grant";
 export const SYNC_ROTATION_FORMAT: "evolve-desk.sync-rotation";
+export const SYNC_RECOVERY_FORMAT: "evolve-desk.sync-recovery";
+export const SYNC_OWNERSHIP_TRANSFER_FORMAT: "evolve-desk.sync-ownership-transfer";
 export const SYNC_PACKET_FORMAT: "evolve-desk.sync-packet";
 export const SYNC_FORMAT_VERSION: 1;
 export const SYNC_PACKET_FORMAT_VERSION: 2;
 export const MAX_SYNC_CONTROL_BYTES: number;
+export const MAX_SYNC_RECOVERY_BYTES: number;
 export const MAX_SYNC_PACKET_BYTES: number;
 export const PAIRING_LIFETIME_MS: number;
+export const SYNC_RECOVERY_KDF_ITERATIONS: 600000;
 
 export type SyncPublicDevice = {
   deviceId: string;
@@ -80,6 +84,39 @@ export type SyncRotation = {
   proof: DeviceProof;
 };
 
+export type SyncRecoveryDelegation = {
+  recoveryId: string;
+  createdAt: string;
+  channel: { channelId: string; label: string; createdAt: string; generation: number; previousChannelId: string; headRevisionId: string };
+  owner: SyncPublicDevice;
+  authority: { signingPublicKey: JsonWebKey; fingerprint: string };
+  proof: DeviceProof;
+};
+
+export type SyncRecoveryKit = {
+  format: typeof SYNC_RECOVERY_FORMAT;
+  formatVersion: 1;
+  delegation: SyncRecoveryDelegation;
+  kdf: { name: "PBKDF2"; hash: "SHA-256"; iterations: 600000; salt: string };
+  cipher: { name: "AES-GCM"; keyLength: 256; iv: string; tagLength: 128 };
+  ciphertext: string;
+};
+
+export type SyncOwnershipTransfer = {
+  format: typeof SYNC_OWNERSHIP_TRANSFER_FORMAT;
+  formatVersion: 1;
+  transferId: string;
+  transferredAt: string;
+  recoveryId: string;
+  previous: { channelId: string; generation: number; headRevisionId: string };
+  next: { channelId: string; generation: number; label: string };
+  previousOwner: SyncPublicDevice;
+  nextOwner: SyncPublicDevice;
+  retained: Array<{ deviceId: string; fingerprint: string }>;
+  delegation: SyncRecoveryDelegation;
+  proof: DeviceProof;
+};
+
 export type SyncPacket = {
   format: typeof SYNC_PACKET_FORMAT;
   formatVersion: 1 | 2;
@@ -130,6 +167,24 @@ export function rotateSyncChannel(channel: SyncChannel, identity: SyncIdentity, 
 export function serializeSyncRotation(value: SyncRotation): string;
 export function inspectSyncRotationText(raw: string): Promise<SyncRotation>;
 export function acceptSyncRotation(rotation: SyncRotation, channel: SyncChannel, identity: SyncIdentity): Promise<{ status: "revoked" | "reauthorize"; channel: SyncChannel; rotation: SyncRotation }>;
+export function createSyncRecoveryKit(channel: SyncChannel, identity: SyncIdentity, passphrase: string, createdAt?: string): Promise<SyncRecoveryKit>;
+export function serializeSyncRecoveryKit(value: SyncRecoveryKit): string;
+export function inspectSyncRecoveryKitText(raw: string): Promise<SyncRecoveryKit>;
+export function recoverSyncOwnership(recovery: SyncRecoveryKit, passphrase: string, identity: SyncIdentity, packetText: string, recoveredAt?: string): Promise<{
+  transfer: SyncOwnershipTransfer;
+  retiredChannel: SyncChannel;
+  nextChannel: SyncChannel;
+  recovered: {
+    packet: SyncPacket;
+    author: AuthorizedSyncDevice;
+    backupText: string;
+    parsed: { envelope: BackupEnvelope; workspace: WorkbenchState; sources: BackupSources; summary: BackupSummary };
+    relation: SyncRevisionRelation;
+  };
+}>;
+export function serializeSyncOwnershipTransfer(value: SyncOwnershipTransfer): string;
+export function inspectSyncOwnershipTransferText(raw: string): Promise<SyncOwnershipTransfer>;
+export function acceptSyncOwnershipTransfer(transfer: SyncOwnershipTransfer, channel: SyncChannel, identity: SyncIdentity): Promise<{ status: "owner-replaced" | "reauthorize"; channel: SyncChannel; transfer: SyncOwnershipTransfer }>;
 export function classifySyncRevision(headRevisionId: string, packet: SyncPacket): SyncRevisionRelation;
 export function createSyncPacket(backupText: string, channel: SyncChannel, identity: SyncIdentity, createdAt?: string): Promise<SyncPacket>;
 export function serializeSyncPacket(value: SyncPacket): string;

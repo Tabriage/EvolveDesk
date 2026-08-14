@@ -5,16 +5,21 @@ import {
   parseBackupText,
   sha256Text,
 } from "./backup-core.mjs";
+import { BACKUP_KDF_ITERATIONS, validateBackupPassphrase } from "./backup-crypto.mjs";
 
 export const SYNC_PAIRING_FORMAT = "evolve-desk.sync-pairing";
 export const SYNC_GRANT_FORMAT = "evolve-desk.sync-grant";
 export const SYNC_ROTATION_FORMAT = "evolve-desk.sync-rotation";
+export const SYNC_RECOVERY_FORMAT = "evolve-desk.sync-recovery";
+export const SYNC_OWNERSHIP_TRANSFER_FORMAT = "evolve-desk.sync-ownership-transfer";
 export const SYNC_PACKET_FORMAT = "evolve-desk.sync-packet";
 export const SYNC_FORMAT_VERSION = 1;
 export const SYNC_PACKET_FORMAT_VERSION = 2;
 export const MAX_SYNC_CONTROL_BYTES = 128 * 1024;
+export const MAX_SYNC_RECOVERY_BYTES = 512 * 1024;
 export const MAX_SYNC_PACKET_BYTES = 132 * 1024 * 1024;
 export const PAIRING_LIFETIME_MS = 24 * 60 * 60 * 1_000;
+export const SYNC_RECOVERY_KDF_ITERATIONS = BACKUP_KDF_ITERATIONS;
 
 const AES_KEY_BITS = 256;
 const IV_BYTES = 12;
@@ -174,6 +179,116 @@ async function deriveGrantKey(privateKey, publicKeyValue, salt, info) {
     salt,
     info: context,
   }, material, { name: "AES-GCM", length: AES_KEY_BITS }, false, ["encrypt", "decrypt"]);
+}
+
+async function deriveRecoveryKey(passphrase, salt) {
+  const crypto = requireCrypto();
+  const material = await crypto.subtle.importKey("raw", textBytes(passphrase), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({
+    name: "PBKDF2",
+    hash: "SHA-256",
+    iterations: SYNC_RECOVERY_KDF_ITERATIONS,
+    salt,
+  }, material, { name: "AES-GCM", length: AES_KEY_BITS }, false, ["encrypt", "decrypt"]);
+}
+
+function normalizeRecoveryPrivateKey(value, publicKeyValue) {
+  const source = value && typeof value === "object" ? value : {};
+  const publicKey = normalizePublicKey(publicKeyValue, ["verify"]);
+  if (source.kty !== "EC" || source.crv !== "P-256" || source.x !== publicKey.x || source.y !== publicKey.y || typeof source.d !== "string" || source.d.length !== 43 || !BASE64_URL.test(source.d)) {
+    throw new Error("离线恢复私钥与所有者授权不一致");
+  }
+  return { kty: "EC", crv: "P-256", x: source.x, y: source.y, d: source.d, ext: true, key_ops: ["sign"] };
+}
+
+async function recoveryAuthority(value) {
+  const signingPublicKey = normalizePublicKey(value?.signingPublicKey, ["verify"]);
+  const fingerprint = await sha256Text(JSON.stringify({
+    kty: signingPublicKey.kty,
+    crv: signingPublicKey.crv,
+    x: signingPublicKey.x,
+    y: signingPublicKey.y,
+  }));
+  if (text(value?.fingerprint, 64) !== fingerprint) throw new Error("离线恢复授权公钥指纹不一致");
+  return { signingPublicKey, fingerprint };
+}
+
+async function normalizeAuthorizedDevice(value) {
+  const device = await normalizePublicDevice(value);
+  const authorizedAt = isoDate(value?.authorizedAt);
+  const authorizedBy = text(value?.authorizedBy, 100);
+  if (!authorizedAt || authorizedAt !== value?.authorizedAt || !SAFE_ID.test(authorizedBy)) throw new Error("离线恢复材料的授权设备记录无效");
+  return { ...device, authorizedAt, authorizedBy };
+}
+
+function recoveryChannel(value) {
+  const channelId = text(value?.channelId, 100);
+  const label = text(value?.label, 60);
+  const createdAt = isoDate(value?.createdAt);
+  const generation = Number(value?.generation);
+  const previousChannelId = text(value?.previousChannelId, 100);
+  const headRevisionId = text(value?.headRevisionId, 100);
+  if (!SAFE_ID.test(channelId) || !label || !createdAt || createdAt !== value?.createdAt) throw new Error("离线恢复材料的同步空间信息无效");
+  if (!Number.isSafeInteger(generation) || generation < 1 || generation >= 999_999 || (generation > 1 && !SAFE_ID.test(previousChannelId)) || (generation === 1 && previousChannelId)) {
+    throw new Error("离线恢复材料的空间世代无效");
+  }
+  if (headRevisionId && !SAFE_ID.test(headRevisionId)) throw new Error("离线恢复材料的版本头无效");
+  return { channelId, label, createdAt, generation, previousChannelId, headRevisionId };
+}
+
+function recoveryDelegationContent(value) {
+  return {
+    recoveryId: value.recoveryId,
+    createdAt: value.createdAt,
+    channel: value.channel,
+    owner: value.owner,
+    authority: value.authority,
+  };
+}
+
+async function validateRecoveryDelegation(value) {
+  const recoveryId = text(value?.recoveryId, 100);
+  const createdAt = isoDate(value?.createdAt);
+  if (!SAFE_ID.test(recoveryId) || !createdAt || createdAt !== value?.createdAt) throw new Error("离线恢复授权标识或时间无效");
+  const channel = recoveryChannel(value.channel);
+  const owner = await normalizePublicDevice(value.owner);
+  const authority = await recoveryAuthority(value.authority);
+  const content = recoveryDelegationContent({ recoveryId, createdAt, channel, owner, authority });
+  const proof = await verifyContent(owner.signingPublicKey, value.proof, JSON.stringify(content), "离线恢复授权签名无效，可能已被替换");
+  return { ...content, proof };
+}
+
+function recoveryHeader(value) {
+  return {
+    format: SYNC_RECOVERY_FORMAT,
+    formatVersion: SYNC_FORMAT_VERSION,
+    delegation: value.delegation,
+    kdf: {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      iterations: SYNC_RECOVERY_KDF_ITERATIONS,
+      salt: value.kdf.salt,
+    },
+    cipher: {
+      name: "AES-GCM",
+      keyLength: AES_KEY_BITS,
+      iv: value.cipher.iv,
+      tagLength: GCM_TAG_BITS,
+    },
+  };
+}
+
+async function validateRecoveryEnvelope(value) {
+  if (!value || typeof value !== "object" || value.format !== SYNC_RECOVERY_FORMAT) throw new Error("这不是 Evolve Desk 离线所有者恢复材料");
+  if (value.formatVersion !== SYNC_FORMAT_VERSION) throw new Error("离线恢复材料版本不受支持");
+  const delegation = await validateRecoveryDelegation(value.delegation);
+  if (value.kdf?.name !== "PBKDF2" || value.kdf?.hash !== "SHA-256" || value.kdf?.iterations !== SYNC_RECOVERY_KDF_ITERATIONS) throw new Error("离线恢复材料的口令派生参数不受支持");
+  base64Bytes(value.kdf.salt, SALT_BYTES);
+  if (value.cipher?.name !== "AES-GCM" || value.cipher?.keyLength !== AES_KEY_BITS || value.cipher?.tagLength !== GCM_TAG_BITS) throw new Error("离线恢复材料的加密参数不受支持");
+  base64Bytes(value.cipher.iv, IV_BYTES);
+  const encryptedBytes = decodedBase64Length(value.ciphertext);
+  if (encryptedBytes < GCM_TAG_BITS / 8 || encryptedBytes > MAX_SYNC_RECOVERY_BYTES) throw new Error("离线恢复材料的密文大小无效");
+  return { ...recoveryHeader({ delegation, kdf: value.kdf, cipher: value.cipher }), ciphertext: value.ciphertext };
 }
 
 function pairingContent(value) {
@@ -573,6 +688,259 @@ export async function acceptSyncRotation(rotationValue, channel, identity) {
     status: revoked ? "revoked" : "reauthorize",
     channel: { ...channel, retiredAt: rotation.rotatedAt, rotatedToChannelId: rotation.next.channelId },
     rotation,
+  };
+}
+
+export async function createSyncRecoveryKit(channel, identity, passphraseValue, createdAtValue = new Date().toISOString()) {
+  const crypto = requireCrypto();
+  const passphrase = validateBackupPassphrase(passphraseValue);
+  const owner = await normalizePublicDevice(identity?.device);
+  if (channel?.role !== "owner" || channel?.ownerDeviceId !== owner.deviceId) throw new Error("只有当前同步空间的创建设备可以生成离线恢复材料");
+  if (channel?.retiredAt) throw new Error("旧同步空间已经停用，不能生成恢复材料");
+  if (!channel?.key || !channel.key.extractable) throw new Error("当前空间密钥不能包装进离线恢复材料");
+  const createdAt = isoDate(createdAtValue);
+  if (!createdAt) throw new Error("离线恢复材料创建时间无效");
+  const channelInfo = recoveryChannel({
+    channelId: channel.channelId,
+    label: channel.label,
+    createdAt: channel.createdAt,
+    generation: Number(channel.generation) || 1,
+    previousChannelId: channel.previousChannelId || "",
+    headRevisionId: channel.headRevisionId || "",
+  });
+  const authorizedDevices = await Promise.all((Array.isArray(channel.authorizedDevices) ? channel.authorizedDevices : []).map(normalizeAuthorizedDevice));
+  if (!authorizedDevices.length || authorizedDevices.length > 64 || new Set(authorizedDevices.map((device) => device.deviceId)).size !== authorizedDevices.length || !authorizedDevices.some((device) => device.deviceId === owner.deviceId && device.fingerprint === owner.fingerprint)) {
+    throw new Error("创建设备不在当前空间授权清单中");
+  }
+  const revokedDeviceIds = [...new Set((Array.isArray(channel.revokedDeviceIds) ? channel.revokedDeviceIds : []).map((item) => text(item, 100)))];
+  if (revokedDeviceIds.length > 64 || revokedDeviceIds.some((item) => !SAFE_ID.test(item))) throw new Error("当前空间撤销清单无效");
+  const recoveryPair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const signingPublicKey = normalizePublicKey(await crypto.subtle.exportKey("jwk", recoveryPair.publicKey), ["verify"]);
+  const authority = {
+    signingPublicKey,
+    fingerprint: await sha256Text(JSON.stringify({ kty: signingPublicKey.kty, crv: signingPublicKey.crv, x: signingPublicKey.x, y: signingPublicKey.y })),
+  };
+  const delegationContent = recoveryDelegationContent({
+    recoveryId: randomId("recovery"),
+    createdAt,
+    channel: channelInfo,
+    owner,
+    authority,
+  });
+  const delegation = { ...delegationContent, proof: await signContent(identity?.signingPrivateKey, JSON.stringify(delegationContent)) };
+  const channelSecret = await crypto.subtle.exportKey("raw", channel.key);
+  const authorityPrivateKey = normalizeRecoveryPrivateKey(await crypto.subtle.exportKey("jwk", recoveryPair.privateKey), signingPublicKey);
+  const payload = JSON.stringify({
+    format: "evolve-desk.sync-recovery-secret",
+    formatVersion: SYNC_FORMAT_VERSION,
+    recoveryId: delegation.recoveryId,
+    channelSecret: bytesToBase64(channelSecret),
+    authorityPrivateKey,
+    authorizedDevices,
+    revokedDeviceIds,
+  });
+  if (byteLength(payload) + GCM_TAG_BITS / 8 > MAX_SYNC_RECOVERY_BYTES) throw new Error("离线恢复材料的加密内容过大");
+  const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+  const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const header = recoveryHeader({ delegation, kdf: { salt: bytesToBase64(salt) }, cipher: { iv: bytesToBase64(iv) } });
+  const key = await deriveRecoveryKey(passphrase, salt);
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: textBytes(JSON.stringify(header)), tagLength: GCM_TAG_BITS }, key, textBytes(payload));
+  return { ...header, ciphertext: bytesToBase64(ciphertext) };
+}
+
+export function serializeSyncRecoveryKit(value) {
+  const serialized = `${JSON.stringify(value, null, 2)}\n`;
+  if (byteLength(serialized) > MAX_SYNC_RECOVERY_BYTES) throw new Error("离线恢复材料超过大小上限");
+  return serialized;
+}
+
+export async function inspectSyncRecoveryKitText(raw) {
+  if (typeof raw !== "string" || !raw.trim() || byteLength(raw) > MAX_SYNC_RECOVERY_BYTES) throw new Error("离线恢复材料为空或过大");
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("离线恢复材料不是有效的 JSON 文件");
+  }
+  return validateRecoveryEnvelope(value);
+}
+
+async function unlockSyncRecoveryKit(value, passphraseValue) {
+  const envelope = await validateRecoveryEnvelope(value);
+  const passphrase = validateBackupPassphrase(passphraseValue);
+  const salt = base64Bytes(envelope.kdf.salt, SALT_BYTES);
+  const iv = base64Bytes(envelope.cipher.iv, IV_BYTES);
+  const key = await deriveRecoveryKey(passphrase, salt);
+  let plaintext;
+  try {
+    plaintext = await requireCrypto().subtle.decrypt({
+      name: "AES-GCM",
+      iv,
+      additionalData: textBytes(JSON.stringify(recoveryHeader(envelope))),
+      tagLength: GCM_TAG_BITS,
+    }, key, base64Bytes(envelope.ciphertext));
+  } catch {
+    throw new Error("恢复口令不正确，或离线恢复材料已被修改");
+  }
+  let payload;
+  try {
+    payload = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(plaintext));
+  } catch {
+    throw new Error("离线恢复材料解锁后不是有效的恢复内容");
+  }
+  if (payload?.format !== "evolve-desk.sync-recovery-secret" || payload?.formatVersion !== SYNC_FORMAT_VERSION || payload.recoveryId !== envelope.delegation.recoveryId) {
+    throw new Error("离线恢复材料的内外授权不一致");
+  }
+  const channelSecret = base64Bytes(payload.channelSecret, AES_KEY_BITS / 8);
+  const channelKey = await requireCrypto().subtle.importKey("raw", channelSecret, { name: "AES-GCM", length: AES_KEY_BITS }, false, ["encrypt", "decrypt"]);
+  const privateJwk = normalizeRecoveryPrivateKey(payload.authorityPrivateKey, envelope.delegation.authority.signingPublicKey);
+  const authorityPrivateKey = await requireCrypto().subtle.importKey("jwk", privateJwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+  const authorizedDevices = await Promise.all((Array.isArray(payload.authorizedDevices) ? payload.authorizedDevices : []).map(normalizeAuthorizedDevice));
+  if (!authorizedDevices.length || authorizedDevices.length > 64 || new Set(authorizedDevices.map((device) => device.deviceId)).size !== authorizedDevices.length || !authorizedDevices.some((device) => device.deviceId === envelope.delegation.owner.deviceId && device.fingerprint === envelope.delegation.owner.fingerprint)) {
+    throw new Error("离线恢复材料缺少原创建设备授权记录");
+  }
+  const revokedDeviceIds = [...new Set((Array.isArray(payload.revokedDeviceIds) ? payload.revokedDeviceIds : []).map((item) => text(item, 100)))];
+  if (revokedDeviceIds.length > 64 || revokedDeviceIds.some((item) => !SAFE_ID.test(item))) throw new Error("离线恢复材料的撤销清单无效");
+  return { envelope, channelKey, authorityPrivateKey, authorizedDevices, revokedDeviceIds };
+}
+
+function ownershipTransferContent(value) {
+  return {
+    format: SYNC_OWNERSHIP_TRANSFER_FORMAT,
+    formatVersion: SYNC_FORMAT_VERSION,
+    transferId: value.transferId,
+    transferredAt: value.transferredAt,
+    recoveryId: value.recoveryId,
+    previous: value.previous,
+    next: value.next,
+    previousOwner: value.previousOwner,
+    nextOwner: value.nextOwner,
+    retained: value.retained,
+    delegation: value.delegation,
+  };
+}
+
+async function validateSyncOwnershipTransfer(value) {
+  if (!value || typeof value !== "object" || value.format !== SYNC_OWNERSHIP_TRANSFER_FORMAT) throw new Error("这不是 Evolve Desk 所有权迁移记录");
+  if (value.formatVersion !== SYNC_FORMAT_VERSION) throw new Error("所有权迁移记录版本不受支持");
+  const transferId = text(value.transferId, 100);
+  const transferredAt = isoDate(value.transferredAt);
+  const recoveryId = text(value.recoveryId, 100);
+  if (!SAFE_ID.test(transferId) || !transferredAt || transferredAt !== value.transferredAt || !SAFE_ID.test(recoveryId)) throw new Error("所有权迁移记录标识或时间无效");
+  const delegation = await validateRecoveryDelegation(value.delegation);
+  if (delegation.recoveryId !== recoveryId || new Date(transferredAt).getTime() < new Date(delegation.createdAt).getTime()) throw new Error("所有权迁移记录与离线授权不一致");
+  const previous = {
+    channelId: text(value.previous?.channelId, 100),
+    generation: Number(value.previous?.generation),
+    headRevisionId: text(value.previous?.headRevisionId, 100),
+  };
+  const next = { channelId: text(value.next?.channelId, 100), generation: Number(value.next?.generation), label: text(value.next?.label, 60) };
+  if (previous.channelId !== delegation.channel.channelId || previous.generation !== delegation.channel.generation || !SAFE_ID.test(previous.headRevisionId)) throw new Error("所有权迁移记录的旧空间证据无效");
+  if (!SAFE_ID.test(next.channelId) || next.channelId === previous.channelId || next.generation !== previous.generation + 1 || next.label !== delegation.channel.label) throw new Error("所有权迁移记录的新空间世代无效");
+  const previousOwner = await normalizePublicDevice(value.previousOwner);
+  const nextOwner = await normalizePublicDevice(value.nextOwner);
+  if (previousOwner.deviceId !== delegation.owner.deviceId || previousOwner.fingerprint !== delegation.owner.fingerprint || nextOwner.deviceId === previousOwner.deviceId) {
+    throw new Error("所有权迁移记录的新旧所有者无效");
+  }
+  const retained = Array.isArray(value.retained) ? value.retained.map(normalizeRotationDevice) : [];
+  if (retained.length > 64 || new Set(retained.map((device) => device.deviceId)).size !== retained.length || retained.some((device) => device.deviceId === previousOwner.deviceId || device.deviceId === nextOwner.deviceId)) {
+    throw new Error("所有权迁移记录的保留设备清单无效");
+  }
+  const content = ownershipTransferContent({ transferId, transferredAt, recoveryId, previous, next, previousOwner, nextOwner, retained, delegation });
+  const proof = await verifyContent(delegation.authority.signingPublicKey, value.proof, JSON.stringify(content), "所有权迁移记录的恢复授权签名无效，可能已被替换");
+  return { ...content, proof };
+}
+
+export async function recoverSyncOwnership(recoveryValue, passphraseValue, identity, packetText, recoveredAtValue = new Date().toISOString()) {
+  const unlocked = await unlockSyncRecoveryKit(recoveryValue, passphraseValue);
+  const nextOwner = await normalizePublicDevice(identity?.device);
+  const previousOwner = unlocked.envelope.delegation.owner;
+  if (nextOwner.deviceId === previousOwner.deviceId || nextOwner.fingerprint === previousOwner.fingerprint) throw new Error("原创建设备仍在使用时不应执行所有权恢复");
+  const recoveredAt = isoDate(recoveredAtValue);
+  if (!recoveredAt || new Date(recoveredAt).getTime() < new Date(unlocked.envelope.delegation.createdAt).getTime()) throw new Error("所有权恢复时间无效");
+  if (typeof packetText !== "string" || !packetText.trim() || byteLength(packetText) > MAX_SYNC_PACKET_BYTES) throw new Error("所有权恢复需要一份旧空间的加密同步包");
+  const packet = inspectSyncPacketText(packetText);
+  const channelInfo = unlocked.envelope.delegation.channel;
+  if (packet.channelId !== channelInfo.channelId) throw new Error("加密同步包不属于恢复材料绑定的旧空间");
+  if (new Date(packet.createdAt).getTime() > new Date(recoveredAt).getTime()) throw new Error("加密同步包时间晚于本次恢复时间");
+  if (packet.revisionId !== channelInfo.headRevisionId && new Date(packet.createdAt).getTime() < new Date(unlocked.envelope.delegation.createdAt).getTime()) {
+    throw new Error("加密同步包早于恢复材料且不是其绑定版本，拒绝回退恢复");
+  }
+  const oldChannel = {
+    channelId: channelInfo.channelId,
+    label: channelInfo.label,
+    createdAt: channelInfo.createdAt,
+    ownerDeviceId: previousOwner.deviceId,
+    role: "member",
+    key: unlocked.channelKey,
+    generation: channelInfo.generation,
+    previousChannelId: channelInfo.previousChannelId,
+    retiredAt: "",
+    rotatedToChannelId: "",
+    revokedDeviceIds: unlocked.revokedDeviceIds,
+    authorizedDevices: unlocked.authorizedDevices,
+    headRevisionId: channelInfo.headRevisionId,
+    lastPacketAt: "",
+    mergeParentRevisionIds: [],
+  };
+  const recovered = await decryptSyncPacket(packet, oldChannel);
+  const nextChannel = await createSyncChannel(identity, channelInfo.label, recoveredAt);
+  nextChannel.generation = channelInfo.generation + 1;
+  nextChannel.previousChannelId = channelInfo.channelId;
+  nextChannel.revokedDeviceIds = [...new Set([...unlocked.revokedDeviceIds, previousOwner.deviceId])];
+  const retained = unlocked.authorizedDevices
+    .filter((device) => device.deviceId !== previousOwner.deviceId && device.deviceId !== nextOwner.deviceId)
+    .map(rotationDevice);
+  const content = ownershipTransferContent({
+    transferId: randomId("transfer"),
+    transferredAt: recoveredAt,
+    recoveryId: unlocked.envelope.delegation.recoveryId,
+    previous: { channelId: channelInfo.channelId, generation: channelInfo.generation, headRevisionId: packet.revisionId },
+    next: { channelId: nextChannel.channelId, generation: nextChannel.generation, label: nextChannel.label },
+    previousOwner,
+    nextOwner,
+    retained,
+    delegation: unlocked.envelope.delegation,
+  });
+  const transfer = { ...content, proof: await signContent(unlocked.authorityPrivateKey, JSON.stringify(content)) };
+  const retiredChannel = { ...oldChannel, headRevisionId: "", retiredAt: recoveredAt, rotatedToChannelId: nextChannel.channelId };
+  return { transfer, retiredChannel, nextChannel, recovered };
+}
+
+export function serializeSyncOwnershipTransfer(value) {
+  const serialized = `${JSON.stringify(value, null, 2)}\n`;
+  if (byteLength(serialized) > MAX_SYNC_CONTROL_BYTES) throw new Error("所有权迁移记录过大");
+  return serialized;
+}
+
+export async function inspectSyncOwnershipTransferText(raw) {
+  if (typeof raw !== "string" || !raw.trim() || byteLength(raw) > MAX_SYNC_CONTROL_BYTES) throw new Error("所有权迁移记录为空或过大");
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("所有权迁移记录不是有效的 JSON 文件");
+  }
+  return validateSyncOwnershipTransfer(value);
+}
+
+export async function acceptSyncOwnershipTransfer(transferValue, channel, identity) {
+  const transfer = await validateSyncOwnershipTransfer(transferValue);
+  const device = await normalizePublicDevice(identity?.device);
+  if (channel?.channelId !== transfer.previous.channelId || channel?.ownerDeviceId !== transfer.previousOwner.deviceId) throw new Error("所有权迁移记录不属于当前旧同步空间");
+  const generation = Number.isSafeInteger(channel.generation) && channel.generation > 0 ? channel.generation : 1;
+  if (generation !== transfer.previous.generation) throw new Error("所有权迁移记录与本地旧世代不一致");
+  if (channel.retiredAt && channel.rotatedToChannelId !== transfer.next.channelId) throw new Error("本地旧空间已经指向另一份轮换或迁移结果");
+  if (channel.headRevisionId && channel.headRevisionId !== transfer.previous.headRevisionId) throw new Error("本地版本头与所有权迁移证据不一致，请先核对旧空间最新同步包");
+  const trustedOwner = (Array.isArray(channel.authorizedDevices) ? channel.authorizedDevices : []).find((candidate) => candidate.deviceId === transfer.previousOwner.deviceId && candidate.fingerprint === transfer.previousOwner.fingerprint);
+  if (!trustedOwner) throw new Error("迁移记录中的原创建设备不在本地信任清单中");
+  const replacedOwner = device.deviceId === transfer.previousOwner.deviceId && device.fingerprint === transfer.previousOwner.fingerprint;
+  const retained = transfer.retained.some((candidate) => candidate.deviceId === device.deviceId && candidate.fingerprint === device.fingerprint);
+  if (!replacedOwner && !retained) throw new Error("当前设备不在这份所有权迁移记录中");
+  return {
+    status: replacedOwner ? "owner-replaced" : "reauthorize",
+    channel: { ...channel, retiredAt: transfer.transferredAt, rotatedToChannelId: transfer.next.channelId },
+    transfer,
   };
 }
 
