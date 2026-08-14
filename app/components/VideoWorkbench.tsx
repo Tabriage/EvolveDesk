@@ -11,6 +11,7 @@ import {
 } from "../features/external-media-store.mjs";
 import type { ExternalMediaInfo } from "../features/external-media-store.mjs";
 import type { KnowledgeCard, KnowledgeInquiry, VideoRecord, VideoSummary, VisualEvidenceFrame } from "../features/workbench-core.mjs";
+import { ExternalMediaLibrary } from "./ExternalMediaLibrary";
 import { TranscriptStudio } from "./TranscriptStudio";
 import { VisualEvidenceStudio, type VisualFrameDraft } from "./VisualEvidenceStudio";
 
@@ -756,6 +757,8 @@ export function VideoWorkbench({
           {relatedCards.length > 0 && <p className="related-card-note">当前视频已有 {relatedCards.length} 张知识卡片保存在本机。</p>}
         </section>
       )}
+
+      <ExternalMediaLibrary videos={videos} />
     </section>
   );
 }
