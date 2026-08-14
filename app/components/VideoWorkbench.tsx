@@ -3,6 +3,13 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import { segmentTranscript } from "../features/transcript-core.mjs";
 import { loadTranscript, loadVisualFrames, saveTranscript, saveVisualFrames } from "../features/transcript-store.mjs";
+import {
+  loadExternalMediaInfo,
+  openExternalMediaFile,
+  saveExternalMediaHandle,
+  supportsExternalMediaHandles,
+} from "../features/external-media-store.mjs";
+import type { ExternalMediaInfo } from "../features/external-media-store.mjs";
 import type { KnowledgeCard, KnowledgeInquiry, VideoRecord, VideoSummary, VisualEvidenceFrame } from "../features/workbench-core.mjs";
 import { TranscriptStudio } from "./TranscriptStudio";
 import { VisualEvidenceStudio, type VisualFrameDraft } from "./VisualEvidenceStudio";
@@ -62,6 +69,24 @@ const platformNames: Record<ImportedVideo["platform"], string> = {
   local: "本地文件",
 };
 
+type FilePickerGlobal = typeof globalThis & {
+  showOpenFilePicker?: (options?: {
+    multiple?: boolean;
+    types?: Array<{ description: string; accept: Record<string, string[]> }>;
+  }) => Promise<FileSystemFileHandle[]>;
+};
+
+const localMediaPickerOptions = {
+  multiple: false,
+  types: [{
+    description: "音频或视频文件",
+    accept: {
+      "video/*": [".mp4", ".mov", ".mkv", ".webm"],
+      "audio/*": [".mp3", ".m4a", ".wav", ".ogg", ".aac", ".flac"],
+    },
+  }],
+};
+
 function companionUrl(path: string) {
   const protocol = globalThis.location?.protocol === "https:" ? "https:" : "http:";
   const hostname = globalThis.location?.hostname || "localhost";
@@ -104,12 +129,13 @@ export function VideoWorkbench({
   const [transcript, setTranscript] = useState("");
   const [summary, setSummary] = useState<VideoSummary | null>(null);
   const [visualFrames, setVisualFrames] = useState<VisualFrameDraft[]>([]);
-  const [busy, setBusy] = useState<"" | "import" | "upload" | "model" | "transcribe" | "visual" | "summarize">("");
+  const [busy, setBusy] = useState<"" | "import" | "upload" | "bind" | "reopen" | "model" | "transcribe" | "visual" | "summarize">("");
   const [message, setMessage] = useState("粘贴视频链接，先读取真实元数据与字幕");
   const [savedMode, setSavedMode] = useState<"" | "knowledge" | "tasks">("");
   const [transcriptionStatus, setTranscriptionStatus] = useState<TranscriptionStatus | null>(null);
   const [transcriptStored, setTranscriptStored] = useState(false);
   const [visualStored, setVisualStored] = useState(false);
+  const [externalMediaInfo, setExternalMediaInfo] = useState<ExternalMediaInfo | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -146,6 +172,7 @@ export function VideoWorkbench({
     setTranscriptStored(false);
     setVisualFrames([]);
     setVisualStored(false);
+    setExternalMediaInfo(null);
     try {
       await discardPendingUpload(video);
       const response = await fetch(companionUrl("/api/video/import"), {
@@ -171,14 +198,31 @@ export function VideoWorkbench({
     }
   }
 
-  async function importFromFile(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
+  function validateLocalMediaFile(file: File) {
     if (file.size > 500 * 1024 * 1024) {
-      setMessage("本地音视频超过 500MB 安全上限");
-      return;
+      throw new Error("本地音视频超过 500MB 安全上限");
     }
+    if (!file.size) throw new Error("本地音视频文件为空");
+  }
+
+  async function uploadLocalMedia(file: File) {
+    validateLocalMediaFile(file);
+    const response = await fetch(companionUrl("/api/video/upload"), {
+      method: "POST",
+      headers: {
+        "content-type": file.type || "application/octet-stream",
+        "x-evolve-file-name": encodeURIComponent(file.name),
+        "x-evolve-file-size": String(file.size),
+        "x-evolve-file-type": file.type || "application/octet-stream",
+      },
+      body: file,
+    });
+    const data = (await response.json()) as { error?: string; video?: ImportedVideo };
+    if (!response.ok || !data.video) throw new Error(data.error || "没有读取到本地媒体信息");
+    return data.video;
+  }
+
+  async function stageLocalMedia(file: File, handle?: FileSystemFileHandle) {
     setBusy("upload");
     setMessage("正在把文件交给本机导入器读取；文件不会离开这台设备…");
     setSummary(null);
@@ -186,29 +230,97 @@ export function VideoWorkbench({
     setTranscriptStored(false);
     setVisualFrames([]);
     setVisualStored(false);
+    setExternalMediaInfo(null);
     try {
       await discardPendingUpload(video);
-      const response = await fetch(companionUrl("/api/video/upload"), {
-        method: "POST",
-        headers: {
-          "content-type": file.type || "application/octet-stream",
-          "x-evolve-file-name": encodeURIComponent(file.name),
-          "x-evolve-file-size": String(file.size),
-          "x-evolve-file-type": file.type || "application/octet-stream",
-        },
-        body: file,
-      });
-      const data = (await response.json()) as { error?: string; video?: ImportedVideo };
-      if (!response.ok || !data.video) throw new Error(data.error || "没有读取到本地媒体信息");
-      setVideo(data.video);
+      const imported = await uploadLocalMedia(file);
+      let indexed: ExternalMediaInfo | null = null;
+      if (handle) {
+        try {
+          indexed = await saveExternalMediaHandle(imported.url, handle);
+        } catch {
+          indexed = null;
+        }
+      }
+      setVideo(imported);
       setUrl("");
       setTranscript("");
-      setMessage(`已读取 ${data.video.localFileName || file.name} · 文件仅临时保留，保存或转录后立即删除`);
+      setExternalMediaInfo(indexed);
+      setMessage(`已读取 ${imported.localFileName || file.name} · 文件仅临时保留，保存或转录后立即删除${indexed ? "；外部原文件索引已绑定" : handle ? "；浏览器未能保存外部索引" : ""}`);
     } catch (error) {
       setVideo(null);
       setTranscript("");
       setVisualFrames([]);
       setMessage(error instanceof Error ? error.message : "本地文件导入失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function importFromFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) await stageLocalMedia(file);
+  }
+
+  async function importWithExternalIndex() {
+    if (!supportsExternalMediaHandles()) {
+      setMessage("当前浏览器不支持持久化文件句柄；仍可使用上方普通本地导入");
+      return;
+    }
+    try {
+      const [handle] = await (globalThis as FilePickerGlobal).showOpenFilePicker?.(localMediaPickerOptions) || [];
+      if (!handle) return;
+      await stageLocalMedia(await handle.getFile(), handle);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setMessage(error instanceof Error ? error.message : "无法建立外部原文件索引");
+    }
+  }
+
+  async function bindExternalOriginal() {
+    if (!video || video.platform !== "local") return;
+    if (!supportsExternalMediaHandles()) {
+      setMessage("当前浏览器不支持持久化文件句柄，不能绑定外部原文件");
+      return;
+    }
+    try {
+      const [handle] = await (globalThis as FilePickerGlobal).showOpenFilePicker?.(localMediaPickerOptions) || [];
+      if (!handle) return;
+      setBusy("bind");
+      const file = await handle.getFile();
+      validateLocalMediaFile(file);
+      if (video.localFileName && file.name !== video.localFileName) throw new Error(`请选择原文件“${video.localFileName}”`);
+      const info = await saveExternalMediaHandle(video.url, handle);
+      setExternalMediaInfo(info);
+      setMessage("外部原文件索引已绑定；仅保存文件句柄与采样指纹，不复制原文件");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setMessage(error instanceof Error ? error.message : "无法绑定外部原文件");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function reopenExternalOriginal() {
+    if (!video || video.platform !== "local") return;
+    setBusy("reopen");
+    setMessage("正在请求外部原文件读取权限并核对采样指纹…");
+    try {
+      const opened = await openExternalMediaFile(video.url);
+      await discardPendingUpload(video);
+      const imported = await uploadLocalMedia(opened.file);
+      setVideo((current) => current ? {
+        ...current,
+        uploadId: imported.uploadId,
+        hasVideo: imported.hasVideo,
+        width: imported.width,
+        height: imported.height,
+      } : current);
+      setExternalMediaInfo(opened.info);
+      setMessage("外部原文件指纹一致，已建立短期本机处理副本；保存或转录后仍会删除");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "无法重新打开外部原文件");
     } finally {
       setBusy("");
     }
@@ -296,6 +408,7 @@ export function VideoWorkbench({
         ...current,
         transcript: data.transcription?.transcript || null,
         transcriptSource: "local-whisper",
+        ...(current.platform === "local" ? { uploadId: undefined } : {}),
       } : current);
       setMessage(`本地转录完成 · ${data.transcription.transcript.length.toLocaleString("zh-CN")} 字符 · 临时音频已删除`);
     } catch (error) {
@@ -428,9 +541,10 @@ export function VideoWorkbench({
         : saved.transcriptSource === "local-whisper" ? "local-whisper" : "unavailable",
       importedAt: saved.createdAt,
     });
-    const [savedTranscript, storedFrames] = await Promise.all([
+    const [savedTranscript, storedFrames, externalInfo] = await Promise.all([
       loadTranscript(saved.url).catch(() => ""),
       loadVisualFrames(saved.url).catch(() => []),
+      saved.platform === "local" ? loadExternalMediaInfo(saved.url).catch(() => null) : Promise.resolve(null),
     ]);
     const imageById = new Map(storedFrames.map((frame) => [frame.id, frame.imageDataUrl]));
     const restoredFrames = saved.visualEvidence.map((frame, index) => ({
@@ -442,12 +556,13 @@ export function VideoWorkbench({
     setTranscriptStored(Boolean(savedTranscript));
     setVisualFrames(restoredFrames);
     setVisualStored(Boolean(restoredFrames.length && restoredFrames.every((frame) => frame.imageDataUrl)));
+    setExternalMediaInfo(externalInfo);
     setSourceMode(saved.platform === "local" ? "file" : "url");
     setSummary(saved.summary);
     setSavedMode("knowledge");
     setMessage(savedTranscript
-      ? `已恢复字幕${restoredFrames.length ? `与 ${restoredFrames.length} 帧视觉证据` : ""}，可继续搜索和提问`
-      : "这条旧总结没有持久化字幕；重新生成前需要再次导入来源");
+      ? `已恢复字幕${restoredFrames.length ? `与 ${restoredFrames.length} 帧视觉证据` : ""}，可继续搜索和提问${externalInfo ? "；外部原文件索引仍在本机" : ""}`
+      : `这条旧总结没有持久化字幕；重新生成前需要再次导入来源${externalInfo ? "，或从已绑定外部原文件重新打开" : ""}`);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -480,12 +595,15 @@ export function VideoWorkbench({
           <button disabled={Boolean(busy) || !url.trim()}>{busy === "import" ? "正在导入…" : "读取视频"}<span>↘</span></button>
         </form>
       ) : (
-        <label className={`local-media-drop ${busy === "upload" ? "busy" : ""}`}>
-          <input type="file" accept="audio/*,video/*,.mkv,.m4a,.flac,.aac" onChange={(event) => void importFromFile(event)} disabled={Boolean(busy)} />
-          <i>{busy === "upload" ? "…" : "＋"}</i>
-          <span><strong>{busy === "upload" ? "正在本机读取文件" : "选择音频或视频文件"}</strong><small>MP4 · MOV · MKV · WebM · MP3 · M4A · WAV · OGG · AAC · FLAC</small></span>
-          <b>文件不上传云端</b>
-        </label>
+        <div className="local-media-import-stack">
+          <label className={`local-media-drop ${busy === "upload" ? "busy" : ""}`}>
+            <input type="file" accept="audio/*,video/*,.mkv,.m4a,.flac,.aac" onChange={(event) => void importFromFile(event)} disabled={Boolean(busy)} />
+            <i>{busy === "upload" ? "…" : "＋"}</i>
+            <span><strong>{busy === "upload" ? "正在本机读取文件" : "选择音频或视频文件"}</strong><small>MP4 · MOV · MKV · WebM · MP3 · M4A · WAV · OGG · AAC · FLAC</small></span>
+            <b>普通临时导入</b>
+          </label>
+          <button type="button" className="indexed-media-picker" onClick={() => void importWithExternalIndex()} disabled={Boolean(busy)}><i>⌁</i><span><strong>选择并保留外部索引</strong><small>句柄与采样指纹进独立本地库 · 原文件不复制</small></span><b>可选</b></button>
+        </div>
       )}
 
       {video ? (
@@ -502,7 +620,16 @@ export function VideoWorkbench({
               <span>已读取来源</span>
               <h2>{video.title}</h2>
               <p>{video.author || "作者未知"}</p>
-              {video.platform === "local" ? <em>本地临时文件 · 保存或转录后删除</em> : <a href={video.url} target="_blank" rel="noreferrer">打开原视频 ↗</a>}
+              {video.platform === "local" ? (
+                <div className={`external-media-custody ${externalMediaInfo ? "bound" : ""}`}>
+                  <span><i>{video.uploadId ? "●" : externalMediaInfo ? "⌁" : "○"}</i><strong>{video.uploadId ? "短期处理副本已就绪" : externalMediaInfo ? "外部原文件已索引" : "原文件未绑定"}</strong><small>{externalMediaInfo ? `${externalMediaInfo.name} · ${externalMediaInfo.fingerprint.slice(0, 12)}…` : "保存或转录后，临时文件会删除"}</small></span>
+                  {video.uploadId
+                    ? !externalMediaInfo && <button type="button" onClick={() => void bindExternalOriginal()} disabled={Boolean(busy)}>{busy === "bind" ? "正在绑定…" : "绑定原文件"}</button>
+                    : externalMediaInfo
+                      ? <button type="button" onClick={() => void reopenExternalOriginal()} disabled={Boolean(busy)}>{busy === "reopen" ? "正在核验…" : "重新打开"}</button>
+                      : <button type="button" onClick={() => void bindExternalOriginal()} disabled={Boolean(busy)}>{busy === "bind" ? "正在绑定…" : "选择原文件"}</button>}
+                </div>
+              ) : <a href={video.url} target="_blank" rel="noreferrer">打开原视频 ↗</a>}
             </div>
           </article>
 
