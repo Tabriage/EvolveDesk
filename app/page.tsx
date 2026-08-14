@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { BoardWorkbench } from "./components/BoardWorkbench";
 import { CreatorStudio } from "./components/CreatorStudio";
+import { DataVault } from "./components/DataVault";
 import { EvidenceAtlas } from "./components/EvidenceAtlas";
 import { EvolutionLab } from "./components/EvolutionLab";
 import { KnowledgeWorkbench } from "./components/KnowledgeWorkbench";
@@ -59,7 +60,7 @@ import type {
   WorkbenchState,
 } from "./features/workbench-core.mjs";
 
-type ActiveView = "today" | "routes" | "boards" | "creator" | "inbox" | "video" | "knowledge" | "topics" | "graph" | "study" | "review" | "memory" | "lab";
+type ActiveView = "today" | "routes" | "boards" | "creator" | "inbox" | "video" | "knowledge" | "topics" | "graph" | "study" | "review" | "memory" | "vault" | "lab";
 
 type WorkPlan = {
   title: string;
@@ -265,6 +266,12 @@ export default function Home() {
     setDesk((current) => applyAgentActions(current, plan.actions, plan.title));
   }
 
+  function restoreWorkbench(value: WorkbenchState) {
+    const next = parseWorkbenchState(JSON.stringify(value));
+    window.localStorage.setItem(WORKBENCH_STORAGE_KEY, JSON.stringify(next));
+    setDesk(next);
+  }
+
   async function connect() {
     if (!apiKey.trim()) {
       setConnectionMessage("请先输入密钥；它只保留在当前页面内存中");
@@ -319,6 +326,7 @@ export default function Home() {
         <button className={activeView === "study" ? "active" : ""} onClick={() => setActiveView("study")}><span>◈</span> 记忆复习<small>{dueStudyCards.length}</small></button>
         <button className={activeView === "review" ? "active" : ""} onClick={() => setActiveView("review")}><span>↺</span> 周回顾<small>{desk.weeklyReviews.length}</small></button>
         <button className={activeView === "memory" ? "active" : ""} onClick={() => setActiveView("memory")}><span>◎</span> 自省记忆</button>
+        <button className={activeView === "vault" ? "active" : ""} onClick={() => setActiveView("vault")}><span>⇄</span> 数据迁移</button>
         <button className={activeView === "lab" ? "active" : ""} onClick={() => setActiveView("lab")}><span>⌘</span> 进化实验室</button>
         <div className="rail-label">能力底座</div>
         <div className="rail-capability"><i style={{ background: "#ff6d5a" }} /><span>对象与流程</span><b>运行中</b></div>
@@ -333,6 +341,7 @@ export default function Home() {
         <div className="rail-capability"><i style={{ background: "#7657d6" }} /><span>间隔复习</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#d39a2c" }} /><span>周度回顾</span><b>运行中</b></div>
         <div className="rail-capability"><i style={{ background: "#1f9d6a" }} /><span>本地记忆</span><b>运行中</b></div>
+        <div className="rail-capability"><i style={{ background: "#3159f5" }} /><span>可逆迁移</span><b>运行中</b></div>
         <div className="rail-footer"><span>{openTasks.length}</span><p>件事仍在等待推进<br />{newInbox.length} 条输入待整理</p></div>
       </aside>
 
@@ -593,6 +602,8 @@ export default function Home() {
           </section>
         )}
 
+        {activeView === "vault" && hydrated && <DataVault state={desk} onRestore={restoreWorkbench} />}
+
         {activeView === "lab" && <EvolutionLab baseURL={baseURL} apiKey={apiKey} model={model} onNeedSettings={() => setSettingsOpen(true)} />}
       </section>
 
@@ -603,6 +614,14 @@ export default function Home() {
           <ol className="guardrail-gates"><li><i>1</i><div><strong>路径门</strong><p>只允许产品界面、组件和测试文件。</p></div></li><li><i>2</i><div><strong>内容门</strong><p>阻断密钥、外部网络和动态执行。</p></div></li><li><i>3</i><div><strong>指纹门</strong><p>文件有变化就拒绝覆盖，避免踩掉人工编辑。</p></div></li><li><i>4</i><div><strong>隔离门</strong><p>临时 worktree 验证通过后才形成独立提交。</p></div></li><li><i>5</i><div><strong>远端门</strong><p>推送和草稿 PR 需要再次明确确认。</p></div></li></ol>
           <div className="protected-zone"><span>永不开放</span><code>tools/</code><code>app/api/</code><code>EvolutionLab.tsx</code><code>.env*</code><code>package.json</code><code>.git/</code></div>
           <div className="guardrail-footer"><i className={connected ? "online" : ""} /><div><strong>{connected ? "模型已连接" : "等待模型连接"}</strong><p>密钥只停留在当前页面内存</p></div><button onClick={() => setSettingsOpen(true)}>设置</button></div>
+        </aside>
+      ) : activeView === "vault" ? (
+        <aside className="agent-panel vault-guide-panel">
+          <header><div className="agent-glyph vault-glyph"><span>⇄</span></div><div><strong>迁移操作边界</strong><small>整卷替换 · 当前会话可撤回</small></div></header>
+          <div className="vault-guide-intro"><span>CURRENT → PROOF → RESTORE</span><h3>先看差异，<br />再移动整个工作台。</h3><p>迁移舱不调用模型，也不会把备份上传到服务端；文件只由当前浏览器生成和读取。</p></div>
+          <ol className="vault-guide-steps"><li><i>1</i><div><strong>生成整卷</strong><p>结构对象、字幕与采样帧一起封装。</p></div></li><li><i>2</i><div><strong>核对指纹</strong><p>SHA-256 用于发现损坏或被改动的内容。</p></div></li><li><i>3</i><div><strong>预演替换</strong><p>按稳定对象 ID 展示新增、改写与移除。</p></div></li><li><i>4</i><div><strong>保留退路</strong><p>恢复前状态可在页面刷新前一步撤回。</p></div></li></ol>
+          <div className="vault-guide-excludes"><span>永不写入迁移卷</span><code>API 密钥</code><code>Base URL</code><code>模型名称</code><code>本地视频原文件</code></div>
+          <div className="guardrail-footer"><i className="online" /><div><strong>本地迁移层就绪</strong><p>无需模型连接</p></div></div>
         </aside>
       ) : activeView === "video" ? (
         <aside className="agent-panel video-guide-panel">

@@ -71,7 +71,8 @@ export function QuickStart({ connected, onClose, onOpenSettings, onCreateTask }:
               <li><i>7</i><div><strong>多条资料可以编成学习专题</strong><small>节点保留来源；新增资料后的新版脉络先看差异，采用后才覆盖旧版。</small></div></li>
               <li><i>8</i><div><strong>证据星图会展开已有关系</strong><small>从专题或复习反向追到知识、视频和画面，并明确标出悬空节点。</small></div></li>
               <li><i>9</i><div><strong>想真正记住再进入记忆复习</strong><small>从知识卡生成闪卡和测验，按到期时间主动回忆。</small></div></li>
-              <li><i>10</i><div><strong>新功能先进入进化实验室</strong><small>逐文件审阅后形成隔离提交；远端草稿审阅需要再次确认。</small></div></li>
+              <li><i>10</i><div><strong>换设备前生成一份迁移卷</strong><small>导入前先看增删改；整次恢复在当前页面刷新前可以撤回。</small></div></li>
+              <li><i>11</i><div><strong>新功能先进入进化实验室</strong><small>逐文件审阅后形成隔离提交；远端草稿审阅需要再次确认。</small></div></li>
             </ol>
             <div className={`connection-check ${connected ? "ready" : ""}`}>
               <i>{connected ? "✓" : "可选"}</i>

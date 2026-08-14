@@ -2504,3 +2504,92 @@ button:focus-visible,textarea:focus-visible,input:focus-visible,select:focus-vis
   .revision-thesis>b { min-height:22px; transform:rotate(90deg); }
   .topic-revision-review>footer>div { width:100%; }.topic-revision-review>footer button { flex:1; }
 }
+
+/* Local migration vault — current film → verified archive → reversible restore */
+.data-vault { min-width:0; padding-bottom:36px; }
+.vault-heading { align-items:flex-end; margin-bottom:18px; }
+.vault-heading h1 { max-width:720px; }
+.vault-local-seal { display:flex; align-items:center; gap:7px; flex:none; margin-bottom:4px; padding:8px 10px; border:1px solid #cbd4d1; border-radius:9px; background:#f9fbfa; color:#53615d; font:7px var(--font-geist-mono); font-weight:800; letter-spacing:.12em; }
+.vault-local-seal i { width:7px; height:7px; border-radius:50%; background:#1f9d6a; box-shadow:0 0 0 4px #e5f4ed; }
+.vault-film { position:relative; display:grid; grid-template-columns:repeat(3,1fr); gap:9px; margin:0 0 10px; padding:0; list-style:none; }
+.vault-film::before { content:""; position:absolute; top:50%; left:16%; right:16%; z-index:0; border-top:1px dashed #bcc6c2; }
+.vault-film li { position:relative; z-index:1; display:grid; grid-template-columns:30px minmax(0,1fr); align-items:center; gap:9px; min-height:62px; padding:10px 12px; border:1px solid #dce2df; border-radius:13px; background:#f7f9f8; color:#8a9490; }
+.vault-film li>i { display:grid; place-items:center; width:30px; height:38px; border:1px solid #d6ddda; border-radius:8px; background:#eef1f0; color:#8f9995; font:7px var(--font-geist-mono); font-style:normal; }
+.vault-film li small,.vault-film li strong,.vault-film li span { display:block; }
+.vault-film li small { color:#a0a9a6; font:6px var(--font-geist-mono); font-weight:800; letter-spacing:.11em; }
+.vault-film li strong { margin-top:3px; color:#66716d; font:600 10px Georgia,"Songti SC",serif; }
+.vault-film li span { margin-top:3px; font-size:6px; }
+.vault-film li.active { border-color:#cbd4d1; background:white; color:#687570; box-shadow:0 7px 20px rgba(23,34,37,.04); }
+.vault-film li.active>i { border-color:#9fb0ff; background:#3159f5; color:white; }
+.vault-film li.warning>i { border-color:#e8b453; background:#d39a2c; }.vault-film li.restored>i { border-color:#55ae87; background:#1f9d6a; }
+.vault-message { display:grid; grid-template-columns:8px minmax(0,1fr) auto; align-items:center; gap:9px; min-height:38px; margin-bottom:11px; padding:8px 12px; border:1px solid #dce2df; border-radius:10px; background:#fbfcfb; color:#66716d; font-size:7px; line-height:1.5; }
+.vault-message>i { width:7px; height:7px; border-radius:50%; background:#1f9d6a; }.vault-message>i.working { border:2px solid #cad2cf; border-top-color:#3159f5; background:transparent; animation:vault-spin .8s linear infinite; }
+.vault-message code { padding:4px 6px; border-radius:5px; background:#edf0ef; color:#7e8985; font:6px var(--font-geist-mono); }
+@keyframes vault-spin { to { transform:rotate(360deg); } }
+.vault-actions-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.vault-action-card { position:relative; min-width:0; min-height:245px; overflow:hidden; padding:16px; border:1px solid #d9dfdc; border-radius:17px; background:#fbfcfb; box-shadow:0 14px 36px rgba(20,31,34,.045); }
+.vault-action-card::after { content:""; position:absolute; right:-26px; top:-31px; width:105px; height:105px; border:1px dashed #c7d0cc; border-radius:50%; opacity:.55; }
+.vault-action-card.export { border-top:3px solid #3159f5; }.vault-action-card.restore { border-top:3px solid #1f9d6a; }
+.vault-action-card>header { position:relative; z-index:1; display:flex; align-items:center; justify-content:space-between; }
+.vault-action-card>header span { color:#7f8b87; font:6px var(--font-geist-mono); font-weight:800; letter-spacing:.11em; }
+.vault-action-card>header i { display:grid; place-items:center; width:27px; height:27px; border-radius:50%; background:#edf0ff; color:#3159f5; font:10px var(--font-geist-mono); font-style:normal; }
+.vault-action-card.restore>header i { background:#e7f4ed; color:#1f8b62; }
+.vault-action-card h2 { position:relative; z-index:1; margin:17px 0 7px; color:#23312e; font:600 18px/1.2 Georgia,"Songti SC",serif; }
+.vault-action-card>p { position:relative; z-index:1; min-height:36px; margin:0 0 13px; color:#737e7a; font-size:7px; line-height:1.7; }
+.vault-current-strip { display:grid; grid-template-columns:repeat(4,1fr); gap:1px; margin:0 0 13px; overflow:hidden; border:1px solid #dfe4e2; border-radius:9px; background:#dfe4e2; }
+.vault-current-strip span { min-width:0; padding:8px 5px; background:#f4f6f5; color:#909a96; font-size:5px; text-align:center; }
+.vault-current-strip strong { display:block; margin-bottom:3px; overflow:hidden; color:#34433f; font:9px var(--font-geist-mono); text-overflow:ellipsis; }
+.vault-action-card>button { position:relative; z-index:1; display:flex; align-items:center; justify-content:space-between; width:100%; min-height:37px; padding:0 11px; border:0; border-radius:9px; background:#3159f5; color:white; font-size:8px; font-weight:800; cursor:pointer; }
+.vault-action-card>button span { color:#cbd4ff; font:6px var(--font-geist-mono); }.vault-action-card>button:disabled { background:#aab4b1; cursor:default; }
+.vault-action-card.restore>.vault-file-button { margin-top:24px; background:#21312e; }.vault-action-card.restore>.vault-file-button span { color:#a9b7b2; }
+.vault-action-card>small { position:relative; z-index:1; display:block; margin-top:8px; color:#949d9a; font-size:5px; line-height:1.55; }
+.vault-safety-row { display:flex; flex-wrap:wrap; gap:6px; margin-top:11px; }
+.vault-safety-row span { display:flex; align-items:center; gap:4px; color:#61706b; font-size:6px; }.vault-safety-row i { display:grid; place-items:center; width:13px; height:13px; border-radius:50%; background:#e6f3ec; color:#1d855e; font:6px var(--font-geist-mono); font-style:normal; }
+.vault-inventory { margin-top:10px; overflow:hidden; border:1px solid #d9dfdc; border-radius:14px; background:#f9fbfa; }
+.vault-inventory>header { display:flex; align-items:center; justify-content:space-between; gap:15px; padding:11px 14px; border-bottom:1px solid #e0e5e3; }
+.vault-inventory>header span { color:#89938f; font:6px var(--font-geist-mono); font-weight:800; letter-spacing:.1em; }.vault-inventory>header h2 { margin:3px 0 0; font:600 11px Georgia,"Songti SC",serif; }.vault-inventory>header>strong { color:#3159f5; font:6px var(--font-geist-mono); }
+.vault-module-tape { display:grid; grid-template-columns:repeat(6,1fr); gap:1px; background:#e0e5e3; }
+.vault-module-tape>span { display:flex; align-items:center; justify-content:space-between; gap:6px; min-width:0; padding:9px 10px; background:white; }
+.vault-module-tape small { overflow:hidden; color:#78837f; font-size:6px; text-overflow:ellipsis; white-space:nowrap; }.vault-module-tape strong { color:#24332f; font:8px var(--font-geist-mono); }
+.vault-module-tape>p { grid-column:1/-1; margin:0; padding:15px; background:white; color:#8b9591; font-size:7px; text-align:center; }
+.vault-receipt { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(180px,.8fr); align-items:center; gap:14px; margin-top:10px; padding:12px 14px; border:1px solid #cbd9d3; border-left:4px solid #1f9d6a; border-radius:12px; background:#f6fbf8; }
+.vault-receipt span,.vault-receipt strong,.vault-receipt small { display:block; }.vault-receipt span { color:#338163; font:6px var(--font-geist-mono); font-weight:800; letter-spacing:.1em; }.vault-receipt strong { margin-top:4px; color:#33433e; font-size:8px; }.vault-receipt small { margin-top:3px; color:#83908b; font-size:6px; }
+.vault-receipt code { color:#56635f; font:6px var(--font-geist-mono); }.vault-receipt>p { margin:0; color:#7e8a85; font-size:6px; line-height:1.55; }
+.vault-preview { margin-top:12px; overflow:hidden; border:1px solid #cbd4d1; border-radius:18px; background:white; box-shadow:0 18px 45px rgba(22,34,37,.07); }
+.vault-preview>header { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:16px 18px 13px; border-bottom:1px solid #dfe4e2; background:#f7f9f8; }
+.vault-preview>header span { color:#d09327; font:6px var(--font-geist-mono); font-weight:800; letter-spacing:.11em; }.vault-preview>header h2 { max-width:530px; margin:5px 0; overflow:hidden; color:#253430; font:600 15px Georgia,"Songti SC",serif; text-overflow:ellipsis; white-space:nowrap; }.vault-preview>header p { margin:0; color:#84908b; font-size:6px; }
+.vault-preview>header code { flex:none; padding:7px 9px; border:1px solid #d7dedb; border-radius:7px; background:white; color:#5f6b67; font:6px var(--font-geist-mono); }
+.vault-delta-total { display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:#dfe4e2; }
+.vault-delta-total>span { padding:10px 14px; background:#fbfcfb; }.vault-delta-total small { color:#89938f; font-size:6px; }.vault-delta-total strong { float:right; color:#46534f; font:10px var(--font-geist-mono); }.vault-delta-total .added strong { color:#1f8b62; }.vault-delta-total .changed strong { color:#b37a16; }.vault-delta-total .removed strong { color:#d45f50; }
+.vault-diff-table { padding:9px 16px; }
+.vault-diff-table>div { display:grid; grid-template-columns:1fr 125px 130px; align-items:center; min-height:29px; padding:0 8px; border-top:1px solid #e8ecea; color:#78837f; font-size:7px; }
+.vault-diff-table>.vault-diff-head { min-height:25px; border-top:0; color:#9aa39f; font:6px var(--font-geist-mono); letter-spacing:.06em; }.vault-diff-table>div.has-delta { background:#fbfcff; }.vault-diff-table>div>strong { color:#52605b; font-size:7px; }.vault-diff-table>div>span:nth-child(2) { font:7px var(--font-geist-mono); }.vault-diff-table i { margin:0 6px; color:#a7afac; font-style:normal; }.vault-diff-table b { display:inline-block; min-width:27px; margin-right:4px; padding:3px 4px; border-radius:5px; font:6px var(--font-geist-mono); text-align:center; }.vault-diff-table b.added { background:#e7f4ed; color:#1f835e; }.vault-diff-table b.changed { background:#fff4df; color:#a66e0d; }.vault-diff-table b.removed { background:#ffefec; color:#c25346; }.vault-diff-table>div>span:last-child small { color:#a2aaa7; font-size:6px; }
+.vault-media-proof { display:grid; grid-template-columns:1fr 1.3fr; gap:1px; border-top:1px solid #dfe4e2; border-bottom:1px solid #dfe4e2; background:#dfe4e2; }
+.vault-media-proof>div,.vault-media-proof>p { margin:0; padding:12px 16px; background:#f7f9f8; }
+.vault-media-proof>div span { display:block; margin-bottom:6px; color:#7f8a86; font:6px var(--font-geist-mono); }.vault-media-proof>div strong { margin-right:14px; color:#42504c; font-size:7px; }
+.vault-media-proof>p { display:flex; align-items:flex-start; gap:8px; background:#fffaf0; color:#806f51; font-size:6px; line-height:1.55; }.vault-media-proof>p>i { display:grid; place-items:center; flex:none; width:17px; height:17px; border-radius:50%; background:#d39a2c; color:white; font:7px var(--font-geist-mono); font-style:normal; }.vault-media-proof>p strong { display:block; margin-bottom:2px; color:#765a2c; font-size:7px; }
+.vault-preview>footer { display:flex; align-items:center; justify-content:flex-end; gap:7px; padding:12px 16px; background:#fbfcfb; }.vault-preview>footer button { min-height:35px; padding:0 12px; border:1px solid #d5dcda; border-radius:8px; background:white; color:#66736e; font-size:7px; font-weight:800; cursor:pointer; }.vault-preview>footer button:last-child { display:flex; align-items:center; justify-content:space-between; min-width:165px; border:0; background:#3159f5; color:white; }.vault-preview>footer button:last-child span { margin-left:15px; }.vault-preview>footer button.armed { background:#cc594b; box-shadow:0 0 0 4px #ffebe7; }.vault-preview>footer button:disabled { opacity:.6; cursor:default; }
+.restore-receipt { grid-template-columns:100px minmax(0,1fr) auto; border-left-color:#3159f5; background:#f7f8ff; }
+.receipt-stamp { padding:8px; border:2px solid #3159f5; border-radius:7px; color:#3159f5; font:8px var(--font-geist-mono); font-weight:900; letter-spacing:.12em; text-align:center; transform:rotate(-1.5deg); }.receipt-stamp small { color:#6d7abb; font-size:5px; letter-spacing:0; }
+.restore-receipt>button { display:flex; align-items:center; gap:14px; min-height:34px; padding:0 11px; border:1px solid #bdc8ff; border-radius:8px; background:white; color:#3159f5; font-size:7px; font-weight:800; cursor:pointer; }.restore-receipt>button:disabled { color:#8b9692; cursor:default; }
+.vault-glyph { background:#243431; }.vault-glyph span { color:#aebaff; }
+.vault-guide-intro { padding:18px 16px 15px; border-bottom:1px solid #dfe4e2; }.vault-guide-intro>span { color:#3159f5; font:6px var(--font-geist-mono); font-weight:800; letter-spacing:.1em; }.vault-guide-intro h3 { margin:8px 0; font:600 16px/1.28 Georgia,"Songti SC",serif; }.vault-guide-intro p { margin:0; color:#78837f; font-size:7px; line-height:1.65; }
+.vault-guide-steps { margin:0; padding:13px 15px; border-bottom:1px solid #dfe4e2; list-style:none; counter-reset:vault-step; }.vault-guide-steps li { display:grid; grid-template-columns:23px minmax(0,1fr); gap:8px; padding:8px 0; border-top:1px solid #e8ecea; }.vault-guide-steps li:first-child { border-top:0; }.vault-guide-steps i { display:grid; place-items:center; width:22px; height:22px; border-radius:7px; background:#e9edff; color:#3159f5; font:6px var(--font-geist-mono); font-style:normal; }.vault-guide-steps strong { display:block; color:#46534f; font-size:7px; }.vault-guide-steps p { margin:3px 0 0; color:#89928f; font-size:6px; line-height:1.5; }
+.vault-guide-excludes { display:flex; flex-wrap:wrap; gap:5px; padding:13px 15px; border-bottom:1px solid #dfe4e2; background:#fffaf2; }.vault-guide-excludes>span { width:100%; margin-bottom:2px; color:#a27325; font:6px var(--font-geist-mono); font-weight:800; letter-spacing:.08em; }.vault-guide-excludes code { padding:5px 6px; border:1px solid #ead9bb; border-radius:5px; background:white; color:#876c41; font:5px var(--font-geist-mono); }
+
+@media (max-width:1180px) {
+  .vault-module-tape { grid-template-columns:repeat(4,1fr); }
+  .vault-diff-table>div { grid-template-columns:1fr 100px 105px; }
+}
+@media (max-width:760px) {
+  .vault-heading { align-items:flex-start; flex-direction:column; }.vault-local-seal { margin-top:7px; }
+  .vault-film { grid-template-columns:1fr; }.vault-film::before { top:25px; bottom:25px; left:26px; right:auto; border-top:0; border-left:1px dashed #bcc6c2; }.vault-film li { min-height:55px; }
+  .vault-message { grid-template-columns:8px minmax(0,1fr); }.vault-message code { display:none; }
+  .vault-actions-grid { grid-template-columns:1fr; }.vault-action-card { min-height:0; }.vault-action-card>p { min-height:0; }.vault-action-card.restore>.vault-file-button { margin-top:14px; }
+  .vault-module-tape { grid-template-columns:repeat(3,1fr); }
+  .vault-receipt,.restore-receipt { grid-template-columns:1fr; align-items:flex-start; }.vault-receipt code { overflow-wrap:anywhere; }.receipt-stamp { width:100px; }
+  .vault-preview>header { align-items:flex-start; flex-direction:column; }.vault-preview>header h2 { max-width:280px; }.vault-delta-total { grid-template-columns:1fr 1fr; }
+  .vault-diff-table { padding:7px; overflow-x:auto; }.vault-diff-table>div { min-width:420px; grid-template-columns:1fr 105px 115px; }
+  .vault-media-proof { grid-template-columns:1fr; }.vault-preview>footer { align-items:stretch; flex-direction:column-reverse; }.vault-preview>footer button { width:100%; }.vault-preview>footer button:last-child { min-width:0; }
+  .vault-guide-panel { min-height:0; }
+}
