@@ -64,15 +64,39 @@ export type BackupMergePreview = {
 
 export type BackupMergeDecisionReceipt = {
   format: "evolve-desk.merge-decision";
-  formatVersion: 1;
+  formatVersion: 2;
+  receiptId: string;
   createdAt: string;
   context: { baseRevisionId: string; localRevisionId: string; incomingRevisionId: string; sourceChecksum: string };
+  manifest: { algorithm: "SHA-256"; conflictSetHash: string; conflictCount: number };
   totals: { conflictDecisions: number; autoLocalObjects: number; autoIncomingObjects: number; fieldMergedObjects: number };
   decisions: Array<
     | { categoryKey: string; objectId: string; resolution: "fields"; fields: Array<{ path: string[]; choice: BackupMergeChoice }> }
     | { categoryKey: string; objectId: string; resolution: "object"; choice: BackupMergeChoice }
   >;
+  integrity: { algorithm: "SHA-256"; digest: string };
 };
+
+export type LegacyBackupMergeDecisionReceipt = Omit<BackupMergeDecisionReceipt, "formatVersion" | "receiptId" | "manifest" | "integrity"> & { formatVersion: 1 };
+export type AnyBackupMergeDecisionReceipt = BackupMergeDecisionReceipt | LegacyBackupMergeDecisionReceipt;
+export type BackupMergeDecisionInspection = {
+  receipt: AnyBackupMergeDecisionReceipt;
+  sealed: boolean;
+  digest: string;
+  conflictDecisions: number;
+  objectDecisions: number;
+  categoryCount: number;
+};
+export type BackupMergeDecisionComparison = {
+  matches: boolean;
+  contextMatches: boolean;
+  conflictSetMatches: boolean;
+  reasons: string[];
+  expectedConflictDecisions: number;
+  receiptConflictDecisions: number;
+};
+
+export const MAX_MERGE_DECISION_RECEIPT_BYTES: number;
 
 export function createBackupMergePreview(
   baseWorkspace: WorkbenchState,
@@ -83,9 +107,18 @@ export function createBackupMergePreview(
   incomingSources?: BackupSources,
 ): BackupMergePreview;
 export function applyBackupMerge(preview: BackupMergePreview, choices?: Record<string, BackupMergeChoice>): { workspace: WorkbenchState; sources: BackupSources; summary: BackupSummary };
+export function applyBackupMergeChoiceBatch(
+  preview: BackupMergePreview,
+  choices: Record<string, BackupMergeChoice>,
+  keys: string[],
+  choice: BackupMergeChoice,
+): { choices: Record<string, BackupMergeChoice>; appliedKeys: string[] };
 export function createBackupMergeDecisionReceipt(
   preview: BackupMergePreview,
   choices?: Record<string, BackupMergeChoice>,
   context?: Partial<BackupMergeDecisionReceipt["context"]>,
   createdAt?: string,
-): BackupMergeDecisionReceipt;
+): Promise<BackupMergeDecisionReceipt>;
+export function serializeBackupMergeDecisionReceipt(receipt: AnyBackupMergeDecisionReceipt): string;
+export function inspectBackupMergeDecisionReceiptText(raw: string): Promise<BackupMergeDecisionInspection>;
+export function compareBackupMergeDecisionReceiptToPreview(receipt: AnyBackupMergeDecisionReceipt, preview: BackupMergePreview, context: BackupMergeDecisionReceipt["context"]): Promise<BackupMergeDecisionComparison>;

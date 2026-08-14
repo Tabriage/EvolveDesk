@@ -3,8 +3,24 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { SyncStudio } from "./SyncStudio";
 import type { StagedSyncBackup, StagedSyncMergeBase } from "./SyncStudio";
-import { applyBackupMerge, createBackupMergeDecisionReceipt, createBackupMergePreview } from "../features/backup-merge.mjs";
-import type { BackupMergeChoice, BackupMergeDecisionReceipt, BackupMergePreview } from "../features/backup-merge.mjs";
+import {
+  MAX_MERGE_DECISION_RECEIPT_BYTES,
+  applyBackupMerge,
+  applyBackupMergeChoiceBatch,
+  compareBackupMergeDecisionReceiptToPreview,
+  createBackupMergeDecisionReceipt,
+  createBackupMergePreview,
+  inspectBackupMergeDecisionReceiptText,
+  serializeBackupMergeDecisionReceipt,
+} from "../features/backup-merge.mjs";
+import type {
+  BackupMergeChoice,
+  BackupMergeDecisionComparison,
+  BackupMergeDecisionInspection,
+  BackupMergeDecisionReceipt,
+  BackupMergeEntry,
+  BackupMergePreview,
+} from "../features/backup-merge.mjs";
 import { inspectBackupCompatibility } from "../features/backup-compatibility.mjs";
 import type { BackupCompatibilityReport } from "../features/backup-compatibility.mjs";
 import {
@@ -87,6 +103,12 @@ type RestoreReceipt = {
   mergeDecision?: BackupMergeDecisionReceipt;
 };
 
+type MergeDecisionAudit = {
+  fileName: string;
+  inspection: BackupMergeDecisionInspection;
+  comparison?: BackupMergeDecisionComparison;
+};
+
 const summaryLabels: Record<string, string> = {
   tasks: "任务",
   inbox: "收件箱",
@@ -156,8 +178,9 @@ function backupFileName(date = new Date(), protectedBackup = false) {
 
 export function DataVault({ state, onRestore }: DataVaultProps) {
   const fileInput = useRef<HTMLInputElement>(null);
+  const decisionReceiptInput = useRef<HTMLInputElement>(null);
   const [localSources, setLocalSources] = useState<BackupSources>({ transcripts: [], visualFrames: [] });
-  const [busy, setBusy] = useState<"" | "export" | "read" | "decrypt" | "restore" | "undo">("");
+  const [busy, setBusy] = useState<"" | "export" | "read" | "decision-read" | "decrypt" | "restore" | "undo">("");
   const [message, setMessage] = useState("迁移文件只在你的浏览器里生成和读取，不经过模型或服务器。 ");
   const [pending, setPending] = useState<PendingBackup | null>(null);
   const [lockedBackup, setLockedBackup] = useState<LockedBackup | null>(null);
@@ -171,6 +194,12 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
   const [unlockPassphrase, setUnlockPassphrase] = useState("");
   const [mergeMode, setMergeMode] = useState<"merge" | "replace">("merge");
   const [mergeChoices, setMergeChoices] = useState<Record<string, BackupMergeChoice>>({});
+  const [mergeCategoryFilter, setMergeCategoryFilter] = useState("all");
+  const [mergePathFilter, setMergePathFilter] = useState("all");
+  const [mergeStatusFilter, setMergeStatusFilter] = useState<"all" | "unresolved" | "resolved">("all");
+  const [mergeSearch, setMergeSearch] = useState("");
+  const [mergeBatchUndo, setMergeBatchUndo] = useState<Record<string, BackupMergeChoice> | null>(null);
+  const [decisionAudit, setDecisionAudit] = useState<MergeDecisionAudit | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -186,9 +215,60 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
   const visibleModules = Object.entries(currentSummary.modules).filter(([, count]) => count > 0);
   const mergedBackup = useMemo(() => pending?.merge ? applyBackupMerge(pending.merge, mergeChoices) : null, [pending, mergeChoices]);
   const unresolvedMergeCount = useMemo(() => pending?.merge ? pending.merge.conflictKeys.filter((key) => !(key in mergeChoices)).length : 0, [pending, mergeChoices]);
+  const mergeConflictEntries = useMemo(() => pending?.merge?.entries.filter((entry) => entry.kind === "conflict") || [], [pending]);
+  const mergeCategoryOptions = useMemo(() => {
+    const options = new Map<string, string>();
+    for (const entry of mergeConflictEntries) options.set(entry.categoryKey, entry.categoryLabel);
+    return [...options.entries()];
+  }, [mergeConflictEntries]);
+  const mergePathOptions = useMemo(() => {
+    const options = new Map<string, string>();
+    for (const entry of mergeConflictEntries) {
+      if (entry.resolution === "object") options.set("__object__", "整个对象");
+      for (const field of entry.fieldConflicts) options.set(field.path.join("."), field.label);
+    }
+    return [...options.entries()];
+  }, [mergeConflictEntries]);
+  const visibleMergeEntries = useMemo(() => {
+    const query = mergeSearch.trim().toLocaleLowerCase("zh-CN");
+    const selectionVisible = (key: string) => mergeStatusFilter === "all" || (mergeStatusFilter === "resolved" ? key in mergeChoices : !(key in mergeChoices));
+    return mergeConflictEntries.flatMap((entry): BackupMergeEntry[] => {
+      if (mergeCategoryFilter !== "all" && entry.categoryKey !== mergeCategoryFilter) return [];
+      const entryMatches = !query || `${entry.categoryLabel} ${entry.title} ${entry.objectId}`.toLocaleLowerCase("zh-CN").includes(query);
+      if (entry.resolution === "object") {
+        if (mergePathFilter !== "all" && mergePathFilter !== "__object__") return [];
+        if (!selectionVisible(entry.key) || !entryMatches) return [];
+        return [entry];
+      }
+      if (mergePathFilter === "__object__") return [];
+      const fieldConflicts = entry.fieldConflicts.filter((field) => {
+        if (mergePathFilter !== "all" && field.path.join(".") !== mergePathFilter) return false;
+        if (!selectionVisible(field.key)) return false;
+        return entryMatches || !query || `${field.label} ${field.path.join(".")}`.toLocaleLowerCase("zh-CN").includes(query);
+      });
+      return fieldConflicts.length ? [{ ...entry, fieldConflicts }] : [];
+    });
+  }, [mergeCategoryFilter, mergeChoices, mergeConflictEntries, mergePathFilter, mergeSearch, mergeStatusFilter]);
+  const visibleMergeConflictKeys = useMemo(() => visibleMergeEntries.flatMap((entry) => entry.resolution === "fields" ? entry.fieldConflicts.map((field) => field.key) : [entry.key]), [visibleMergeEntries]);
+  const visibleUnresolvedMergeKeys = useMemo(() => visibleMergeConflictKeys.filter((key) => !(key in mergeChoices)), [mergeChoices, visibleMergeConflictKeys]);
   const previewWorkspace = pending ? pending.merge && mergeMode === "merge" && mergedBackup ? mergedBackup.workspace : pending.workspace : null;
   const previewSummary = pending ? pending.merge && mergeMode === "merge" && mergedBackup ? mergedBackup.summary : pending.summary : null;
   const previewDiff = useMemo(() => previewWorkspace ? compareBackupStates(state, previewWorkspace) : null, [state, previewWorkspace]);
+  const auditedMergeDecisionReceipt = decisionAudit?.inspection.receipt;
+
+  useEffect(() => {
+    if (!auditedMergeDecisionReceipt || !pending?.merge || !pending.sync) return;
+    let active = true;
+    compareBackupMergeDecisionReceiptToPreview(auditedMergeDecisionReceipt, pending.merge, {
+      baseRevisionId: pending.sync.parentRevisionId || "",
+      localRevisionId: pending.sync.previousHeadRevisionId || "",
+      incomingRevisionId: pending.sync.revisionId || "",
+      sourceChecksum: pending.envelope.checksum,
+    }).then((comparison) => {
+      if (active) setDecisionAudit((current) => current ? { ...current, comparison } : null);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [auditedMergeDecisionReceipt, pending]);
 
   function stagePreview(raw: string, fileName: string, fileBytes: number, protectedBackup: boolean, sync?: StagedSyncBackup, mergeBase?: StagedSyncMergeBase) {
     return inspectBackupCompatibility(raw).then(({ parsed, report: compatibility }) => {
@@ -198,6 +278,12 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
         : undefined;
       setMergeMode(merge ? "merge" : "replace");
       setMergeChoices({});
+      setMergeBatchUndo(null);
+      setMergeCategoryFilter("all");
+      setMergePathFilter("all");
+      setMergeStatusFilter("all");
+      setMergeSearch("");
+      setDecisionAudit((current) => current ? { ...current, comparison: undefined } : null);
       setPending({
         fileName,
         fileBytes,
@@ -349,7 +435,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
     let previousSources: BackupSources | null = null;
     try {
       const restoredAt = new Date().toISOString();
-      const mergeDecision = useMerge && pending.merge ? createBackupMergeDecisionReceipt(pending.merge, mergeChoices, {
+      const mergeDecision = useMerge && pending.merge ? await createBackupMergeDecisionReceipt(pending.merge, mergeChoices, {
         baseRevisionId: pending.sync?.parentRevisionId || "",
         localRevisionId: pending.sync?.previousHeadRevisionId || "",
         incomingRevisionId: pending.sync?.revisionId || "",
@@ -444,17 +530,74 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
   function discardPreview() {
     setPending(null);
     setMergeChoices({});
+    setMergeBatchUndo(null);
     setRestoreArmed(false);
     setMessage("已丢弃预检结果，没有写入任何数据。 ");
   }
 
   function chooseMergeSide(key: string, choice: BackupMergeChoice) {
     setMergeChoices((current) => ({ ...current, [key]: choice }));
+    setMergeBatchUndo(null);
     setRestoreArmed(false);
   }
 
+  function chooseVisibleMergeSide(choice: BackupMergeChoice) {
+    if (!pending?.merge) return;
+    try {
+      const batch = applyBackupMergeChoiceBatch(pending.merge, mergeChoices, visibleUnresolvedMergeKeys, choice);
+      if (!batch.appliedKeys.length) {
+        setMessage("当前校样范围没有尚未选择的冲突。 ");
+        return;
+      }
+      setMergeBatchUndo(mergeChoices);
+      setMergeChoices(batch.choices);
+      setRestoreArmed(false);
+      setMessage(`已将当前可见范围的 ${batch.appliedKeys.length} 个未决项明确设为${choice === "local" ? "保留本机" : "采用迁入"}；可撤回这次批量操作。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "无法应用这次批量选择");
+    }
+  }
+
+  function undoVisibleMergeBatch() {
+    if (!mergeBatchUndo) return;
+    setMergeChoices(mergeBatchUndo);
+    setMergeBatchUndo(null);
+    setRestoreArmed(false);
+    setMessage("已撤回最近一次批量选择，之前的人工选择保持不变。 ");
+  }
+
+  async function readMergeDecisionReceipt(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setBusy("decision-read");
+    setMessage("正在本地核对决策回执的结构与完整性封签…");
+    try {
+      if (file.size > MAX_MERGE_DECISION_RECEIPT_BYTES) throw new Error("决策回执超过 512KB 上限");
+      const inspection = await inspectBackupMergeDecisionReceiptText(await file.text());
+      let comparison: BackupMergeDecisionComparison | undefined;
+      if (pending?.merge && pending.sync) {
+        comparison = await compareBackupMergeDecisionReceiptToPreview(inspection.receipt, pending.merge, {
+          baseRevisionId: pending.sync.parentRevisionId || "",
+          localRevisionId: pending.sync.previousHeadRevisionId || "",
+          incomingRevisionId: pending.sync.revisionId || "",
+          sourceChecksum: pending.envelope.checksum,
+        });
+      }
+      setDecisionAudit({ fileName: file.name, inspection, comparison });
+      setMessage(inspection.sealed
+        ? "决策回执的 SHA-256 完整性封签有效；它能发现改动，但不证明签发设备身份。 "
+        : "旧版决策回执结构可读，但没有完整性封签，不能核对文件是否被改动。 ");
+    } catch (error) {
+      setDecisionAudit(null);
+      setMessage(error instanceof Error ? error.message : "无法校验这份决策回执");
+    } finally {
+      setBusy("");
+    }
+  }
+
   function downloadMergeDecision(receipt: BackupMergeDecisionReceipt) {
-    const serialized = `${JSON.stringify(receipt, null, 2)}\n`;
+    const serialized = serializeBackupMergeDecisionReceipt(receipt);
     const url = URL.createObjectURL(new Blob([serialized], { type: "application/json;charset=utf-8" }));
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -538,6 +681,28 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
 
       <SyncStudio state={state} sources={localSources} onStageBackup={stageSyncBackup} />
 
+      <section className="merge-receipt-auditor">
+        <header>
+          <div><span>DECISION PROOF / 离线校验</span><h2>核对一份合并决策回执</h2></div>
+          <button onClick={() => decisionReceiptInput.current?.click()} disabled={Boolean(busy)}>{busy === "decision-read" ? "正在校验…" : "选择决策回执"}<small>JSON ≤ 512KB</small></button>
+          <input ref={decisionReceiptInput} type="file" accept="application/json,.json" onChange={readMergeDecisionReceipt} hidden />
+        </header>
+        <p>只读取版本号、对象 ID、字段路径与选择方向，不包含冲突字段内容；校验不会自动重放任何选择。</p>
+        {decisionAudit ? (
+          <div className={`merge-receipt-proof ${decisionAudit.inspection.sealed ? "sealed" : "legacy"}`}>
+            <div className="merge-proof-mark"><i>{decisionAudit.inspection.sealed ? "✓" : "!"}</i><span><strong>{decisionAudit.inspection.sealed ? "完整性封签有效" : "旧版 · 无封签"}</strong><small>{decisionAudit.fileName}</small></span></div>
+            <div className="merge-proof-counts"><span><small>明确选择</small><strong>{decisionAudit.inspection.conflictDecisions}</strong></span><span><small>冲突对象</small><strong>{decisionAudit.inspection.objectDecisions}</strong></span><span><small>涉及分类</small><strong>{decisionAudit.inspection.categoryCount}</strong></span></div>
+            <code>{decisionAudit.inspection.digest ? `${decisionAudit.inspection.digest.slice(0, 20)}…${decisionAudit.inspection.digest.slice(-10)}` : "NO SHA-256 SEAL"}</code>
+            {pending?.merge && decisionAudit.comparison && (
+              <div className={decisionAudit.comparison.matches ? "merge-proof-match" : "merge-proof-mismatch"}>
+                <strong>{decisionAudit.comparison.matches ? "与当前合并预览精确匹配" : "不属于当前合并预览"}</strong>
+                <span>{decisionAudit.comparison.matches ? "版本链、源卷校验与全部冲突路径一致；仍不会自动套用选择。" : decisionAudit.comparison.reasons.join("；")}</span>
+              </div>
+            )}
+          </div>
+        ) : <small>SHA-256 可发现文件改动，但不是设备签名，也不能证明回执来自哪台设备。</small>}
+      </section>
+
       {lastExport && !pending && !lockedBackup && (
         <article className={`vault-receipt export-receipt ${lastExport.protected ? "protected" : ""}`}>
           <div><span>{lastExport.protected ? "ENCRYPTED EXPORT RECEIPT" : "EXPORT RECEIPT"}</span><strong>{formatDate(lastExport.exportedAt)}</strong><small>{formatBytes(lastExport.bytes)} · {lastExport.summary.objectCount} 个对象 · {lastExport.protected ? "AES-256-GCM" : "未加密"}</small></div>
@@ -575,8 +740,20 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
                   <div className="merge-totals"><span><small>自动保留本机</small><strong>{pending.merge.autoLocalCount}</strong></span><span><small>自动接入迁入</small><strong>{pending.merge.autoIncomingCount}</strong></span><span><small>字段自动拼合</small><strong>{pending.merge.autoFieldMergedCount}</strong></span><span className={unresolvedMergeCount ? "warning" : "ready"}><small>尚待选择</small><strong>{unresolvedMergeCount}</strong></span></div>
                   <div className="merge-category-tape">{pending.merge.rows.map((row) => <span key={row.key}><strong>{row.label}</strong><small>{row.changed} 处变化{row.conflicts ? ` · ${row.conflicts} 冲突` : " · 自动"}</small></span>)}</div>
                   {pending.merge.conflictCount > 0 ? (
-                    <div className="merge-conflict-list">
-                      {pending.merge.entries.filter((entry) => entry.kind === "conflict").map((entry) => {
+                    <>
+                      <section className="merge-proofing-desk">
+                        <header><div><span>PROOFING DESK / 合并校样台</span><h4>先缩小范围，再明确处理可见的未决项。</h4></div><strong>{visibleMergeConflictKeys.length} 可见 · {visibleUnresolvedMergeKeys.length} 未决</strong></header>
+                        <div className="merge-proofing-filters">
+                          <label><span>分类</span><select value={mergeCategoryFilter} onChange={(event) => setMergeCategoryFilter(event.target.value)}><option value="all">全部分类</option>{mergeCategoryOptions.map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label>
+                          <label><span>字段路径</span><select value={mergePathFilter} onChange={(event) => setMergePathFilter(event.target.value)}><option value="all">全部路径</option>{mergePathOptions.map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label>
+                          <label><span>裁决状态</span><select value={mergeStatusFilter} onChange={(event) => setMergeStatusFilter(event.target.value as "all" | "unresolved" | "resolved")}><option value="all">全部状态</option><option value="unresolved">只看未决</option><option value="resolved">只看已选</option></select></label>
+                          <label className="merge-proofing-search"><span>对象或路径</span><input value={mergeSearch} onChange={(event) => setMergeSearch(event.target.value)} placeholder="搜索标题、ID、字段路径" /></label>
+                        </div>
+                        <div className="merge-punch-tape" aria-label="当前范围裁决穿孔带"><span>VISIBLE SCOPE</span><div>{visibleMergeConflictKeys.map((key) => <i key={key} className={mergeChoices[key] || "unresolved"} title={mergeChoices[key] === "local" ? "保留本机" : mergeChoices[key] === "incoming" ? "采用迁入" : "尚未选择"} />)}</div><code>{visibleMergeConflictKeys.length ? `${visibleMergeConflictKeys.length} / ${pending.merge.conflictCount}` : "EMPTY"}</code></div>
+                        <footer><p>批量操作只填当前可见范围的未决项，不覆盖已有人工选择。</p><div>{mergeBatchUndo && <button onClick={undoVisibleMergeBatch}>撤回本次批量</button>}<button onClick={() => chooseVisibleMergeSide("local")} disabled={!visibleUnresolvedMergeKeys.length}>未决 → 保留本机</button><button className="incoming" onClick={() => chooseVisibleMergeSide("incoming")} disabled={!visibleUnresolvedMergeKeys.length}>未决 → 采用迁入</button></div></footer>
+                      </section>
+                      <div className="merge-conflict-list">
+                      {visibleMergeEntries.map((entry) => {
                         if (entry.resolution === "fields") return (
                           <article key={entry.key} className="field-resolution">
                             <header><span>{entry.categoryLabel} · 字段冲突</span><strong>{entry.title}</strong><code>{entry.objectId.slice(0, 24)}</code></header>
@@ -589,7 +766,9 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
                         const selected = mergeChoices[entry.key];
                         return <article key={entry.key}><header><span>{entry.categoryLabel} · 对象冲突</span><strong>{entry.title}</strong><code>{entry.objectId.slice(0, 24)}</code></header><div className="merge-object-options"><button className={selected === "local" ? "active" : ""} onClick={() => chooseMergeSide(entry.key, "local")} aria-pressed={selected === "local"}><span>保留本机对象</span><strong>{entry.localState}</strong><p>{describeMergeValue(entry.localValue)}</p></button><button className={selected === "incoming" ? "active incoming" : ""} onClick={() => chooseMergeSide(entry.key, "incoming")} aria-pressed={selected === "incoming"}><span>采用迁入对象</span><strong>{entry.incomingState}</strong><p>{describeMergeValue(entry.incomingValue)}</p></button></div></article>;
                       })}
-                    </div>
+                      {!visibleMergeEntries.length && <p className="merge-filter-empty">当前筛选范围没有冲突项；调整分类、路径、状态或搜索词。</p>}
+                      </div>
+                    </>
                   ) : <p className="merge-no-conflict"><i>✓</i><span><strong>没有同字段或删除冲突。</strong>两台设备的独立对象与字段变化已经按稳定 ID 组成合并结果。</span></p>}
                 </>
               ) : <p className="merge-replace-warning"><i>!</i><span><strong>整体迁入会忽略自动合并和上方选择。</strong>当前设备独有的对象会按下方差异被移除；仍需再次点击确认。</span></p>}

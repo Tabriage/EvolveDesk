@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyBackupMerge, createBackupMergeDecisionReceipt, createBackupMergePreview } from "../app/features/backup-merge.mjs";
+import {
+  applyBackupMerge,
+  applyBackupMergeChoiceBatch,
+  compareBackupMergeDecisionReceiptToPreview,
+  createBackupMergeDecisionReceipt,
+  createBackupMergePreview,
+  inspectBackupMergeDecisionReceiptText,
+  serializeBackupMergeDecisionReceipt,
+} from "../app/features/backup-merge.mjs";
 import { createInitialWorkbench, parseWorkbenchState } from "../app/features/workbench-core.mjs";
 
 const noSources = { transcripts: [], visualFrames: [] };
@@ -77,6 +85,20 @@ test("field choices change only the disputed field and preserve automatic fields
   assert.equal(merged.priority, "high");
 });
 
+test("scoped batch choices fill only unresolved conflicts and preserve manual decisions", () => {
+  const base = workspace({ tasks: [task("task-batch-a", "原始 A"), task("task-batch-b", "原始 B")] });
+  const local = workspace({ tasks: [task("task-batch-a", "本机 A"), task("task-batch-b", "本机 B")] });
+  const incoming = workspace({ tasks: [task("task-batch-a", "迁入 A"), task("task-batch-b", "迁入 B")] });
+  const preview = createBackupMergePreview(base, local, incoming, noSources, noSources, noSources);
+  const [first, second] = preview.conflictKeys;
+  const batch = applyBackupMergeChoiceBatch(preview, { [first]: "local" }, [first, second, second], "incoming");
+
+  assert.deepEqual(batch.appliedKeys, [second]);
+  assert.equal(batch.choices[first], "local");
+  assert.equal(batch.choices[second], "incoming");
+  assert.throws(() => applyBackupMergeChoiceBatch(preview, {}, ["tasks:not-in-preview"], "local"), /当前预览之外/);
+});
+
 test("delete versus modify is a conflict and can keep the deletion", () => {
   const base = workspace({ tasks: [task("task-delete", "准备删除")] });
   const local = workspace({ tasks: [] });
@@ -134,26 +156,83 @@ test("merged state is re-sanitized so orphaned source data cannot survive choice
   assert.equal(merged.sources.transcripts.length, 0);
 });
 
-test("merge decision receipts record choices without copying disputed content", () => {
+test("merge decision receipts seal choices without copying disputed content", async () => {
   const base = workspace({ tasks: [task("task-receipt", "原始秘密标题")] });
   const local = workspace({ tasks: [task("task-receipt", "本机秘密标题")] });
   const incoming = workspace({ tasks: [task("task-receipt", "迁入秘密标题")] });
   const preview = createBackupMergePreview(base, local, incoming, noSources, noSources, noSources);
   const field = preview.entries[0].fieldConflicts[0];
-  const receipt = createBackupMergeDecisionReceipt(preview, { [field.key]: "incoming" }, {
+  const context = {
     baseRevisionId: "revision_base",
     localRevisionId: "revision_local",
     incomingRevisionId: "revision_incoming",
-    sourceChecksum: "checksum-example",
-  }, "2026-08-22T08:00:00.000Z");
+    sourceChecksum: "c".repeat(64),
+  };
+  const receipt = await createBackupMergeDecisionReceipt(preview, { [field.key]: "incoming" }, context, "2026-08-22T08:00:00.000Z");
+  const inspection = await inspectBackupMergeDecisionReceiptText(serializeBackupMergeDecisionReceipt(receipt));
+  const comparison = await compareBackupMergeDecisionReceiptToPreview(inspection.receipt, preview, context);
 
   assert.equal(receipt.format, "evolve-desk.merge-decision");
+  assert.equal(receipt.formatVersion, 2);
+  assert.match(receipt.receiptId, /^decision_[0-9a-f]{32}$/);
+  assert.match(receipt.integrity.digest, /^[0-9a-f]{64}$/);
   assert.equal(receipt.totals.conflictDecisions, 1);
   assert.equal(receipt.decisions[0].fields[0].choice, "incoming");
   assert.deepEqual(receipt.decisions[0].fields[0].path, ["title"]);
   assert.equal(JSON.stringify(receipt).includes("秘密标题"), false);
-  assert.throws(
-    () => createBackupMergeDecisionReceipt(preview, {}, {}, "2026-08-22T08:00:00.000Z"),
+  assert.equal(inspection.sealed, true);
+  assert.equal(comparison.matches, true);
+  await assert.rejects(
+    createBackupMergeDecisionReceipt(preview, {}, context, "2026-08-22T08:00:00.000Z"),
     /1 个合并冲突没有明确选择/,
   );
+});
+
+test("offline receipt inspection rejects modified choices and detects another merge context", async () => {
+  const base = workspace({ tasks: [task("task-receipt-check", "原始")] });
+  const local = workspace({ tasks: [task("task-receipt-check", "本机")] });
+  const incoming = workspace({ tasks: [task("task-receipt-check", "迁入")] });
+  const preview = createBackupMergePreview(base, local, incoming, noSources, noSources, noSources);
+  const field = preview.entries[0].fieldConflicts[0];
+  const context = { baseRevisionId: "revision_base", localRevisionId: "revision_local", incomingRevisionId: "revision_incoming", sourceChecksum: "d".repeat(64) };
+  const receipt = await createBackupMergeDecisionReceipt(preview, { [field.key]: "local" }, context, "2026-08-22T09:00:00.000Z");
+  const tampered = structuredClone(receipt);
+  tampered.decisions[0].fields[0].choice = "incoming";
+
+  await assert.rejects(inspectBackupMergeDecisionReceiptText(JSON.stringify(tampered)), /完整性封签不一致/);
+  const hidden = structuredClone(receipt);
+  hidden.decisions[0].fields[0].value = "不应进入回执的内容";
+  await assert.rejects(inspectBackupMergeDecisionReceiptText(JSON.stringify(hidden)), /缺失或未声明字段/);
+  const inspection = await inspectBackupMergeDecisionReceiptText(serializeBackupMergeDecisionReceipt(receipt));
+  const mismatch = await compareBackupMergeDecisionReceiptToPreview(inspection.receipt, preview, { ...context, incomingRevisionId: "revision_another" });
+  assert.equal(mismatch.matches, false);
+  assert.equal(mismatch.contextMatches, false);
+  assert.equal(mismatch.conflictSetMatches, true);
+  const anotherPreview = createBackupMergePreview(
+    workspace({ tasks: [{ ...task("task-receipt-check", "原始"), note: "原始备注" }] }),
+    workspace({ tasks: [{ ...task("task-receipt-check", "原始"), note: "本机备注" }] }),
+    workspace({ tasks: [{ ...task("task-receipt-check", "原始"), note: "迁入备注" }] }),
+    noSources,
+    noSources,
+    noSources,
+  );
+  const wrongConflictSet = await compareBackupMergeDecisionReceiptToPreview(inspection.receipt, anotherPreview, context);
+  assert.equal(wrongConflictSet.contextMatches, true);
+  assert.equal(wrongConflictSet.conflictSetMatches, false);
+  assert.equal(wrongConflictSet.matches, false);
+});
+
+test("legacy decision receipts remain structurally inspectable but are clearly unsealed", async () => {
+  const legacy = {
+    format: "evolve-desk.merge-decision",
+    formatVersion: 1,
+    createdAt: "2026-08-22T10:00:00.000Z",
+    context: { baseRevisionId: "revision_base", localRevisionId: "revision_local", incomingRevisionId: "revision_incoming", sourceChecksum: "legacy-checksum" },
+    totals: { conflictDecisions: 1, autoLocalObjects: 0, autoIncomingObjects: 0, fieldMergedObjects: 1 },
+    decisions: [{ categoryKey: "tasks", objectId: "task-legacy", resolution: "fields", fields: [{ path: ["title"], choice: "local" }] }],
+  };
+  const inspection = await inspectBackupMergeDecisionReceiptText(`${JSON.stringify(legacy)}\n`);
+  assert.equal(inspection.sealed, false);
+  assert.equal(inspection.digest, "");
+  assert.equal(inspection.conflictDecisions, 1);
 });

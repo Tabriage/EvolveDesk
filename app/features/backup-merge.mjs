@@ -1,5 +1,11 @@
 import { parseWorkbenchState } from "./workbench-core.mjs";
-import { sanitizeBackupSources, summarizeBackup } from "./backup-core.mjs";
+import { sanitizeBackupSources, sha256Text, summarizeBackup } from "./backup-core.mjs";
+
+export const MAX_MERGE_DECISION_RECEIPT_BYTES = 512 * 1024;
+const MERGE_DECISION_FORMAT = "evolve-desk.merge-decision";
+const MERGE_DECISION_FORMAT_VERSION = 2;
+const SAFE_REVISION_ID = /^[A-Za-z0-9_-]{8,100}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
 
 const collectionSpecs = [
   { key: "tasks", label: "任务", path: ["tasks"] },
@@ -29,6 +35,8 @@ const sourceSpecs = [
   { key: "transcripts", label: "本地字幕", path: ["transcripts"], idKey: "sourceKey" },
   { key: "visualFrames", label: "采样画面", path: ["visualFrames"], idKey: "sourceKey" },
 ];
+
+const categoryKeys = new Set([...collectionSpecs, ...singletonSpecs, ...sourceSpecs].map((spec) => spec.key));
 
 function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -306,17 +314,202 @@ export function applyBackupMerge(preview, choices = {}) {
   };
 }
 
-export function createBackupMergeDecisionReceipt(preview, choices = {}, contextValue = {}, createdAtValue = new Date().toISOString()) {
+export function applyBackupMergeChoiceBatch(preview, choices = {}, keys = [], choice) {
+  if (!preview || !Array.isArray(preview.conflictKeys)) throw new Error("合并预览无效");
+  if (choice !== "local" && choice !== "incoming") throw new Error("批量选择必须明确为本机或迁入");
+  if (!Array.isArray(keys) || keys.length > 4_096) throw new Error("批量选择范围无效");
+  const allowed = new Set(preview.conflictKeys);
+  const requested = [...new Set(keys)];
+  if (requested.some((key) => typeof key !== "string" || !allowed.has(key))) throw new Error("批量选择包含当前预览之外的冲突");
+  const next = { ...choices };
+  const appliedKeys = [];
+  for (const key of requested) {
+    if (next[key] === "local" || next[key] === "incoming") continue;
+    next[key] = choice;
+    appliedKeys.push(key);
+  }
+  return { choices: next, appliedKeys };
+}
+
+function decisionManifest(decisions) {
+  return decisions.map((decision) => decision.resolution === "fields" ? {
+    categoryKey: decision.categoryKey,
+    objectId: decision.objectId,
+    resolution: "fields",
+    paths: decision.fields.map((field) => field.path),
+  } : {
+    categoryKey: decision.categoryKey,
+    objectId: decision.objectId,
+    resolution: "object",
+  });
+}
+
+function previewConflictManifest(preview) {
+  return preview.entries.filter((entry) => entry.kind === "conflict").map((entry) => entry.resolution === "fields" ? {
+    categoryKey: entry.categoryKey,
+    objectId: entry.objectId,
+    resolution: "fields",
+    paths: entry.fieldConflicts.map((field) => field.path),
+  } : {
+    categoryKey: entry.categoryKey,
+    objectId: entry.objectId,
+    resolution: "object",
+  });
+}
+
+function receiptContent(value) {
+  return {
+    format: MERGE_DECISION_FORMAT,
+    formatVersion: MERGE_DECISION_FORMAT_VERSION,
+    createdAt: value.createdAt,
+    context: value.context,
+    manifest: value.manifest,
+    totals: value.totals,
+    decisions: value.decisions,
+  };
+}
+
+function byteLength(value) {
+  return new TextEncoder().encode(String(value || "")).byteLength;
+}
+
+function exactKeys(value, expected, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label}不是有效对象`);
+  const actual = Object.keys(value).sort();
+  const allowed = [...expected].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(allowed)) throw new Error(`${label}包含缺失或未声明字段`);
+}
+
+function boundedText(value, limit, label, allowEmpty = false) {
+  if (typeof value !== "string" || value !== value.trim() || value.length > limit || /[\u0000-\u001f\u007f]/.test(value) || (!allowEmpty && !value)) throw new Error(`${label}无效`);
+  return value;
+}
+
+function revisionId(value, label, legacy = false) {
+  const candidate = boundedText(value, 100, label, legacy);
+  if (!legacy && !SAFE_REVISION_ID.test(candidate)) throw new Error(`${label}无效`);
+  return candidate;
+}
+
+function isoDate(value) {
+  const candidate = boundedText(value, 40, "决策回执时间");
+  if (!Number.isFinite(new Date(candidate).getTime()) || new Date(candidate).toISOString() !== candidate) throw new Error("决策回执时间无效");
+  return candidate;
+}
+
+function nonNegativeInteger(value, label) {
+  const candidate = Number(value);
+  if (!Number.isSafeInteger(candidate) || candidate < 0 || candidate > 1_000_000) throw new Error(`${label}无效`);
+  return candidate;
+}
+
+function normalizeContext(value, legacy = false) {
+  exactKeys(value, ["baseRevisionId", "localRevisionId", "incomingRevisionId", "sourceChecksum"], "决策回执版本上下文");
+  const sourceChecksum = boundedText(value.sourceChecksum, 128, "决策回执源卷校验", legacy);
+  if (!legacy && !SHA256.test(sourceChecksum)) throw new Error("决策回执源卷校验无效");
+  return {
+    baseRevisionId: revisionId(value.baseRevisionId, "共同父版本标识", legacy),
+    localRevisionId: revisionId(value.localRevisionId, "本机版本标识", legacy),
+    incomingRevisionId: revisionId(value.incomingRevisionId, "迁入版本标识", legacy),
+    sourceChecksum,
+  };
+}
+
+function normalizePath(value) {
+  if (!Array.isArray(value) || !value.length || value.length > 20) throw new Error("决策回执字段路径无效");
+  return value.map((part) => boundedText(part, 200, "决策回执字段路径"));
+}
+
+function normalizeDecisions(value) {
+  if (!Array.isArray(value) || value.length > 4_096) throw new Error("决策回执选择数量无效");
+  const seen = new Set();
+  let conflictDecisions = 0;
+  const decisions = value.map((decision) => {
+    const resolution = decision?.resolution;
+    const expectedKeys = resolution === "fields" ? ["categoryKey", "objectId", "resolution", "fields"] : ["categoryKey", "objectId", "resolution", "choice"];
+    exactKeys(decision, expectedKeys, "决策回执选择");
+    const categoryKey = boundedText(decision.categoryKey, 80, "决策回执对象类别");
+    if (!categoryKeys.has(categoryKey)) throw new Error("决策回执包含未知对象类别");
+    const objectId = boundedText(decision.objectId, 2_000, "决策回执对象标识");
+    const decisionKey = `${categoryKey}:${objectId}`;
+    if (seen.has(decisionKey)) throw new Error("决策回执包含重复对象选择");
+    seen.add(decisionKey);
+    if (resolution === "object") {
+      if (decision.choice !== "local" && decision.choice !== "incoming") throw new Error("决策回执对象选择无效");
+      conflictDecisions += 1;
+      return { categoryKey, objectId, resolution, choice: decision.choice };
+    }
+    if (resolution !== "fields" || !Array.isArray(decision.fields) || !decision.fields.length || decision.fields.length > 4_096) throw new Error("决策回执字段选择无效");
+    const seenPaths = new Set();
+    const fields = decision.fields.map((field) => {
+      exactKeys(field, ["path", "choice"], "决策回执字段选择");
+      const path = normalizePath(field.path);
+      const pathKey = JSON.stringify(path);
+      if (seenPaths.has(pathKey)) throw new Error("决策回执包含重复字段路径");
+      seenPaths.add(pathKey);
+      if (field.choice !== "local" && field.choice !== "incoming") throw new Error("决策回执字段选择无效");
+      return { path, choice: field.choice };
+    });
+    conflictDecisions += fields.length;
+    return { categoryKey, objectId, resolution, fields };
+  });
+  return { decisions, conflictDecisions };
+}
+
+function normalizeTotals(value, conflictDecisions) {
+  exactKeys(value, ["conflictDecisions", "autoLocalObjects", "autoIncomingObjects", "fieldMergedObjects"], "决策回执统计");
+  const totals = {
+    conflictDecisions: nonNegativeInteger(value.conflictDecisions, "决策回执冲突数量"),
+    autoLocalObjects: nonNegativeInteger(value.autoLocalObjects, "决策回执本机自动对象数量"),
+    autoIncomingObjects: nonNegativeInteger(value.autoIncomingObjects, "决策回执迁入自动对象数量"),
+    fieldMergedObjects: nonNegativeInteger(value.fieldMergedObjects, "决策回执字段合并对象数量"),
+  };
+  if (totals.conflictDecisions !== conflictDecisions) throw new Error("决策回执统计与逐项选择数量不一致");
+  return totals;
+}
+
+function normalizeLegacyReceipt(value) {
+  exactKeys(value, ["format", "formatVersion", "createdAt", "context", "totals", "decisions"], "旧版决策回执");
+  const normalized = normalizeDecisions(value.decisions);
+  return {
+    format: MERGE_DECISION_FORMAT,
+    formatVersion: 1,
+    createdAt: isoDate(value.createdAt),
+    context: normalizeContext(value.context, true),
+    totals: normalizeTotals(value.totals, normalized.conflictDecisions),
+    decisions: normalized.decisions,
+  };
+}
+
+async function normalizeSealedReceipt(value) {
+  exactKeys(value, ["format", "formatVersion", "receiptId", "createdAt", "context", "manifest", "totals", "decisions", "integrity"], "决策回执");
+  const normalized = normalizeDecisions(value.decisions);
+  exactKeys(value.manifest, ["algorithm", "conflictSetHash", "conflictCount"], "决策回执冲突清单");
+  if (value.manifest.algorithm !== "SHA-256" || !SHA256.test(String(value.manifest.conflictSetHash || ""))) throw new Error("决策回执冲突清单校验无效");
+  const manifest = { algorithm: "SHA-256", conflictSetHash: value.manifest.conflictSetHash, conflictCount: nonNegativeInteger(value.manifest.conflictCount, "决策回执冲突清单数量") };
+  if (manifest.conflictCount !== normalized.conflictDecisions) throw new Error("决策回执冲突清单数量不一致");
+  const expectedManifestHash = await sha256Text(JSON.stringify(decisionManifest(normalized.decisions)));
+  if (expectedManifestHash !== manifest.conflictSetHash) throw new Error("决策回执冲突清单已被修改");
+  const content = receiptContent({
+    createdAt: isoDate(value.createdAt),
+    context: normalizeContext(value.context),
+    manifest,
+    totals: normalizeTotals(value.totals, normalized.conflictDecisions),
+    decisions: normalized.decisions,
+  });
+  exactKeys(value.integrity, ["algorithm", "digest"], "决策回执完整性封签");
+  if (value.integrity.algorithm !== "SHA-256" || !SHA256.test(String(value.integrity.digest || ""))) throw new Error("决策回执完整性封签无效");
+  const digest = await sha256Text(JSON.stringify(content));
+  if (digest !== value.integrity.digest || value.receiptId !== `decision_${digest.slice(0, 32)}`) throw new Error("决策回执完整性封签不一致，文件可能已被修改");
+  return { ...content, receiptId: value.receiptId, integrity: { algorithm: "SHA-256", digest } };
+}
+
+export async function createBackupMergeDecisionReceipt(preview, choices = {}, contextValue = {}, createdAtValue = new Date().toISOString()) {
   if (!preview?.localWorkspace || !Array.isArray(preview.entries)) throw new Error("合并预览无效");
   const unresolved = preview.conflictKeys?.filter((key) => choices[key] !== "local" && choices[key] !== "incoming") || [];
   if (unresolved.length > 0) throw new Error(`仍有 ${unresolved.length} 个合并冲突没有明确选择`);
-  const createdAt = new Date(createdAtValue).toISOString();
-  const context = {
-    baseRevisionId: String(contextValue.baseRevisionId || "").slice(0, 100),
-    localRevisionId: String(contextValue.localRevisionId || "").slice(0, 100),
-    incomingRevisionId: String(contextValue.incomingRevisionId || "").slice(0, 100),
-    sourceChecksum: String(contextValue.sourceChecksum || "").slice(0, 128),
-  };
+  const createdAt = isoDate(new Date(createdAtValue).toISOString());
+  const context = normalizeContext(contextValue);
   const decisions = preview.entries.filter((entry) => entry.kind === "conflict").map((entry) => entry.resolution === "fields" ? {
     categoryKey: entry.categoryKey,
     objectId: entry.objectId,
@@ -328,11 +521,15 @@ export function createBackupMergeDecisionReceipt(preview, choices = {}, contextV
     resolution: "object",
     choice: choices[entry.key] === "incoming" ? "incoming" : "local",
   });
-  return {
-    format: "evolve-desk.merge-decision",
-    formatVersion: 1,
+  const manifest = {
+    algorithm: "SHA-256",
+    conflictSetHash: await sha256Text(JSON.stringify(decisionManifest(decisions))),
+    conflictCount: preview.conflictCount,
+  };
+  const content = receiptContent({
     createdAt,
     context,
+    manifest,
     totals: {
       conflictDecisions: preview.conflictCount,
       autoLocalObjects: preview.autoLocalCount,
@@ -340,5 +537,57 @@ export function createBackupMergeDecisionReceipt(preview, choices = {}, contextV
       fieldMergedObjects: preview.autoFieldMergedCount,
     },
     decisions,
+  });
+  const digest = await sha256Text(JSON.stringify(content));
+  return { ...content, receiptId: `decision_${digest.slice(0, 32)}`, integrity: { algorithm: "SHA-256", digest } };
+}
+
+export function serializeBackupMergeDecisionReceipt(receipt) {
+  const serialized = `${JSON.stringify(receipt, null, 2)}\n`;
+  if (byteLength(serialized) > MAX_MERGE_DECISION_RECEIPT_BYTES) throw new Error("合并决策回执超过 512 KiB 上限");
+  return serialized;
+}
+
+export async function inspectBackupMergeDecisionReceiptText(raw) {
+  if (typeof raw !== "string" || !raw.trim() || byteLength(raw) > MAX_MERGE_DECISION_RECEIPT_BYTES) throw new Error("合并决策回执为空或超过 512 KiB 上限");
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("合并决策回执不是有效的 JSON 文件");
+  }
+  if (value?.format !== MERGE_DECISION_FORMAT) throw new Error("这不是 Evolve Desk 合并决策回执");
+  if (value.formatVersion !== 1 && value.formatVersion !== MERGE_DECISION_FORMAT_VERSION) throw new Error("合并决策回执版本不受支持");
+  const receipt = value.formatVersion === 1 ? normalizeLegacyReceipt(value) : await normalizeSealedReceipt(value);
+  const categories = new Set(receipt.decisions.map((decision) => decision.categoryKey));
+  return {
+    receipt,
+    sealed: receipt.formatVersion === MERGE_DECISION_FORMAT_VERSION,
+    digest: receipt.formatVersion === MERGE_DECISION_FORMAT_VERSION ? receipt.integrity.digest : "",
+    conflictDecisions: receipt.totals.conflictDecisions,
+    objectDecisions: receipt.decisions.length,
+    categoryCount: categories.size,
+  };
+}
+
+export async function compareBackupMergeDecisionReceiptToPreview(receipt, preview, contextValue) {
+  if (!preview?.localWorkspace || !Array.isArray(preview.entries)) throw new Error("合并预览无效");
+  const context = normalizeContext(contextValue);
+  const contextReasons = [];
+  for (const key of ["baseRevisionId", "localRevisionId", "incomingRevisionId", "sourceChecksum"]) {
+    if (receipt.context?.[key] !== context[key]) contextReasons.push(`${key} 与当前三方预览不一致`);
+  }
+  const expectedManifest = previewConflictManifest(preview);
+  const receivedManifest = decisionManifest(receipt.decisions || []);
+  const conflictSetMatches = JSON.stringify(receivedManifest) === JSON.stringify(expectedManifest);
+  const reasons = [...contextReasons];
+  if (!conflictSetMatches) reasons.push("冲突对象或字段路径与当前三方预览不一致");
+  return {
+    matches: reasons.length === 0,
+    contextMatches: contextReasons.length === 0,
+    conflictSetMatches,
+    reasons,
+    expectedConflictDecisions: preview.conflictCount,
+    receiptConflictDecisions: receipt.totals?.conflictDecisions || 0,
   };
 }
