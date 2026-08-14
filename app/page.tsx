@@ -617,11 +617,11 @@ export default function Home() {
         </aside>
       ) : activeView === "vault" ? (
         <aside className="agent-panel vault-guide-panel">
-          <header><div className="agent-glyph vault-glyph"><span>⇄</span></div><div><strong>迁移操作边界</strong><small>加密封卷 · 当前会话可撤回</small></div></header>
-          <div className="vault-guide-intro"><span>CURRENT → LOCK → PROOF → RESTORE</span><h3>离开这台设备前先封住，<br />写入新设备前先看差异。</h3><p>加密、解锁和预检都发生在当前浏览器；迁移舱不调用模型，也不会把工作台或口令上传到服务端。</p></div>
-          <ol className="vault-guide-steps"><li><i>1</i><div><strong>口令派生</strong><p>随机盐与 600,000 次 PBKDF2 生成不可导出的本地密钥。</p></div></li><li><i>2</i><div><strong>认证封卷</strong><p>AES-256-GCM 同时保护内容和版本参数。</p></div></li><li><i>3</i><div><strong>解锁预检</strong><p>先验证加密层与内层指纹，再展示对象差异。</p></div></li><li><i>4</i><div><strong>保留退路</strong><p>整体恢复前留快照，页面刷新前可一步撤回。</p></div></li></ol>
-          <div className="vault-guide-excludes"><span>永不保存或写入迁移卷</span><code>保护口令</code><code>API 密钥</code><code>Base URL</code><code>模型名称</code><code>本地视频原文件</code></div>
-          <div className="guardrail-footer"><i className="online" /><div><strong>本地加密迁移层就绪</strong><p>无需账户与模型连接</p></div></div>
+          <header><div className="agent-glyph vault-glyph"><span>⇄</span></div><div><strong>迁移与同步边界</strong><small>加密封卷 · 显式设备授权</small></div></header>
+          <div className="vault-guide-intro"><span>CURRENT → LOCK → AUTHORIZE → TRANSIT</span><h3>只让密文离开设备，<br />写入之前仍先看差异。</h3><p>封卷、配对、解锁和预检都发生在当前浏览器；传输层不调用模型，也不会自行连接账户或存储供应商。</p></div>
+          <ol className="vault-guide-steps"><li><i>1</i><div><strong>设备私钥</strong><p>ECDH 与 ECDSA 私钥不可导出，只保存在本机 IndexedDB。</p></div></li><li><i>2</i><div><strong>明确授权</strong><p>创建设备核对指纹后，才向目标设备包装同步密钥。</p></div></li><li><i>3</i><div><strong>认证密文</strong><p>AES-256-GCM 加密工作台，设备签名绑定版本头与密文。</p></div></li><li><i>4</i><div><strong>预检与退路</strong><p>解锁后展示整体差异，写入前二次确认，本次仍可撤回。</p></div></li></ol>
+          <div className="vault-guide-excludes"><span>永不进入迁移卷或同步密文</span><code>保护口令</code><code>API 密钥</code><code>Base URL</code><code>模型名称</code><code>本地视频原文件</code></div>
+          <div className="guardrail-footer"><i className="online" /><div><strong>本地加密迁移与同步层就绪</strong><p>无需账户与模型连接</p></div></div>
         </aside>
       ) : activeView === "video" ? (
         <aside className="agent-panel video-guide-panel">

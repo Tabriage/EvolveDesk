@@ -1,6 +1,8 @@
 "use client";
 
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { SyncStudio } from "./SyncStudio";
+import type { StagedSyncBackup } from "./SyncStudio";
 import {
   BACKUP_KDF_ITERATIONS,
   MAX_ENCRYPTED_BACKUP_BYTES,
@@ -25,6 +27,7 @@ import type {
   BackupSummary,
 } from "../features/backup-core.mjs";
 import { exportSourceArchive, replaceSourceArchive } from "../features/transcript-store.mjs";
+import { setSyncChannelHead } from "../features/sync-device-store.mjs";
 import type { WorkbenchState } from "../features/workbench-core.mjs";
 
 type DataVaultProps = {
@@ -41,6 +44,7 @@ type PendingBackup = {
   summary: BackupSummary;
   diff: BackupDiff;
   protected: boolean;
+  sync?: StagedSyncBackup;
 };
 
 type LockedBackup = {
@@ -54,6 +58,11 @@ type UndoSnapshot = {
   sources: BackupSources;
   restoredAt: string;
   fileName: string;
+  sync?: {
+    channelId: string;
+    headRevisionId: string;
+    lastPacketAt: string;
+  };
 };
 
 type ExportReceipt = {
@@ -140,7 +149,7 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
   const currentSummary = useMemo(() => summarizeBackup(state, localSources), [state, localSources]);
   const visibleModules = Object.entries(currentSummary.modules).filter(([, count]) => count > 0);
 
-  function stagePreview(raw: string, fileName: string, fileBytes: number, protectedBackup: boolean) {
+  function stagePreview(raw: string, fileName: string, fileBytes: number, protectedBackup: boolean, sync?: StagedSyncBackup) {
     return parseBackupText(raw).then((parsed) => {
       const diff = compareBackupStates(state, parsed.workspace);
       setPending({
@@ -152,8 +161,19 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
         summary: parsed.summary,
         diff,
         protected: protectedBackup,
+        sync,
       });
     });
+  }
+
+  async function stageSyncBackup(raw: string, fileName: string, fileBytes: number, sync: StagedSyncBackup) {
+    setPending(null);
+    setLockedBackup(null);
+    setRestoreArmed(false);
+    await stagePreview(raw, fileName, fileBytes, false, sync);
+    setMessage(sync.relation === "diverged"
+      ? "同步包通过加密与内层校验，但版本链已分叉；下方只做整体替换预览，不会自动合并。 "
+      : "同步包通过加密、来源和内层校验。当前工作台尚未被修改。 ");
   }
 
   async function exportBackup() {
@@ -279,12 +299,33 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
         throw error;
       }
       const restoredAt = new Date().toISOString();
-      setUndo({ workspace: previousWorkspace, sources: previousSources, restoredAt, fileName: pending.fileName });
+      let syncHeadSaved = true;
+      if (pending.sync) {
+        try {
+          const updated = await setSyncChannelHead(pending.sync.channelId, pending.sync.revisionId, restoredAt);
+          syncHeadSaved = Boolean(updated);
+        } catch {
+          syncHeadSaved = false;
+        }
+      }
+      setUndo({
+        workspace: previousWorkspace,
+        sources: previousSources,
+        restoredAt,
+        fileName: pending.fileName,
+        sync: pending.sync ? {
+          channelId: pending.sync.channelId,
+          headRevisionId: pending.sync.previousHeadRevisionId,
+          lastPacketAt: pending.sync.previousLastPacketAt,
+        } : undefined,
+      });
       setLocalSources(pending.sources);
       setRestoreReceipt({ fileName: pending.fileName, restoredAt, checksum: pending.envelope.checksum });
       setPending(null);
       setRestoreArmed(false);
-      setMessage("恢复完成。关闭或刷新页面前，你仍可一步撤回到恢复前状态。 ");
+      setMessage(syncHeadSaved
+        ? "恢复完成。关闭或刷新页面前，你仍可一步撤回到恢复前状态。 "
+        : "数据已恢复，但同步版本头未能写入本地密钥库；请保留原同步包并刷新后检查。 ");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "恢复失败，原工作台未被替换");
     } finally {
@@ -306,10 +347,21 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
         await replaceSourceArchive(currentSources);
         throw error;
       }
+      let syncHeadRestored = true;
+      if (undo.sync) {
+        try {
+          const updated = await setSyncChannelHead(undo.sync.channelId, undo.sync.headRevisionId, undo.sync.lastPacketAt);
+          syncHeadRestored = Boolean(updated);
+        } catch {
+          syncHeadRestored = false;
+        }
+      }
       setLocalSources(undo.sources);
       setUndo(null);
       setRestoreReceipt(null);
-      setMessage("已撤回恢复，工作台回到导入之前的完整状态。 ");
+      setMessage(syncHeadRestored
+        ? "已撤回恢复，工作台与同步版本头都回到导入之前。 "
+        : "工作台数据已撤回，但同步版本头未能恢复；请保留原文件并刷新检查。 ");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "撤回失败，当前状态保持不变");
     } finally {
@@ -394,6 +446,8 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
         </div>
       </section>
 
+      <SyncStudio state={state} sources={localSources} onStageBackup={stageSyncBackup} />
+
       {lastExport && !pending && !lockedBackup && (
         <article className={`vault-receipt export-receipt ${lastExport.protected ? "protected" : ""}`}>
           <div><span>{lastExport.protected ? "ENCRYPTED EXPORT RECEIPT" : "EXPORT RECEIPT"}</span><strong>{formatDate(lastExport.exportedAt)}</strong><small>{formatBytes(lastExport.bytes)} · {lastExport.summary.objectCount} 个对象 · {lastExport.protected ? "AES-256-GCM" : "未加密"}</small></div>
@@ -403,11 +457,18 @@ export function DataVault({ state, onRestore }: DataVaultProps) {
       )}
 
       {pending && (
-        <section className="vault-preview">
+        <section className={`vault-preview ${pending.sync ? "sync-preview" : ""}`}>
           <header>
-            <div><span>{pending.protected ? "UNLOCKED PROOF / 加密层已验证 · 未写入" : "RESTORE PROOF / 未写入"}</span><h2>{pending.fileName}</h2><p>{formatBytes(pending.fileBytes)} · 导出于 {formatDate(pending.envelope.exportedAt)} · 工作台 v{pending.envelope.workspaceVersion}</p></div>
+            <div><span>{pending.sync ? "SYNC PROOF / 同步密文已验证 · 未写入" : pending.protected ? "UNLOCKED PROOF / 加密层已验证 · 未写入" : "RESTORE PROOF / 未写入"}</span><h2>{pending.fileName}</h2><p>{formatBytes(pending.fileBytes)} · 导出于 {formatDate(pending.envelope.exportedAt)} · 工作台 v{pending.envelope.workspaceVersion}</p></div>
             <code>{pending.envelope.checksum.slice(0, 14)}…</code>
           </header>
+          {pending.sync && (
+            <div className={`sync-preview-chain ${pending.sync.relation}`}>
+              <span>{pending.sync.relation === "initial" ? "首次版本" : pending.sync.relation === "forward" ? "顺序后继" : "版本已分叉"}</span>
+              <code>{pending.sync.parentRevisionId ? `${pending.sync.parentRevisionId.slice(0, 18)}…` : "ROOT"} <i>→</i> {pending.sync.revisionId.slice(0, 18)}…</code>
+              <p>来自 <strong>{pending.sync.authorName}</strong>{pending.sync.relation === "diverged" ? "；不会自动合并，确认恢复将明确选择迁入版本。" : "；确认恢复后才更新本机版本头。"}</p>
+            </div>
+          )}
           <div className="vault-delta-total">
             <span className="added"><small>新增</small><strong>+{pending.diff.added}</strong></span>
             <span className="changed"><small>改写</small><strong>{pending.diff.changed}</strong></span>
