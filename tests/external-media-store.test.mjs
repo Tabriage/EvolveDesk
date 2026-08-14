@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { createExternalMediaFullHash } from "../app/features/external-media-hash.mjs";
-import { createExternalMediaFingerprint, createExternalMediaRecord, planExternalMediaRelocations, verifyExternalMediaFile } from "../app/features/external-media-store.mjs";
+import { createExternalMediaDuplicateReport, createExternalMediaFingerprint, createExternalMediaRecord, planExternalMediaRelocations, verifyExternalMediaFile } from "../app/features/external-media-store.mjs";
 
 function mediaFile(parts, name = "课程录像.mp4", lastModified = 1_787_120_000_000) {
   return new File(parts, name, { type: "video/mp4", lastModified });
@@ -48,6 +48,20 @@ test("full media hashing streams exact SHA-256 content across chunk boundaries",
   assert.equal(progress.length, 2);
 });
 
+test("full media hashing can wait at a chunk boundary before reading", async () => {
+  const file = mediaFile([new Uint8Array([9, 8, 7])], "暂停队列.mp4");
+  let release;
+  let progressed = false;
+  const hashing = createExternalMediaFullHash(file, () => { progressed = true; }, {
+    waitIfPaused: () => new Promise((resolve) => { release = resolve; }),
+  });
+
+  assert.equal(progressed, false);
+  release();
+  assert.equal(await hashing, createHash("sha256").update(new Uint8Array([9, 8, 7])).digest("hex"));
+  assert.equal(progressed, true);
+});
+
 test("full media hashing rejects files above the external index limit before reading", async () => {
   let sliced = false;
   const oversized = {
@@ -71,6 +85,22 @@ test("full hashing detects middle-only changes that bounded sampling intentional
 
   assert.equal(await createExternalMediaFingerprint(original), await createExternalMediaFingerprint(changed));
   assert.notEqual(await createExternalMediaFullHash(original), await createExternalMediaFullHash(changed));
+});
+
+test("duplicate reports require a complete hash and never infer from sampled evidence", () => {
+  const duplicateHash = "a".repeat(64);
+  const report = createExternalMediaDuplicateReport([
+    { sourceKey: "local-media://duplicate_first_01", name: "原文件.mp4", size: 120, fullHash: duplicateHash },
+    { sourceKey: "local-media://duplicate_second_02", name: "副本.mov", size: 120, fullHash: duplicateHash },
+    { sourceKey: "local-media://same_sample_only_03", name: "只有采样.mp4", size: 120, fingerprint: duplicateHash, fullHash: "" },
+    { sourceKey: "local-media://different_size_04", name: "不同大小.mp4", size: 121, fullHash: duplicateHash },
+  ]);
+
+  assert.equal(report.hashedRecords, 3);
+  assert.equal(report.duplicateRecords, 2);
+  assert.equal(report.groups.length, 1);
+  assert.equal(report.groups[0].size, 120);
+  assert.deepEqual(report.groups[0].records.map((record) => record.name), ["副本.mov", "原文件.mp4"]);
 });
 
 test("batch relocation uses unique sample matches and full hashes for renamed files", () => {

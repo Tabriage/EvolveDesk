@@ -122,15 +122,33 @@ function normalizeHashableFile(file) {
   return size;
 }
 
-export async function createExternalMediaFullHash(file, onProgress) {
+function abortError() {
+  const error = new Error("完整媒体哈希已取消");
+  error.name = "AbortError";
+  return error;
+}
+
+async function yieldToHost() {
+  if (typeof globalThis.scheduler?.yield === "function") {
+    await globalThis.scheduler.yield();
+    return;
+  }
+  if (typeof globalThis.setTimeout === "function") await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+}
+
+export async function createExternalMediaFullHash(file, onProgress, control = {}) {
   const size = normalizeHashableFile(file);
   const hash = new StreamingSha256();
   let processed = 0;
   for (let offset = 0; offset < size; offset += CHUNK_BYTES) {
+    if (control.signal?.aborted) throw abortError();
+    if (typeof control.waitIfPaused === "function") await control.waitIfPaused();
+    if (control.signal?.aborted) throw abortError();
     const chunk = new Uint8Array(await file.slice(offset, Math.min(size, offset + CHUNK_BYTES)).arrayBuffer());
     hash.update(chunk);
     processed += chunk.byteLength;
     if (typeof onProgress === "function") onProgress(processed, size);
+    if (processed < size) await yieldToHost();
   }
   return hash.digestHex();
 }

@@ -33,6 +33,12 @@ export type ExternalMediaRelocationResult = {
   unmatchedFiles: string[];
 };
 
+export type ExternalMediaDuplicateReport = {
+  hashedRecords: number;
+  duplicateRecords: number;
+  groups: Array<{ fullHash: string; size: number; records: Array<{ sourceKey: string; name: string }> }>;
+};
+
 export const EXTERNAL_MEDIA_INDEX_CHANGED_EVENT: "evolve-desk-external-media-changed";
 export function supportsExternalMediaHandles(): boolean;
 export function createExternalMediaFingerprint(file: File): Promise<string>;
@@ -43,7 +49,8 @@ export function listExternalMediaInfo(): Promise<ExternalMediaInfo[]>;
 export function loadExternalMediaInfo(sourceKey: string): Promise<ExternalMediaInfo | null>;
 export function scanExternalMediaIndex(validSourceKeys?: string[]): Promise<ExternalMediaHealth[]>;
 export function openExternalMediaFile(sourceKey: string): Promise<{ file: File; info: ExternalMediaInfo }>;
-export function calculateExternalMediaFullHash(sourceKey: string, onProgress?: (processedBytes: number, totalBytes: number) => void): Promise<ExternalMediaInfo>;
+export function calculateExternalMediaFullHash(sourceKey: string, onProgress?: (processedBytes: number, totalBytes: number) => void, control?: { signal?: AbortSignal; waitIfPaused?: () => Promise<void> }): Promise<ExternalMediaInfo>;
+export function createExternalMediaDuplicateReport(records: ExternalMediaInfo[]): ExternalMediaDuplicateReport;
 export function planExternalMediaRelocations(
   records: Array<Pick<ExternalMediaInfo, "sourceKey" | "name" | "size" | "lastModified" | "fingerprint" | "fullHash">>,
   candidates: Array<{ candidateId: string; name: string; size: number; lastModified: number; fingerprint: string; fullHash: string }>,

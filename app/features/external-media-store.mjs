@@ -252,7 +252,7 @@ export async function openExternalMediaFile(sourceKeyValue) {
   return { file, info: infoFromRecord(record) };
 }
 
-export async function calculateExternalMediaFullHash(sourceKeyValue, onProgress) {
+export async function calculateExternalMediaFullHash(sourceKeyValue, onProgress, control) {
   const sourceKey = normalizeSourceKey(sourceKeyValue);
   const record = await loadRecord(sourceKey);
   if (!record?.handle) throw new Error("这条本地媒体尚未绑定外部原文件");
@@ -260,7 +260,7 @@ export async function calculateExternalMediaFullHash(sourceKeyValue, onProgress)
   if (permission !== "granted" && typeof record.handle.queryPermission === "function") throw new Error("浏览器没有授予外部原文件读取权限");
   const file = await record.handle.getFile();
   if (!await verifyExternalMediaFile(record, file)) throw new Error("文件已经变化，不能把新内容的完整哈希写到旧索引");
-  const fullHash = await createExternalMediaFullHash(file, onProgress);
+  const fullHash = await createExternalMediaFullHash(file, onProgress, control);
   const fullHashAt = new Date().toISOString();
   const database = await openDatabase();
   if (!database) throw new Error("当前浏览器不支持外部媒体索引");
@@ -278,6 +278,36 @@ export async function calculateExternalMediaFullHash(sourceKeyValue, onProgress)
   } finally {
     database.close();
   }
+}
+
+export function createExternalMediaDuplicateReport(recordsValue) {
+  const records = Array.isArray(recordsValue) ? recordsValue : [];
+  const buckets = new Map();
+  const seenSourceKeys = new Set();
+  let hashedRecords = 0;
+  for (const record of records) {
+    const fullHash = normalizeHash(record?.fullHash);
+    const size = Number(record?.size);
+    if (!fullHash || !Number.isSafeInteger(size) || size < 1 || size > MAX_EXTERNAL_MEDIA_BYTES) continue;
+    const sourceKey = String(record?.sourceKey || "");
+    const name = String(record?.name || "").trim().slice(0, 255);
+    if (!/^local-media:\/\/[A-Za-z0-9._~-]{8,200}$/.test(sourceKey) || seenSourceKeys.has(sourceKey) || !name) continue;
+    seenSourceKeys.add(sourceKey);
+    hashedRecords += 1;
+    const key = `${size}:${fullHash}`;
+    const bucket = buckets.get(key) || { fullHash, size, records: [] };
+    bucket.records.push({ sourceKey, name });
+    buckets.set(key, bucket);
+  }
+  const groups = [...buckets.values()]
+    .filter((group) => group.records.length > 1)
+    .map((group) => ({ ...group, records: group.records.sort((left, right) => left.name.localeCompare(right.name, "zh-CN")) }))
+    .sort((left, right) => right.size - left.size || left.fullHash.localeCompare(right.fullHash));
+  return {
+    hashedRecords,
+    duplicateRecords: groups.reduce((total, group) => total + group.records.length, 0),
+    groups,
+  };
 }
 
 function exactRelocationMatch(record, candidate) {

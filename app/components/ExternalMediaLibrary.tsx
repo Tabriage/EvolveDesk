@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   EXTERNAL_MEDIA_INDEX_CHANGED_EVENT,
   calculateExternalMediaFullHash,
+  createExternalMediaDuplicateReport,
   listExternalMediaInfo,
   openExternalMediaFile,
   relocateExternalMediaHandles,
@@ -26,6 +27,13 @@ type FilePickerGlobal = typeof globalThis & {
     multiple?: boolean;
     types?: Array<{ description: string; accept: Record<string, string[]> }>;
   }) => Promise<FileSystemFileHandle[]>;
+};
+type HashQueueItem = {
+  sourceKey: string;
+  name: string;
+  status: "queued" | "hashing" | "done" | "failed";
+  progress: number;
+  detail: string;
 };
 
 const mediaPickerOptions = {
@@ -72,6 +80,11 @@ export function ExternalMediaLibrary({ videos }: ExternalMediaLibraryProps) {
   const [message, setMessage] = useState("索引只记录浏览器文件句柄和指纹；维护动作不会移动、改名或删除磁盘原文件。 ");
   const [progress, setProgress] = useState("");
   const [removeArmed, setRemoveArmed] = useState(false);
+  const [hashQueue, setHashQueue] = useState<HashQueueItem[]>([]);
+  const [hashQueueState, setHashQueueState] = useState<"idle" | "running" | "pausing" | "paused" | "complete">("idle");
+  const pauseRequested = useRef(false);
+  const resumeHashing = useRef<(() => void) | null>(null);
+  const hashAbortController = useRef<AbortController | null>(null);
 
   const loadIndex = useCallback(async () => {
     const infos = await listExternalMediaInfo();
@@ -96,6 +109,11 @@ export function ExternalMediaLibrary({ videos }: ExternalMediaLibraryProps) {
     };
   }, [loadIndex]);
 
+  useEffect(() => () => {
+    hashAbortController.current?.abort();
+    resumeHashing.current?.();
+  }, []);
+
   const totals = useMemo(() => ({
     ready: rows.filter((row) => row.status === "ready").length,
     attention: rows.filter((row) => ["permission", "changed", "missing", "orphaned"].includes(row.status)).length,
@@ -103,6 +121,7 @@ export function ExternalMediaLibrary({ videos }: ExternalMediaLibraryProps) {
   }), [rows]);
 
   const selectedRows = useMemo(() => rows.filter((row) => selected.has(row.sourceKey)), [rows, selected]);
+  const duplicateReport = useMemo(() => createExternalMediaDuplicateReport(rows), [rows]);
 
   function toggleSelection(sourceKey: string) {
     setSelected((current) => {
@@ -185,34 +204,86 @@ export function ExternalMediaLibrary({ videos }: ExternalMediaLibraryProps) {
 
   async function hashSelected() {
     if (!selected.size) {
-      setMessage("先选择需要建立完整 SHA-256 的可读取索引。 ");
+      setMessage("先选择需要加入完整 SHA-256 队列的可读取索引。 ");
       return;
     }
-    const hashableRows = selectedRows.filter((row) => !["changed", "missing", "orphaned"].includes(row.status));
-    const skipped = selectedRows.length - hashableRows.length;
+    const hashableRows = selectedRows.filter((row) => !row.fullHash && !["changed", "missing", "orphaned"].includes(row.status));
+    const alreadyHashed = selectedRows.filter((row) => Boolean(row.fullHash)).length;
+    const unsafe = selectedRows.length - hashableRows.length - alreadyHashed;
     if (!hashableRows.length) {
-      setMessage("所选索引都无法安全核对；请先重新定位内容变化或失效项，并移除孤立索引。 ");
+      setMessage(alreadyHashed ? "所选可读取索引都已经保存完整 SHA-256。 " : "所选索引都无法安全核对；请先重新定位内容变化或失效项，并移除孤立索引。 ");
       return;
     }
+    const controller = new AbortController();
+    hashAbortController.current = controller;
+    pauseRequested.current = false;
+    setHashQueue(hashableRows.map((row) => ({ sourceKey: row.sourceKey, name: row.name, status: "queued", progress: 0, detail: "等待分块读取" })));
+    setHashQueueState("running");
     setBusy("hash");
     setRemoveArmed(false);
+    const waitIfPaused = async () => {
+      if (!pauseRequested.current) return;
+      setHashQueueState("paused");
+      setProgress("完整哈希队列已在分块边界暂停；当前页面仍保留内存哈希状态");
+      await new Promise<void>((resolve) => { resumeHashing.current = resolve; });
+      resumeHashing.current = null;
+    };
     try {
       let completed = 0;
-      for (const row of hashableRows) {
-        await calculateExternalMediaFullHash(row.sourceKey, (processedBytes, totalBytes) => {
-          const percent = Math.round((processedBytes / totalBytes) * 100);
-          setProgress(`完整哈希 ${completed + 1}/${hashableRows.length} · ${row.name} · ${percent}%`);
-        });
-        completed += 1;
+      let failed = 0;
+      const failedSourceKeys: string[] = [];
+      for (let index = 0; index < hashableRows.length; index += 1) {
+        const row = hashableRows[index];
+        await waitIfPaused();
+        setHashQueue((current) => current.map((item) => item.sourceKey === row.sourceKey ? { ...item, status: "hashing", detail: `正在读取第 ${index + 1}/${hashableRows.length} 个文件` } : item));
+        try {
+          await calculateExternalMediaFullHash(row.sourceKey, (processedBytes, totalBytes) => {
+            const percent = Math.round((processedBytes / totalBytes) * 100);
+            setProgress(`后台哈希 ${index + 1}/${hashableRows.length} · ${row.name} · ${percent}%`);
+            setHashQueue((current) => current.map((item) => item.sourceKey === row.sourceKey ? { ...item, progress: percent, detail: `${formatBytes(processedBytes)} / ${formatBytes(totalBytes)}` } : item));
+          }, { signal: controller.signal, waitIfPaused });
+          completed += 1;
+          setHashQueue((current) => current.map((item) => item.sourceKey === row.sourceKey ? { ...item, status: "done", progress: 100, detail: "完整 SHA-256 已保存" } : item));
+        } catch (error) {
+          if (error instanceof Error && error.name === "AbortError") throw error;
+          failed += 1;
+          failedSourceKeys.push(row.sourceKey);
+          setHashQueue((current) => current.map((item) => item.sourceKey === row.sourceKey ? { ...item, status: "failed", detail: error instanceof Error ? error.message : "无法读取这份文件" } : item));
+        }
       }
+      setHashQueueState("complete");
       setRows(await scanExternalMediaIndex([...validSourceKeys]));
-      setMessage(`已为 ${completed} 条索引保存完整 SHA-256${skipped ? `；${skipped} 条不可核对索引已跳过` : ""}。哈希只覆盖文件内容，不包含名称或路径。`);
+      setSelected(new Set(failedSourceKeys));
+      setMessage(`后台队列完成：${completed} 条完整哈希已保存${failed ? `，${failed} 条失败并保留在队列回执` : ""}${unsafe ? `；${unsafe} 条不可核对索引未入队` : ""}${alreadyHashed ? `；${alreadyHashed} 条已有完整哈希未重复读取` : ""}。`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "无法计算完整媒体哈希");
+      if (!(error instanceof Error && error.name === "AbortError")) {
+        setHashQueueState("complete");
+        setMessage(error instanceof Error ? error.message : "无法计算完整媒体哈希");
+      }
     } finally {
+      pauseRequested.current = false;
+      resumeHashing.current?.();
+      resumeHashing.current = null;
+      hashAbortController.current = null;
       setBusy("");
       setProgress("");
     }
+  }
+
+  function pauseHashQueue() {
+    if (hashQueueState !== "running") return;
+    pauseRequested.current = true;
+    setHashQueueState("pausing");
+    setMessage("已请求暂停；当前 4 MiB 分块完成后停止继续读取。 ");
+  }
+
+  function resumeHashQueue() {
+    if (hashQueueState !== "paused" && hashQueueState !== "pausing") return;
+    pauseRequested.current = false;
+    setHashQueueState("running");
+    setMessage("完整哈希队列继续运行。 ");
+    resumeHashing.current?.();
+    resumeHashing.current = null;
   }
 
   async function removeSelected() {
@@ -245,10 +316,26 @@ export function ExternalMediaLibrary({ videos }: ExternalMediaLibraryProps) {
 
       <div className="media-maintenance-toolbar">
         <div><button onClick={() => void scanIndex()} disabled={Boolean(busy)}>{busy === "scan" ? "正在扫描…" : "扫描全部索引"}</button><button onClick={selectAttention} disabled={Boolean(busy) || !totals.attention}>选择待处理</button><button onClick={() => { setSelected(new Set()); setRemoveArmed(false); }} disabled={Boolean(busy) || !selected.size}>清除选择</button></div>
-        <div><button onClick={() => void relocateSelected()} disabled={Boolean(busy) || !selected.size}>{busy === "relocate" ? "正在匹配…" : "重新定位所选"}</button><button onClick={() => void hashSelected()} disabled={Boolean(busy) || !selected.size}>{busy === "hash" ? "正在计算…" : "计算完整 SHA-256"}</button><button className={removeArmed ? "armed" : "danger"} onClick={() => void removeSelected()} disabled={Boolean(busy) || !selected.size}>{busy === "remove" ? "正在移除…" : removeArmed ? "再次点击，确认移除索引" : "移除所选索引"}</button></div>
+        <div><button onClick={() => void relocateSelected()} disabled={Boolean(busy) || !selected.size}>{busy === "relocate" ? "正在匹配…" : "重新定位所选"}</button><button onClick={() => void hashSelected()} disabled={Boolean(busy) || !selected.size}>{busy === "hash" ? "队列运行中…" : "加入完整哈希队列"}</button><button className={removeArmed ? "armed" : "danger"} onClick={() => void removeSelected()} disabled={Boolean(busy) || !selected.size}>{busy === "remove" ? "正在移除…" : removeArmed ? "再次点击，确认移除索引" : "移除所选索引"}</button></div>
       </div>
 
-      <div className="media-maintenance-status" role="status"><i className={busy ? "working" : ""} /><span>{progress || message}</span><code>{selected.size} SELECTED</code></div>
+      <div className="media-maintenance-status" role="status"><i className={busy && hashQueueState !== "paused" ? "working" : ""} /><span>{progress || message}</span><code>{hashQueueState === "running" || hashQueueState === "pausing" || hashQueueState === "paused" ? hashQueueState.toUpperCase() : `${selected.size} SELECTED`}</code></div>
+
+      {hashQueue.length > 0 && (
+        <section className={`media-hash-queue ${hashQueueState}`}>
+          <header><div><span>HASH QUEUE / 当前页面</span><h3>分块完整哈希队列</h3></div><strong>{hashQueue.filter((item) => item.status === "done").length}/{hashQueue.length} 完成</strong><div>{hashQueueState === "running" ? <button onClick={pauseHashQueue}>在分块边界暂停</button> : hashQueueState === "paused" || hashQueueState === "pausing" ? <button onClick={resumeHashQueue}>{hashQueueState === "pausing" ? "取消暂停请求" : "继续队列"}</button> : <button onClick={() => { setHashQueue([]); setHashQueueState("idle"); }}>清除队列回执</button>}</div></header>
+          <div>{hashQueue.map((item, index) => <article key={item.sourceKey} className={item.status}><i>{String(index + 1).padStart(2, "0")}</i><span><strong>{item.name}</strong><small>{item.detail}</small></span><div><b style={{ width: `${item.progress}%` }} /></div><code>{item.status === "queued" ? "WAIT" : item.status === "hashing" ? `${item.progress}%` : item.status === "done" ? "SHA ✓" : "FAILED"}</code></article>)}</div>
+          <footer>暂停只保留当前页面内存中的 SHA-256 中间状态；刷新、关闭页面或句柄变化后，未完成文件会从头重新计算。</footer>
+        </section>
+      )}
+
+      {duplicateReport.hashedRecords > 0 && (
+        <section className={`media-duplicate-report ${duplicateReport.groups.length ? "has-duplicates" : "clear"}`}>
+          <header><div><span>DUPLICATE CONTENT REPORT / 只读</span><h3>{duplicateReport.groups.length ? `发现 ${duplicateReport.groups.length} 组完整内容相同` : "已哈希内容未发现重复组"}</h3><p>只有文件大小和完整 SHA-256 同时一致才进入报告；名称、路径和采样指纹不参与判重。</p></div><div><span><small>已有完整哈希</small><strong>{duplicateReport.hashedRecords}</strong></span><span><small>重复组</small><strong>{duplicateReport.groups.length}</strong></span><span><small>组内记录</small><strong>{duplicateReport.duplicateRecords}</strong></span></div></header>
+          {duplicateReport.groups.length > 0 && <div className="duplicate-content-groups">{duplicateReport.groups.map((group, index) => <article key={`${group.size}:${group.fullHash}`}><header><i>{String(index + 1).padStart(2, "0")}</i><span><strong>{formatBytes(group.size)} · {group.records.length} 条索引</strong><code>{group.fullHash.slice(0, 20)}…{group.fullHash.slice(-10)}</code></span></header><div>{group.records.map((record) => <span key={record.sourceKey}><strong>{record.name}</strong><small>{videoBySource.get(record.sourceKey)?.title || "已删除的本地来源"}</small></span>)}</div></article>)}</div>}
+          <footer><i>!</i><span><strong>报告不执行清理，也不推荐删除哪一份。</strong>不同索引可能是有意保留的副本；如需处理，请先在磁盘中人工确认用途和备份。</span></footer>
+        </section>
+      )}
 
       {rows.length ? (
         <div className="external-media-ledger">
@@ -268,7 +355,7 @@ export function ExternalMediaLibrary({ videos }: ExternalMediaLibraryProps) {
         <div className="external-media-empty"><i>⌁</i><span><strong>还没有外部原文件索引</strong><p>用上方“选择并保留外部索引”导入本地媒体后，这里会显示句柄健康和两级指纹证据。</p></span></div>
       )}
 
-      <footer><i />完整 SHA-256 以 4 MiB 分块读取，避免一次载入整份媒体；索引、句柄和哈希只留在独立 IndexedDB，不进入工作台、迁移卷、同步包或模型请求。</footer>
+      <footer><i />完整 SHA-256 以 4 MiB 分块读取并在块间让出主线程；索引、句柄、队列结果和哈希只留在当前浏览器，不进入工作台、迁移卷、同步包或模型请求。</footer>
     </section>
   );
 }
