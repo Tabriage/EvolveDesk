@@ -27,6 +27,7 @@ import type {
   SyncIdentity,
   SyncRevisionRelation,
 } from "../features/sync-core.mjs";
+import { createHttpSyncTransport } from "../features/sync-remote-transport.mjs";
 import {
   SYNC_CHANNELS_CHANGED_EVENT,
   listSyncChannels,
@@ -67,6 +68,12 @@ type IncomingReceipt = {
   relation: SyncRevisionRelation;
   revisionId: string;
   mergeAvailable: boolean;
+};
+
+type RemoteProof = {
+  exists: boolean;
+  revisionId: string;
+  validator: string;
 };
 
 const relationLabels: Record<SyncRevisionRelation, string> = {
@@ -120,12 +127,21 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   const [pairing, setPairing] = useState<PairingRequest | null>(null);
   const [pendingGrant, setPendingGrant] = useState<DeviceGrant | null>(null);
   const [incoming, setIncoming] = useState<IncomingReceipt | null>(null);
+  const [remoteObjectUrl, setRemoteObjectUrl] = useState("");
+  const [remoteToken, setRemoteToken] = useState("");
+  const [remoteProof, setRemoteProof] = useState<RemoteProof | null>(null);
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("先确认这台设备的指纹；授权和传输都只在你明确操作时发生。 ");
 
   const selectedChannel = useMemo(
     () => channels.find((channel) => channel.channelId === selectedChannelId) || null,
     [channels, selectedChannelId],
+  );
+
+  const remotePublishReady = Boolean(
+    selectedChannel
+    && remoteProof
+    && (!remoteProof.exists || (remoteProof.revisionId === selectedChannel.headRevisionId && remoteProof.validator)),
   );
 
   useEffect(() => {
@@ -157,7 +173,23 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
 
   function replaceChannel(channel: SyncChannel) {
     setChannels((current) => [...current.filter((item) => item.channelId !== channel.channelId), channel]);
+    if (channel.channelId !== selectedChannelId) setRemoteProof(null);
     setSelectedChannelId(channel.channelId);
+  }
+
+  function selectChannel(channelId: string) {
+    setSelectedChannelId(channelId);
+    setRemoteProof(null);
+  }
+
+  function changeRemoteObjectUrl(value: string) {
+    setRemoteObjectUrl(value);
+    setRemoteProof(null);
+  }
+
+  function changeRemoteToken(value: string) {
+    setRemoteToken(value);
+    setRemoteProof(null);
   }
 
   async function renameDevice() {
@@ -308,52 +340,114 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
     }
   }
 
+  async function stagePacket(raw: string, fileName: string, fileBytes: number) {
+    setIncoming(null);
+    const packet = inspectSyncPacketText(raw);
+    const channel = channels.find((item) => item.channelId === packet.channelId);
+    if (!channel) throw new Error("当前设备尚未加入这个同步空间，不能解锁该同步包");
+    const opened = await decryptSyncPacket(packet, channel);
+    if (opened.relation === "duplicate") throw new Error("这个同步版本已经是当前版本，无需重复恢复");
+    let mergeBase: StagedSyncMergeBase | undefined;
+    if (opened.relation === "diverged" && packet.parentRevisionId) {
+      const baseRaw = await getSyncRevisionPacket(channel.channelId, packet.parentRevisionId);
+      if (baseRaw) {
+        const basePacket = inspectSyncPacketText(baseRaw);
+        const baseOpened = await decryptSyncPacket(basePacket, channel);
+        mergeBase = { workspace: baseOpened.parsed.workspace, sources: baseOpened.parsed.sources };
+      }
+    }
+    try {
+      await saveSyncRevisionPacket(raw);
+    } catch {
+      // The packet can still be previewed and restored when browser quota cannot retain history.
+    }
+    await onStageBackup(opened.backupText, fileName, fileBytes, {
+      channelId: channel.channelId,
+      revisionId: packet.revisionId,
+      parentRevisionId: packet.parentRevisionId,
+      authorName: opened.author.name,
+      relation: opened.relation,
+      previousHeadRevisionId: channel.headRevisionId,
+      previousLastPacketAt: channel.lastPacketAt,
+      previousMergeParentRevisionIds: channel.mergeParentRevisionIds || [],
+    }, mergeBase);
+    replaceChannel(channel);
+    setIncoming({ fileName, authorName: opened.author.name, relation: opened.relation, revisionId: packet.revisionId, mergeAvailable: Boolean(mergeBase) });
+    setMessage(opened.relation === "diverged"
+      ? mergeBase
+        ? "同步包已解锁，并找到共同父版本；下方可以逐对象审阅三方合并。 "
+        : "同步包已解锁，但缺少共同父版本；下方只展示整体替换预检，不会猜测合并。 "
+      : "同步包已解锁并送入恢复预检；再次确认前，当前工作台没有变化。 ");
+  }
+
   async function readPacket(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
     setBusy("packet");
-    setIncoming(null);
     try {
-      const raw = await readJsonFile(file, MAX_SYNC_PACKET_BYTES, "加密同步包");
-      const packet = inspectSyncPacketText(raw);
-      const channel = channels.find((item) => item.channelId === packet.channelId);
-      if (!channel) throw new Error("当前设备尚未加入这个同步空间，不能解锁该同步包");
-      const opened = await decryptSyncPacket(packet, channel);
-      if (opened.relation === "duplicate") throw new Error("这个同步版本已经是当前版本，无需重复恢复");
-      let mergeBase: StagedSyncMergeBase | undefined;
-      if (opened.relation === "diverged" && packet.parentRevisionId) {
-        const baseRaw = await getSyncRevisionPacket(channel.channelId, packet.parentRevisionId);
-        if (baseRaw) {
-          const basePacket = inspectSyncPacketText(baseRaw);
-          const baseOpened = await decryptSyncPacket(basePacket, channel);
-          mergeBase = { workspace: baseOpened.parsed.workspace, sources: baseOpened.parsed.sources };
-        }
-      }
-      try {
-        await saveSyncRevisionPacket(raw);
-      } catch {
-        // The packet can still be previewed and restored when browser quota cannot retain history.
-      }
-      await onStageBackup(opened.backupText, file.name, file.size, {
-        channelId: channel.channelId,
-        revisionId: packet.revisionId,
-        parentRevisionId: packet.parentRevisionId,
-        authorName: opened.author.name,
-        relation: opened.relation,
-        previousHeadRevisionId: channel.headRevisionId,
-        previousLastPacketAt: channel.lastPacketAt,
-        previousMergeParentRevisionIds: channel.mergeParentRevisionIds || [],
-      }, mergeBase);
-      replaceChannel(channel);
-      setIncoming({ fileName: file.name, authorName: opened.author.name, relation: opened.relation, revisionId: packet.revisionId, mergeAvailable: Boolean(mergeBase) });
-      setMessage(opened.relation === "diverged"
-        ? mergeBase
-          ? "同步包已解锁，并找到共同父版本；下方可以逐对象审阅三方合并。 "
-          : "同步包已解锁，但缺少共同父版本；下方只展示整体替换预检，不会猜测合并。 "
-        : "同步包已解锁并送入恢复预检；再次确认前，当前工作台没有变化。 ");
+      await stagePacket(await readJsonFile(file, MAX_SYNC_PACKET_BYTES, "加密同步包"), file.name, file.size);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "无法读取加密同步包");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function inspectRemoteObject() {
+    if (!selectedChannel) return;
+    setBusy("remote-read");
+    try {
+      const transport = createHttpSyncTransport({ objectUrl: remoteObjectUrl, bearerToken: remoteToken });
+      const result = await transport.read(selectedChannel.channelId);
+      setRemoteProof({ exists: result.exists, revisionId: result.revisionId, validator: result.validator });
+      if (!result.exists) {
+        setMessage("远端对象当前为空；下一次条件发布会使用 If-None-Match，防止抢占已有对象。 ");
+        return;
+      }
+      if (result.revisionId === selectedChannel.headRevisionId) {
+        setMessage(result.validator
+          ? "远端版本与本机版本头一致，并提供强 ETag；可以安全条件发布下一版。 "
+          : "远端版本与本机一致，但服务器没有提供强 ETag；这里只允许读取，不允许覆盖写入。 ");
+        return;
+      }
+      if (!result.packetText) throw new Error("远端对象没有可读取的同步包");
+      await stagePacket(result.packetText, "远端条件对象", new TextEncoder().encode(result.packetText).byteLength);
+    } catch (error) {
+      setRemoteProof(null);
+      setMessage(error instanceof Error ? error.message : "无法检查远端条件对象");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function publishRemoteObject() {
+    if (!identity || !selectedChannel || !remoteProof) return;
+    setBusy("remote-write");
+    try {
+      const transport = createHttpSyncTransport({ objectUrl: remoteObjectUrl, bearerToken: remoteToken });
+      const packetChannel = remoteProof.exists ? selectedChannel : { ...selectedChannel, headRevisionId: "", mergeParentRevisionIds: [] };
+      const backup = await createBackupEnvelope(state, sources);
+      const packet = await createSyncPacket(serializeBackupEnvelope(backup), packetChannel, identity);
+      const serialized = serializeSyncPacket(packet);
+      const result = await transport.write(selectedChannel.channelId, remoteProof.revisionId, serialized);
+      if (!result.written) {
+        setRemoteProof({ exists: Boolean(result.currentRevisionId), revisionId: result.currentRevisionId, validator: result.validator });
+        setMessage("条件写入被远端拒绝：其他设备已先发布新版本。没有覆盖远端内容，请先重新检查并审阅。 ");
+        return;
+      }
+      try {
+        await saveSyncRevisionPacket(serialized);
+      } catch {
+        // Publishing succeeded even when the optional local encrypted history cannot be retained.
+      }
+      const updated = await setSyncChannelHead(selectedChannel.channelId, packet.revisionId, packet.createdAt);
+      if (updated) replaceChannel(updated);
+      setRemoteProof({ exists: true, revisionId: packet.revisionId, validator: result.validator });
+      setIncoming(null);
+      setMessage("加密同步包已通过条件写入发布，并经回读确认；访问令牌仍只在当前页面内存。 ");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "无法条件发布远端同步包");
     } finally {
       setBusy("");
     }
@@ -375,7 +469,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       </article>
 
       <div className="sync-channel-bar">
-        <label><span>当前同步空间</span><select value={selectedChannelId} onChange={(event) => setSelectedChannelId(event.target.value)} disabled={Boolean(busy)}><option value="">尚未加入</option>{channels.map((channel) => <option key={channel.channelId} value={channel.channelId}>{channel.label} · {channel.role === "owner" ? "创建设备" : "已授权设备"}</option>)}</select></label>
+        <label><span>当前同步空间</span><select value={selectedChannelId} onChange={(event) => selectChannel(event.target.value)} disabled={Boolean(busy)}><option value="">尚未加入</option>{channels.map((channel) => <option key={channel.channelId} value={channel.channelId}>{channel.label} · {channel.role === "owner" ? "创建设备" : "已授权设备"}</option>)}</select></label>
         <div><span>版本头</span><code>{selectedChannel?.headRevisionId ? `${selectedChannel.headRevisionId.slice(0, 19)}…` : "尚无本地版本"}</code></div>
         <div><span>已知设备</span><strong>{selectedChannel?.authorizedDevices.length || 0}</strong></div>
       </div>
@@ -405,6 +499,16 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
           <input ref={packetInput} type="file" accept="application/json,.json" onChange={readPacket} hidden />
         </article>
       </div>
+
+      <article className="remote-transport-console">
+        <header><div><span>REMOTE ADAPTER / 显式远端传输</span><h3>一个对象地址，一条不可盲写的版本线。</h3></div><strong>{remoteProof ? remoteProof.exists ? remoteProof.validator ? "ETAG READY" : "READ ONLY" : "EMPTY SLOT" : "DISCONNECTED"}</strong></header>
+        <div className="remote-transport-fields">
+          <label><span>同步包对象 URL</span><input type="url" value={remoteObjectUrl} onChange={(event) => changeRemoteObjectUrl(event.target.value)} placeholder="https://storage.example/evolve-sync.json" disabled={Boolean(busy)} /></label>
+          <label><span>Bearer 访问令牌（可选）</span><input type="password" value={remoteToken} onChange={(event) => changeRemoteToken(event.target.value)} placeholder="仅保留在当前页面内存" autoComplete="off" disabled={Boolean(busy)} /></label>
+          <div><span>远端版本证据</span><code>{remoteProof?.revisionId ? `${remoteProof.revisionId.slice(0, 22)}…` : remoteProof ? "尚无远端对象" : "需要手动连接检查"}</code><small>{remoteProof?.validator || "未取得强 ETag"}</small></div>
+        </div>
+        <footer><p><i />只会传输已经加密和签名的同步包；GET/PUT 均需当前用户点击。远端必须支持 CORS、强 ETag 与 HTTP 条件请求。</p><div><button onClick={() => void inspectRemoteObject()} disabled={!selectedChannel || !remoteObjectUrl.trim() || Boolean(busy)}>{busy === "remote-read" ? "正在检查…" : "连接并检查"}</button><button onClick={() => void publishRemoteObject()} disabled={!identity || !remotePublishReady || Boolean(busy)}>{busy === "remote-write" ? "正在条件发布…" : "条件发布密文"}<span>↗</span></button></div></footer>
+      </article>
 
       {pairing && (
         <article className="pairing-proof">

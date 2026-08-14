@@ -78,11 +78,23 @@ export type SyncPacket = {
 };
 
 export type SyncRevisionRelation = "initial" | "duplicate" | "forward" | "diverged";
+export type SyncTransportReadResult = {
+  exists: boolean;
+  packetText: string | null;
+  revisionId: string;
+  validator: string;
+};
+export type SyncTransportWriteResult = {
+  written: boolean;
+  conflict: boolean;
+  currentRevisionId: string;
+  validator: string;
+};
 export type SyncTransportAdapter = {
   id: string;
   label: string;
-  read(channelId: string): Promise<string | null>;
-  write(channelId: string, expectedRevisionId: string, packetText: string): Promise<{ written: boolean; currentRevisionId: string }>;
+  read(channelId: string): Promise<SyncTransportReadResult>;
+  write(channelId: string, expectedRevisionId: string, packetText: string): Promise<SyncTransportWriteResult>;
 };
 
 export function formatDeviceFingerprint(value: string): string;
