@@ -170,6 +170,7 @@ export function acceptSyncRotation(rotation: SyncRotation, channel: SyncChannel,
 export function createSyncRecoveryKit(channel: SyncChannel, identity: SyncIdentity, passphrase: string, createdAt?: string): Promise<SyncRecoveryKit>;
 export function serializeSyncRecoveryKit(value: SyncRecoveryKit): string;
 export function inspectSyncRecoveryKitText(raw: string): Promise<SyncRecoveryKit>;
+export function verifySyncRecoveryDrill(recovery: SyncRecoveryKit, passphrase: string, packetText: string, drilledAt?: string): Promise<import("./recovery-maintenance.mjs").SyncRecoveryDrillReceipt>;
 export function recoverSyncOwnership(recovery: SyncRecoveryKit, passphrase: string, identity: SyncIdentity, packetText: string, recoveredAt?: string): Promise<{
   transfer: SyncOwnershipTransfer;
   retiredChannel: SyncChannel;

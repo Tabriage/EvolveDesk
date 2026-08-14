@@ -28,6 +28,7 @@ import {
   serializeSyncOwnershipTransfer,
   serializeSyncRecoveryKit,
   serializeSyncRotation,
+  verifySyncRecoveryDrill,
 } from "../app/features/sync-core.mjs";
 import { addTask, createInitialWorkbench } from "../app/features/workbench-core.mjs";
 
@@ -232,6 +233,7 @@ test("an owner-authorized recovery kit migrates ownership and rotates the channe
   const recovery = await createSyncRecoveryKit(channelAtHead, owner, "correct horse battery staple", "2026-08-16T08:02:00.000Z");
   const recoveryText = serializeSyncRecoveryKit(recovery);
   const inspectedRecovery = await inspectSyncRecoveryKitText(recoveryText);
+  const drill = await verifySyncRecoveryDrill(inspectedRecovery, "correct horse battery staple", serializeSyncPacket(packet), "2026-08-16T08:03:00.000Z");
   const replacement = await createSyncIdentity("接任设备", "2026-08-16T08:03:00.000Z");
   const result = await recoverSyncOwnership(inspectedRecovery, "correct horse battery staple", replacement, serializeSyncPacket(packet), "2026-08-16T08:04:00.000Z");
   const newSecret = Buffer.from(await crypto.subtle.exportKey("raw", result.nextChannel.key)).toString("base64");
@@ -242,6 +244,12 @@ test("an owner-authorized recovery kit migrates ownership and rotates the channe
 
   assert.equal(recoveryText.includes(oldSecret), false);
   assert.equal(recoveryText.includes("离线恢复后的真实工作台"), false);
+  assert.equal(JSON.stringify(drill).includes("离线恢复后的真实工作台"), false);
+  assert.equal(drill.recoveryId, recovery.delegation.recoveryId);
+  assert.equal(drill.packetRevisionId, packet.revisionId);
+  assert.equal(drill.securityProfileHash.length, 64);
+  assert.equal(drill.authorizedDeviceCount, 2);
+  assert.equal(ownerChannel.retiredAt, "");
   assert.notEqual(oldSecret, newSecret);
   assert.equal(transferText.includes(oldSecret), false);
   assert.equal(transferText.includes(newSecret), false);
@@ -276,6 +284,7 @@ test("recovery rejects wrong passwords, stale packets, original-owner reuse, and
   const replacement = await createSyncIdentity("恢复设备", "2026-08-16T09:03:00.000Z");
 
   await assert.rejects(createSyncRecoveryKit(memberChannel, member, "a sufficiently long recovery passphrase", "2026-08-16T09:02:30.000Z"), /创建设备/);
+  await assert.rejects(verifySyncRecoveryDrill(recovery, "this is the wrong passphrase", serializeSyncPacket(currentPacket), "2026-08-16T09:04:00.000Z"), /口令不正确/);
   await assert.rejects(recoverSyncOwnership(recovery, "this is the wrong passphrase", replacement, serializeSyncPacket(currentPacket), "2026-08-16T09:04:00.000Z"), /口令不正确/);
   await assert.rejects(recoverSyncOwnership(recovery, "a sufficiently long recovery passphrase", replacement, serializeSyncPacket(stalePacket), "2026-08-16T09:04:00.000Z"), /拒绝回退恢复/);
   await assert.rejects(recoverSyncOwnership(recovery, "a sufficiently long recovery passphrase", owner, serializeSyncPacket(currentPacket), "2026-08-16T09:04:00.000Z"), /仍在使用/);

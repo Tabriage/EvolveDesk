@@ -1,16 +1,25 @@
 import { createSyncIdentity, inspectSyncPacketText } from "./sync-core.mjs";
+import { normalizeSyncRecoveryMaintenanceRecord } from "./recovery-maintenance.mjs";
 
 const DATABASE_NAME = "evolve-desk-sync";
-const DATABASE_VERSION = 2;
+const DATABASE_VERSION = 3;
 const IDENTITY_STORE = "identity";
 const CHANNEL_STORE = "channels";
 const REVISION_STORE = "revisions";
+const RECOVERY_MAINTENANCE_STORE = "recoveryMaintenance";
 const MAX_REVISIONS_PER_CHANNEL = 4;
 export const SYNC_CHANNELS_CHANGED_EVENT = "evolve-desk-sync-channels-changed";
+export const SYNC_RECOVERY_MAINTENANCE_CHANGED_EVENT = "evolve-desk-sync-recovery-maintenance-changed";
 
 function notifyChannelsChanged() {
   if (typeof globalThis.dispatchEvent === "function" && typeof globalThis.Event === "function") {
     globalThis.dispatchEvent(new globalThis.Event(SYNC_CHANNELS_CHANGED_EVENT));
+  }
+}
+
+function notifyRecoveryMaintenanceChanged() {
+  if (typeof globalThis.dispatchEvent === "function" && typeof globalThis.Event === "function") {
+    globalThis.dispatchEvent(new globalThis.Event(SYNC_RECOVERY_MAINTENANCE_CHANGED_EVENT));
   }
 }
 
@@ -40,6 +49,7 @@ async function openDatabase() {
       const revisions = database.createObjectStore(REVISION_STORE, { keyPath: "key" });
       revisions.createIndex("channelId", "channelId", { unique: false });
     }
+    if (!database.objectStoreNames.contains(RECOVERY_MAINTENANCE_STORE)) database.createObjectStore(RECOVERY_MAINTENANCE_STORE, { keyPath: "channelId" });
   };
   return requestResult(request);
 }
@@ -56,11 +66,12 @@ export async function loadOrCreateSyncIdentity(name = "这台设备") {
       return { device: existing.device, exchangePrivateKey: existing.exchangePrivateKey, signingPrivateKey: existing.signingPrivateKey };
     }
     const identity = await createSyncIdentity(name);
-    const write = database.transaction([IDENTITY_STORE, CHANNEL_STORE, REVISION_STORE], "readwrite");
+    const write = database.transaction([IDENTITY_STORE, CHANNEL_STORE, REVISION_STORE, RECOVERY_MAINTENANCE_STORE], "readwrite");
     const writeDone = transactionDone(write);
     write.objectStore(IDENTITY_STORE).put({ id: "local", cryptoVersion: 2, ...identity });
     write.objectStore(CHANNEL_STORE).clear();
     write.objectStore(REVISION_STORE).clear();
+    write.objectStore(RECOVERY_MAINTENANCE_STORE).clear();
     await writeDone;
     return identity;
   } finally {
@@ -203,6 +214,38 @@ export async function getSyncRevisionPacket(channelId, revisionId) {
     const record = await requestResult(transaction.objectStore(REVISION_STORE).get(`${channel}:${revision}`));
     await done;
     return typeof record?.packetText === "string" ? record.packetText : null;
+  } finally {
+    database.close();
+  }
+}
+
+export async function loadSyncRecoveryMaintenance(channelIdValue) {
+  const channelId = String(channelIdValue || "").trim();
+  if (!channelId) return null;
+  const database = await openDatabase();
+  if (!database) return null;
+  try {
+    const transaction = database.transaction(RECOVERY_MAINTENANCE_STORE, "readonly");
+    const done = transactionDone(transaction);
+    const record = await requestResult(transaction.objectStore(RECOVERY_MAINTENANCE_STORE).get(channelId));
+    await done;
+    return record ? normalizeSyncRecoveryMaintenanceRecord(record) : null;
+  } finally {
+    database.close();
+  }
+}
+
+export async function saveSyncRecoveryMaintenance(recordValue) {
+  const record = normalizeSyncRecoveryMaintenanceRecord(recordValue);
+  const database = await openDatabase();
+  if (!database) throw new Error("当前浏览器不支持恢复维护回执");
+  try {
+    const transaction = database.transaction(RECOVERY_MAINTENANCE_STORE, "readwrite");
+    const done = transactionDone(transaction);
+    transaction.objectStore(RECOVERY_MAINTENANCE_STORE).put(record);
+    await done;
+    notifyRecoveryMaintenanceChanged();
+    return record;
   } finally {
     database.close();
   }

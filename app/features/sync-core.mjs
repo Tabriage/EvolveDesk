@@ -6,6 +6,7 @@ import {
   sha256Text,
 } from "./backup-core.mjs";
 import { BACKUP_KDF_ITERATIONS, validateBackupPassphrase } from "./backup-crypto.mjs";
+import { createSyncRecoverySecurityProfile } from "./recovery-maintenance.mjs";
 
 export const SYNC_PAIRING_FORMAT = "evolve-desk.sync-pairing";
 export const SYNC_GRANT_FORMAT = "evolve-desk.sync-grant";
@@ -851,18 +852,15 @@ async function validateSyncOwnershipTransfer(value) {
   return { ...content, proof };
 }
 
-export async function recoverSyncOwnership(recoveryValue, passphraseValue, identity, packetText, recoveredAtValue = new Date().toISOString()) {
-  const unlocked = await unlockSyncRecoveryKit(recoveryValue, passphraseValue);
-  const nextOwner = await normalizePublicDevice(identity?.device);
-  const previousOwner = unlocked.envelope.delegation.owner;
-  if (nextOwner.deviceId === previousOwner.deviceId || nextOwner.fingerprint === previousOwner.fingerprint) throw new Error("原创建设备仍在使用时不应执行所有权恢复");
-  const recoveredAt = isoDate(recoveredAtValue);
-  if (!recoveredAt || new Date(recoveredAt).getTime() < new Date(unlocked.envelope.delegation.createdAt).getTime()) throw new Error("所有权恢复时间无效");
+async function openUnlockedRecoveryEvidence(unlocked, packetText, verifiedAtValue) {
+  const verifiedAt = isoDate(verifiedAtValue);
+  if (!verifiedAt || new Date(verifiedAt).getTime() < new Date(unlocked.envelope.delegation.createdAt).getTime()) throw new Error("所有权恢复验证时间无效");
   if (typeof packetText !== "string" || !packetText.trim() || byteLength(packetText) > MAX_SYNC_PACKET_BYTES) throw new Error("所有权恢复需要一份旧空间的加密同步包");
   const packet = inspectSyncPacketText(packetText);
   const channelInfo = unlocked.envelope.delegation.channel;
+  const previousOwner = unlocked.envelope.delegation.owner;
   if (packet.channelId !== channelInfo.channelId) throw new Error("加密同步包不属于恢复材料绑定的旧空间");
-  if (new Date(packet.createdAt).getTime() > new Date(recoveredAt).getTime()) throw new Error("加密同步包时间晚于本次恢复时间");
+  if (new Date(packet.createdAt).getTime() > new Date(verifiedAt).getTime()) throw new Error("加密同步包时间晚于本次恢复验证时间");
   if (packet.revisionId !== channelInfo.headRevisionId && new Date(packet.createdAt).getTime() < new Date(unlocked.envelope.delegation.createdAt).getTime()) {
     throw new Error("加密同步包早于恢复材料且不是其绑定版本，拒绝回退恢复");
   }
@@ -884,6 +882,36 @@ export async function recoverSyncOwnership(recoveryValue, passphraseValue, ident
     mergeParentRevisionIds: [],
   };
   const recovered = await decryptSyncPacket(packet, oldChannel);
+  return { unlocked, verifiedAt, packet, channelInfo, oldChannel, recovered };
+}
+
+export async function verifySyncRecoveryDrill(recoveryValue, passphraseValue, packetText, drilledAtValue = new Date().toISOString()) {
+  const unlocked = await unlockSyncRecoveryKit(recoveryValue, passphraseValue);
+  const evidence = await openUnlockedRecoveryEvidence(unlocked, packetText, drilledAtValue);
+  const profile = await createSyncRecoverySecurityProfile(unlocked);
+  return {
+    recoveryId: unlocked.envelope.delegation.recoveryId,
+    channelId: evidence.channelInfo.channelId,
+    generation: evidence.channelInfo.generation,
+    drilledAt: evidence.verifiedAt,
+    packetRevisionId: evidence.packet.revisionId,
+    packetCreatedAt: evidence.packet.createdAt,
+    packetAuthorFingerprint: evidence.recovered.author.fingerprint,
+    workspaceVersion: evidence.recovered.parsed.envelope.workspaceVersion,
+    securityProfileHash: profile.hash,
+    authorizedDeviceCount: profile.authorizedDeviceCount,
+    revokedDeviceCount: profile.revokedDeviceCount,
+  };
+}
+
+export async function recoverSyncOwnership(recoveryValue, passphraseValue, identity, packetText, recoveredAtValue = new Date().toISOString()) {
+  const unlocked = await unlockSyncRecoveryKit(recoveryValue, passphraseValue);
+  const nextOwner = await normalizePublicDevice(identity?.device);
+  const previousOwner = unlocked.envelope.delegation.owner;
+  if (nextOwner.deviceId === previousOwner.deviceId || nextOwner.fingerprint === previousOwner.fingerprint) throw new Error("原创建设备仍在使用时不应执行所有权恢复");
+  const evidence = await openUnlockedRecoveryEvidence(unlocked, packetText, recoveredAtValue);
+  const { channelInfo, oldChannel, packet, recovered } = evidence;
+  const recoveredAt = evidence.verifiedAt;
   const nextChannel = await createSyncChannel(identity, channelInfo.label, recoveredAt);
   nextChannel.generation = channelInfo.generation + 1;
   nextChannel.previousChannelId = channelInfo.channelId;

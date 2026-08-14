@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, Dispatch, SetStateAction, useRef, useState } from "react";
+import { ChangeEvent, Dispatch, SetStateAction, useEffect, useRef, useState } from "react";
 import {
   MAX_SYNC_CONTROL_BYTES,
   MAX_SYNC_PACKET_BYTES,
@@ -15,9 +15,25 @@ import {
   recoverSyncOwnership,
   serializeSyncOwnershipTransfer,
   serializeSyncRecoveryKit,
+  verifySyncRecoveryDrill,
 } from "../features/sync-core.mjs";
 import type { SyncChannel, SyncIdentity, SyncRecoveryKit, SyncRevisionRelation } from "../features/sync-core.mjs";
-import { saveRotatedSyncChannels, saveSyncChannel } from "../features/sync-device-store.mjs";
+import {
+  SYNC_RECOVERY_MAINTENANCE_CHANGED_EVENT,
+  loadSyncRecoveryMaintenance,
+  saveRotatedSyncChannels,
+  saveSyncChannel,
+  saveSyncRecoveryMaintenance,
+} from "../features/sync-device-store.mjs";
+import {
+  assessSyncRecoveryMaintenance,
+  createSyncRecoveryMaintenanceRecord,
+  createSyncRecoverySecurityProfile,
+  recordSyncRecoveryDrill,
+  setSyncRecoveryMaintenanceConfirmation,
+  shouldTrackSyncRecoveryKit,
+} from "../features/recovery-maintenance.mjs";
+import type { SyncRecoveryDrillReceipt, SyncRecoveryMaintenanceAssessment, SyncRecoveryMaintenanceRecord } from "../features/recovery-maintenance.mjs";
 import type { BackupSources } from "../features/backup-core.mjs";
 import type { WorkbenchState } from "../features/workbench-core.mjs";
 
@@ -52,6 +68,15 @@ type RecoveryPacket = {
 };
 
 type RecoveryCandidate = Awaited<ReturnType<typeof recoverSyncOwnership>>;
+
+const maintenanceStatusLabels: Record<SyncRecoveryMaintenanceAssessment["status"], string> = {
+  missing: "NO KIT RECEIPT",
+  replace: "REPLACE KIT",
+  "drill-due": "DRILL DUE",
+  "packet-refresh": "PACKET BEHIND",
+  "storage-action": "STORAGE CHECK",
+  ready: "SEAL CURRENT",
+};
 
 function fileStamp(date = new Date()) {
   return date.toISOString().replace(/[-:]/g, "").slice(0, 13);
@@ -98,8 +123,49 @@ export function SyncRecoveryConsole({
   const [recoveryPacket, setRecoveryPacket] = useState<RecoveryPacket | null>(null);
   const [recoveryPassphrase, setRecoveryPassphrase] = useState("");
   const [candidate, setCandidate] = useState<RecoveryCandidate | null>(null);
+  const [maintenanceRecord, setMaintenanceRecord] = useState<SyncRecoveryMaintenanceRecord | null>(null);
+  const [maintenanceAssessment, setMaintenanceAssessment] = useState<SyncRecoveryMaintenanceAssessment | null>(null);
+  const [drillReceipt, setDrillReceipt] = useState<SyncRecoveryDrillReceipt | null>(null);
 
   const canExport = Boolean(selectedChannel && selectedChannel.role === "owner" && !selectedChannel.retiredAt);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      if (!selectedChannel || selectedChannel.role !== "owner" || selectedChannel.retiredAt) {
+        if (active) {
+          setMaintenanceRecord(null);
+          setMaintenanceAssessment(null);
+        }
+        return;
+      }
+      try {
+        const record = await loadSyncRecoveryMaintenance(selectedChannel.channelId);
+        const assessment = await assessSyncRecoveryMaintenance(selectedChannel, record);
+        if (active) {
+          setMaintenanceRecord(record);
+          setMaintenanceAssessment(assessment);
+        }
+      } catch (error) {
+        if (active) setMessage(error instanceof Error ? error.message : "无法读取恢复维护回执");
+      }
+    };
+    const initialRefresh = globalThis.setTimeout(() => void refresh(), 0);
+    const handleRefresh = () => { void refresh(); };
+    globalThis.addEventListener(SYNC_RECOVERY_MAINTENANCE_CHANGED_EVENT, handleRefresh);
+    return () => {
+      active = false;
+      globalThis.clearTimeout(initialRefresh);
+      globalThis.removeEventListener(SYNC_RECOVERY_MAINTENANCE_CHANGED_EVENT, handleRefresh);
+    };
+  }, [selectedChannel, setMessage]);
+
+  async function persistMaintenance(record: SyncRecoveryMaintenanceRecord) {
+    const saved = await saveSyncRecoveryMaintenance(record);
+    setMaintenanceRecord(saved);
+    if (selectedChannel?.channelId === saved.channelId) setMaintenanceAssessment(await assessSyncRecoveryMaintenance(selectedChannel, saved));
+    return saved;
+  }
 
   function resetExportArm() {
     setExportArmed(false);
@@ -121,10 +187,22 @@ export function SyncRecoveryConsole({
     try {
       const recovery = await createSyncRecoveryKit(selectedChannel, identity, exportPassphrase);
       downloadText(serializeSyncRecoveryKit(recovery), `evolve-owner-recovery-${safeFilePart(selectedChannel.label)}-${fileStamp(new Date(recovery.delegation.createdAt))}.json`);
+      const profile = await createSyncRecoverySecurityProfile(selectedChannel);
+      const previousRecord = maintenanceRecord || await loadSyncRecoveryMaintenance(selectedChannel.channelId);
+      const record = createSyncRecoveryMaintenanceRecord(selectedChannel, recovery, profile, new Date().toISOString(), previousRecord);
+      let receiptSaved = true;
+      try {
+        await persistMaintenance(record);
+      } catch {
+        receiptSaved = false;
+      }
       setExportPassphrase("");
       setExportPassphraseConfirm("");
       setExportArmed(false);
-      setMessage("离线恢复材料已下载。它不含工作台数据；请另存最新加密同步包，并把恢复文件与口令分开放置。 ");
+      setDrillReceipt(null);
+      setMessage(receiptSaved
+        ? "离线恢复材料已下载并登记非敏感维护回执。请另存当前加密同步包，用实际离线副本完成演练，再确认文件与口令分开放置。 "
+        : "离线恢复材料已下载，但浏览器未能登记维护回执；文件仍可使用，请保管后重新读取并演练。 ");
     } catch (error) {
       setExportArmed(false);
       setMessage(error instanceof Error ? error.message : "无法生成离线恢复材料");
@@ -139,6 +217,7 @@ export function SyncRecoveryConsole({
     if (!file) return;
     setBusy("recovery-read");
     setCandidate(null);
+    setDrillReceipt(null);
     try {
       const envelope = await inspectSyncRecoveryKitText(await readBoundedFile(file, MAX_SYNC_RECOVERY_BYTES, "离线恢复材料"));
       setRecoveryKit({ envelope, fileName: file.name });
@@ -158,6 +237,7 @@ export function SyncRecoveryConsole({
     if (!file) return;
     setBusy("recovery-packet");
     setCandidate(null);
+    setDrillReceipt(null);
     try {
       const raw = await readBoundedFile(file, MAX_SYNC_PACKET_BYTES, "恢复同步包");
       const packet = inspectSyncPacketText(raw);
@@ -167,6 +247,57 @@ export function SyncRecoveryConsole({
     } catch (error) {
       setRecoveryPacket(null);
       setMessage(error instanceof Error ? error.message : "无法读取恢复同步包");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function runRecoveryDrill() {
+    if (!recoveryKit || !recoveryPacket || !recoveryPassphrase) return;
+    setBusy("recovery-drill");
+    setCandidate(null);
+    setDrillReceipt(null);
+    try {
+      const result = await verifySyncRecoveryDrill(recoveryKit.envelope, recoveryPassphrase, recoveryPacket.raw);
+      setDrillReceipt(result);
+      setRecoveryPassphrase("");
+      let saved = false;
+      let olderThanTracked = false;
+      if (selectedChannel?.role === "owner" && !selectedChannel.retiredAt && selectedChannel.channelId === result.channelId && selectedChannel.generation === result.generation) {
+        const profile = {
+          hash: result.securityProfileHash,
+          authorizedDeviceCount: result.authorizedDeviceCount,
+          revokedDeviceCount: result.revokedDeviceCount,
+        };
+        const tracked = maintenanceRecord || await loadSyncRecoveryMaintenance(selectedChannel.channelId);
+        olderThanTracked = !shouldTrackSyncRecoveryKit(tracked, recoveryKit.envelope);
+        if (!olderThanTracked) {
+          const base = tracked?.recoveryId === result.recoveryId
+            ? tracked
+            : createSyncRecoveryMaintenanceRecord(selectedChannel, recoveryKit.envelope, profile, result.drilledAt, tracked);
+          await persistMaintenance(recordSyncRecoveryDrill(base, result));
+          saved = true;
+        }
+      }
+      setMessage(`恢复演练通过：材料口令、原创签名、空间密钥、同步包作者签名、密文与工作台校验均有效；没有轮换所有权或写入恢复内容${saved ? "，非敏感演练时间与版本已登记" : olderThanTracked ? "；这份材料不比当前封条更新，因此没有覆盖维护回执" : ""}。`);
+    } catch (error) {
+      setRecoveryPassphrase("");
+      setMessage(error instanceof Error ? error.message : "恢复演练失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function confirmMaintenanceItem(id: "separate-storage" | "retire-old-copies") {
+    if (!maintenanceRecord) return;
+    setBusy("recovery-maintenance");
+    try {
+      await persistMaintenance(setSyncRecoveryMaintenanceConfirmation(maintenanceRecord, id, true));
+      setMessage(id === "separate-storage"
+        ? "已记录你的手动确认：恢复文件与口令分开保管。应用无法检查实际保管位置。 "
+        : "已记录你的手动确认：各保管位置的旧恢复材料副本已经完成替换。 ");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "无法保存恢复维护确认");
     } finally {
       setBusy("");
     }
@@ -263,8 +394,28 @@ export function SyncRecoveryConsole({
     <article className="sync-recovery-console">
       <header>
         <div><span>OWNER RECOVERY / 预签离线接管</span><h3>设备可以遗失，所有权不能靠冒充找回。</h3><p>原创建设备预先签发加密恢复材料；接任设备必须同时验证恢复材料与旧空间同步包，随后轮换新密钥。</p></div>
-        <strong>{candidate ? "READY TO TRANSFER" : recoveryKit ? "SEALED KIT READ" : "OFFLINE ONLY"}</strong>
+        <strong>{candidate ? "READY TO TRANSFER" : recoveryKit ? "SEALED KIT READ" : maintenanceAssessment ? maintenanceStatusLabels[maintenanceAssessment.status] : "OFFLINE ONLY"}</strong>
       </header>
+
+      {maintenanceAssessment && (
+        <section className={`recovery-maintenance-seal ${maintenanceAssessment.status}`}>
+          <div className="recovery-seal-summary">
+            <div className="recovery-seal-stamp" aria-hidden="true"><span>{maintenanceAssessment.status === "ready" ? "✓" : "!"}</span><small>90D</small></div>
+            <div><span>RECOVERY SEAL / 当前所有者设备</span><h4>{maintenanceAssessment.headline}</h4><p>{maintenanceAssessment.detail}</p>{maintenanceAssessment.reasons.length > 1 && <small>{maintenanceAssessment.reasons.slice(1).join(" · ")}</small>}</div>
+            <aside><span>材料</span><strong>{maintenanceRecord ? `${maintenanceAssessment.kitAgeDays} 天` : "未登记"}</strong><span>演练</span><strong>{maintenanceAssessment.drillAgeDays === null ? "未完成" : `${maintenanceAssessment.drillAgeDays} 天前`}</strong></aside>
+          </div>
+          <div className="recovery-seal-thread">
+            {maintenanceAssessment.checklist.map((item) => (
+              <div key={item.id} className={item.done ? "done" : "action"}>
+                <i>{item.done ? "✓" : "·"}</i><span><strong>{item.label}</strong><small>{item.action}</small></span>
+                {!item.done && maintenanceRecord && (item.id === "separate-storage" || item.id === "retire-old-copies") && <button onClick={() => void confirmMaintenanceItem(item.id as "separate-storage" | "retire-old-copies")} disabled={Boolean(busy)}>手动确认</button>}
+              </div>
+            ))}
+          </div>
+          <footer><span>维护回执只含材料 ID、版本头、授权清单摘要和时间；不保存恢复文件、口令、密钥或工作台内容。</span><code>{maintenanceRecord ? `${maintenanceRecord.recoveryId.slice(0, 20)}…` : "NO LOCAL RECEIPT"}</code></footer>
+        </section>
+      )}
+
       <div className="sync-recovery-grid">
         <section>
           <span>01 / 创建设备预先准备</span>
@@ -276,12 +427,12 @@ export function SyncRecoveryConsole({
           <small className="recovery-kdf">AES-256-GCM · PBKDF2-SHA-256 × {SYNC_RECOVERY_KDF_ITERATIONS.toLocaleString("en-US")}</small>
         </section>
         <section>
-          <span>02 / 接任设备双文件验证</span>
-          <h4>解锁迁移候选</h4>
-          <p>先读恢复材料，再读旧空间最新同步包。准备动作只在内存验证，不会更改当前设备或空间。</p>
+          <span>02 / 双文件验证与演练</span>
+          <h4>先演练，再决定是否接管</h4>
+          <p>读取实际离线材料和同步包。“只做演练”验证整条恢复链但不生成新空间，也不写入恢复内容。</p>
           <div className="recovery-file-pair"><button onClick={() => recoveryInput.current?.click()} disabled={Boolean(busy)}>读取恢复材料 <span>{recoveryKit ? "✓" : "↙"}</span></button><button onClick={() => recoveryPacketInput.current?.click()} disabled={Boolean(busy)}>读取旧同步包 <span>{recoveryPacket ? "✓" : "↙"}</span></button></div>
           <label><small>恢复口令</small><input type="password" value={recoveryPassphrase} onChange={(event) => { setRecoveryPassphrase(event.target.value); setCandidate(null); }} autoComplete="off" placeholder="只进入当前页面内存" disabled={!recoveryKit || !recoveryPacket || Boolean(busy)} /></label>
-          <button onClick={() => void prepareRecovery()} disabled={!identity || !recoveryKit || !recoveryPacket || !recoveryPassphrase || Boolean(busy)}>{busy === "recovery-prepare" ? "正在验签并解密…" : "验证并准备接管"}<span>→</span></button>
+          <div className="recovery-action-pair"><button onClick={() => void runRecoveryDrill()} disabled={!recoveryKit || !recoveryPacket || !recoveryPassphrase || Boolean(busy)}>{busy === "recovery-drill" ? "正在完整演练…" : "只做恢复演练"}<span>✓</span></button><button className="takeover" onClick={() => void prepareRecovery()} disabled={!identity || !recoveryKit || !recoveryPacket || !recoveryPassphrase || Boolean(busy)}>{busy === "recovery-prepare" ? "正在准备…" : "准备接管"}<span>→</span></button></div>
           <input ref={recoveryInput} type="file" accept="application/json,.json" onChange={readRecoveryKit} hidden />
           <input ref={recoveryPacketInput} type="file" accept="application/json,.json" onChange={readRecoveryPacket} hidden />
         </section>
@@ -299,6 +450,12 @@ export function SyncRecoveryConsole({
           <div><span>SIGNED RECOVERY AUTHORITY</span><strong>{recoveryKit.envelope.delegation.channel.label} · 第 {recoveryKit.envelope.delegation.channel.generation} 代</strong><small>{recoveryKit.fileName} · 创建于 {new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(recoveryKit.envelope.delegation.createdAt))}</small></div>
           <code>{formatDeviceFingerprint(recoveryKit.envelope.delegation.owner.fingerprint)}</code>
           <small>{recoveryPacket ? `同步包 ${recoveryPacket.packet.revisionId.slice(0, 20)}…` : "尚未选择旧空间同步包"}</small>
+        </div>
+      )}
+
+      {drillReceipt && (
+        <div className="recovery-drill-proof">
+          <i>✓</i><div><span>DRILL VERIFIED / 未写入恢复内容</span><strong>材料、口令、签名、密钥与同步密文全部通过</strong><small>工作台格式 v{drillReceipt.workspaceVersion} · 演练于 {drillReceipt.drilledAt.slice(0, 16).replace("T", " ")}</small></div><code>{drillReceipt.packetRevisionId}</code>
         </div>
       )}
 
