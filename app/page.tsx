@@ -617,11 +617,11 @@ export default function Home() {
         </aside>
       ) : activeView === "vault" ? (
         <aside className="agent-panel vault-guide-panel">
-          <header><div className="agent-glyph vault-glyph"><span>⇄</span></div><div><strong>迁移操作边界</strong><small>整卷替换 · 当前会话可撤回</small></div></header>
-          <div className="vault-guide-intro"><span>CURRENT → PROOF → RESTORE</span><h3>先看差异，<br />再移动整个工作台。</h3><p>迁移舱不调用模型，也不会把备份上传到服务端；文件只由当前浏览器生成和读取。</p></div>
-          <ol className="vault-guide-steps"><li><i>1</i><div><strong>生成整卷</strong><p>结构对象、字幕与采样帧一起封装。</p></div></li><li><i>2</i><div><strong>核对指纹</strong><p>SHA-256 用于发现损坏或被改动的内容。</p></div></li><li><i>3</i><div><strong>预演替换</strong><p>按稳定对象 ID 展示新增、改写与移除。</p></div></li><li><i>4</i><div><strong>保留退路</strong><p>恢复前状态可在页面刷新前一步撤回。</p></div></li></ol>
-          <div className="vault-guide-excludes"><span>永不写入迁移卷</span><code>API 密钥</code><code>Base URL</code><code>模型名称</code><code>本地视频原文件</code></div>
-          <div className="guardrail-footer"><i className="online" /><div><strong>本地迁移层就绪</strong><p>无需模型连接</p></div></div>
+          <header><div className="agent-glyph vault-glyph"><span>⇄</span></div><div><strong>迁移操作边界</strong><small>加密封卷 · 当前会话可撤回</small></div></header>
+          <div className="vault-guide-intro"><span>CURRENT → LOCK → PROOF → RESTORE</span><h3>离开这台设备前先封住，<br />写入新设备前先看差异。</h3><p>加密、解锁和预检都发生在当前浏览器；迁移舱不调用模型，也不会把工作台或口令上传到服务端。</p></div>
+          <ol className="vault-guide-steps"><li><i>1</i><div><strong>口令派生</strong><p>随机盐与 600,000 次 PBKDF2 生成不可导出的本地密钥。</p></div></li><li><i>2</i><div><strong>认证封卷</strong><p>AES-256-GCM 同时保护内容和版本参数。</p></div></li><li><i>3</i><div><strong>解锁预检</strong><p>先验证加密层与内层指纹，再展示对象差异。</p></div></li><li><i>4</i><div><strong>保留退路</strong><p>整体恢复前留快照，页面刷新前可一步撤回。</p></div></li></ol>
+          <div className="vault-guide-excludes"><span>永不保存或写入迁移卷</span><code>保护口令</code><code>API 密钥</code><code>Base URL</code><code>模型名称</code><code>本地视频原文件</code></div>
+          <div className="guardrail-footer"><i className="online" /><div><strong>本地加密迁移层就绪</strong><p>无需账户与模型连接</p></div></div>
         </aside>
       ) : activeView === "video" ? (
         <aside className="agent-panel video-guide-panel">
