@@ -6,6 +6,7 @@ import {
   inspectStorageBrokerDeploymentProof,
   inspectStorageBrokerDeploymentProofText,
   serializeStorageBrokerDeploymentProof,
+  verifyStorageBrokerDeploymentRun,
 } from "../app/features/storage-broker-deployment-proof.mjs";
 import {
   STORAGE_BROKER_RELEASE_TARGETS,
@@ -85,6 +86,60 @@ test("deployment proof rejects source, CI, endpoint, version, digest, and hidden
 test("deployment proof parser stays bounded", async () => {
   await assert.rejects(inspectStorageBrokerDeploymentProofText("x".repeat(256 * 1024 + 1)), /256 KiB/);
   await assert.rejects(inspectStorageBrokerDeploymentProofText("not-json"), /有效 JSON/);
+});
+
+function githubRun(overrides = {}) {
+  return {
+    id: 123456789,
+    run_attempt: 1,
+    html_url: "https://github.com/Tabriage/EvolveDesk/actions/runs/123456789",
+    event: "workflow_dispatch",
+    path: ".github/workflows/deploy-aws-storage-broker.yml",
+    head_sha: "a".repeat(40),
+    head_branch: "main",
+    status: "completed",
+    conclusion: "success",
+    created_at: "2026-08-21T09:55:00Z",
+    updated_at: "2026-08-21T10:10:00Z",
+    repository: { full_name: "Tabriage/EvolveDesk" },
+    ...overrides,
+  };
+}
+
+function runResponse(value, headers = {}) {
+  const raw = typeof value === "string" ? value : JSON.stringify(value);
+  return { status: 200, headers: { get: (name) => headers[name.toLowerCase()] || null }, text: async () => raw };
+}
+
+test("online run verification confirms the exact public GitHub workflow run without credentials", async () => {
+  const proof = await createStorageBrokerDeploymentProof(await input());
+  let request;
+  const result = await verifyStorageBrokerDeploymentRun(proof, {
+    now: "2026-08-21T10:11:00.000Z",
+    fetchImpl: async (url, options) => {
+      request = { url, options };
+      return runResponse(githubRun());
+    },
+  });
+  assert.equal(request.url, "https://api.github.com/repos/Tabriage/EvolveDesk/actions/runs/123456789");
+  assert.equal(request.options.credentials, "omit");
+  assert.equal(request.options.redirect, "error");
+  assert.equal(request.options.headers.Authorization, undefined);
+  assert.equal(result.conclusion, "success");
+  assert.equal(result.commit, "a".repeat(40));
+  assert.equal(result.checkedAt, "2026-08-21T10:11:00.000Z");
+});
+
+test("online run verification rejects failed, mismatched, malformed, oversized, and out-of-window runs", async () => {
+  const proof = await createStorageBrokerDeploymentProof(await input());
+  const verify = (value, headers) => verifyStorageBrokerDeploymentRun(proof, { fetchImpl: async () => runResponse(value, headers) });
+  await assert.rejects(verify(githubRun({ conclusion: "failure" })), /conclusion/);
+  await assert.rejects(verify(githubRun({ head_sha: "b".repeat(40) })), /commit/);
+  await assert.rejects(verify(githubRun({ repository: { full_name: "attacker/fork" } })), /repository/);
+  await assert.rejects(verify(githubRun({ created_at: "2026-08-21T10:06:00Z" })), /时间窗口/);
+  await assert.rejects(verify("not-json"), /有效 JSON/);
+  await assert.rejects(verify("{}", { "content-length": String(128 * 1024 + 1) }), /128 KiB/);
+  await assert.rejects(verifyStorageBrokerDeploymentRun(proof, { fetchImpl: async () => ({ status: 404, headers: { get: () => null }, text: async () => "" }) }), /HTTP 404/);
 });
 
 test("workflows pin actions, minimize token permissions, and keep cloud credentials out of source", () => {

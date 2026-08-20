@@ -3,6 +3,7 @@ import {
 } from "./storage-broker-release-proof.mjs";
 
 export const MAX_STORAGE_BROKER_DEPLOYMENT_PROOF_BYTES = 256 * 1_024;
+export const MAX_GITHUB_WORKFLOW_RUN_BYTES = 128 * 1_024;
 
 function bytes(value) {
   return new TextEncoder().encode(String(value));
@@ -56,6 +57,13 @@ function origin(value, label) {
 
 function repositorySlug(value) {
   return text(value, "GitHub 仓库", 180, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
+}
+
+function githubDate(value, label) {
+  const candidate = text(value, label, 64);
+  const date = new Date(candidate);
+  if (!Number.isFinite(date.getTime()) || date.getUTCFullYear() < 2020 || date.getUTCFullYear() > 2200) throw new Error(`${label}无效`);
+  return date.toISOString();
 }
 
 function repositoryFromReleaseProof(proof) {
@@ -168,4 +176,71 @@ export async function inspectStorageBrokerDeploymentProofText(rawValue) {
 
 export async function serializeStorageBrokerDeploymentProof(value) {
   return `${JSON.stringify(await inspectStorageBrokerDeploymentProof(value), null, 2)}\n`;
+}
+
+export async function verifyStorageBrokerDeploymentRun(value, options = {}) {
+  const proof = await inspectStorageBrokerDeploymentProof(value);
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  if (typeof fetchImpl !== "function") throw new Error("当前环境不能在线核对 GitHub Actions Run");
+  const apiUrl = `https://api.github.com/repos/${proof.body.ci.repository}/actions/runs/${proof.body.ci.runId}`;
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), 10_000);
+  let response;
+  try {
+    response = await fetchImpl(apiUrl, {
+      method: "GET",
+      headers: {
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      credentials: "omit",
+      redirect: "error",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("GitHub Actions Run 在线核对超时");
+    throw new Error("无法访问 GitHub Actions Run 公共 API");
+  } finally {
+    globalThis.clearTimeout(timeout);
+  }
+  if (!response || response.status !== 200) throw new Error(`GitHub Actions Run 在线核对失败（HTTP ${response?.status || 0}）`);
+  const contentLength = Number(response.headers?.get?.("content-length") || 0);
+  if (Number.isFinite(contentLength) && contentLength > MAX_GITHUB_WORKFLOW_RUN_BYTES) throw new Error("GitHub Actions Run 响应超过 128 KiB 上限");
+  const raw = await response.text();
+  if (bytes(raw).byteLength > MAX_GITHUB_WORKFLOW_RUN_BYTES) throw new Error("GitHub Actions Run 响应超过 128 KiB 上限");
+  let run;
+  try { run = JSON.parse(raw); } catch { throw new Error("GitHub Actions Run 响应不是有效 JSON"); }
+  if (!run || typeof run !== "object" || Array.isArray(run)) throw new Error("GitHub Actions Run 响应无效");
+  const createdAt = githubDate(run.created_at, "GitHub Run 创建时间");
+  const updatedAt = githubDate(run.updated_at, "GitHub Run 完成时间");
+  const proofTime = new Date(proof.body.createdAt).getTime();
+  if (new Date(createdAt).getTime() > proofTime || proofTime > new Date(updatedAt).getTime() + 5 * 60_000) throw new Error("部署回执生成时间不在 GitHub Run 时间窗口内");
+  const checks = {
+    repository: text(run.repository?.full_name, "GitHub Run 仓库", 180) === proof.body.ci.repository,
+    runId: String(run.id) === proof.body.ci.runId,
+    runAttempt: run.run_attempt === proof.body.ci.runAttempt,
+    runUrl: text(run.html_url, "GitHub Run 地址", 320) === proof.body.ci.runUrl,
+    event: run.event === "workflow_dispatch",
+    workflowPath: text(run.path, "GitHub Run 工作流", 220) === proof.body.ci.workflowPath,
+    commit: text(run.head_sha, "GitHub Run 提交", 40, /^[0-9a-f]{40}$/) === proof.body.ci.commit,
+    branch: text(run.head_branch, "GitHub Run 分支", 180) === proof.body.releaseProof.body.source.branch,
+    completed: run.status === "completed",
+    conclusion: run.conclusion === "success",
+  };
+  const mismatches = Object.entries(checks).filter(([, matches]) => !matches).map(([name]) => name);
+  if (mismatches.length) throw new Error(`GitHub Actions Run 与部署回执不一致：${mismatches.join("、")}`);
+  return {
+    system: "github-actions-public-api",
+    checkedAt: new Date(options.now || Date.now()).toISOString(),
+    repository: proof.body.ci.repository,
+    runId: proof.body.ci.runId,
+    workflowPath: proof.body.ci.workflowPath,
+    commit: proof.body.ci.commit,
+    status: "completed",
+    conclusion: "success",
+    createdAt,
+    updatedAt,
+  };
 }
