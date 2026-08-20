@@ -261,7 +261,7 @@ test("learning topics keep only real sources, grounded nodes, and valid relation
   });
   assert.equal(rejectedOverwrite, saved);
   assert.equal(rejectedOverwrite.learningTopics[0].map.thesis, "先统一输入，再随使用逐步增加结构。");
-  const weekly = buildWeeklySnapshot(saved, new Date(2026, 7, 11, 12));
+  const weekly = buildWeeklySnapshot(saved, new Date(saved.learningTopics[0].updatedAt));
   assert.equal(weekly.sourceStats.learningTopics, 1);
   const restored = parseWorkbenchState(JSON.stringify(saved));
   assert.equal(restored.learningTopics[0].map.openQuestions[0].question, "长期复习效果如何？");

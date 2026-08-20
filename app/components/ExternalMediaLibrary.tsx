@@ -1,6 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  MAX_EXTERNAL_MEDIA_DUPLICATE_AUDIT_BYTES,
+  compareExternalMediaDuplicateAuditToIndex,
+  createExternalMediaDuplicateAudit,
+  inspectExternalMediaDuplicateAuditText,
+  serializeExternalMediaDuplicateAudit,
+} from "../features/external-media-duplicate-audit.mjs";
+import type {
+  ExternalMediaDuplicateAuditComparison,
+  ExternalMediaDuplicateAuditInspection,
+} from "../features/external-media-duplicate-audit.mjs";
 import {
   EXTERNAL_MEDIA_INDEX_CHANGED_EVENT,
   calculateExternalMediaFullHash,
@@ -35,6 +46,11 @@ type HashQueueItem = {
   progress: number;
   detail: string;
 };
+type DuplicateAuditState = {
+  fileName: string;
+  inspection: ExternalMediaDuplicateAuditInspection;
+  comparison: ExternalMediaDuplicateAuditComparison;
+};
 
 const mediaPickerOptions = {
   multiple: true,
@@ -63,6 +79,17 @@ function formatBytes(bytes: number) {
   return `${bytes} B`;
 }
 
+function downloadText(text: string, fileName: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: "application/json;charset=utf-8" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  globalThis.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function uncheckedRow(info: ExternalMediaInfo, validSources: Set<string>): LibraryRow {
   if (!validSources.has(info.sourceKey)) {
     return { ...info, status: "orphaned", permission: "unknown", checkedAt: "", detail: "对应的本地视频记录已经不存在" };
@@ -71,17 +98,19 @@ function uncheckedRow(info: ExternalMediaInfo, validSources: Set<string>): Libra
 }
 
 export function ExternalMediaLibrary({ videos }: ExternalMediaLibraryProps) {
+  const duplicateAuditInput = useRef<HTMLInputElement>(null);
   const localVideos = useMemo(() => videos.filter((video) => video.platform === "local"), [videos]);
   const videoBySource = useMemo(() => new Map(localVideos.map((video) => [video.url, video])), [localVideos]);
   const validSourceKeys = useMemo(() => new Set(localVideos.map((video) => video.url)), [localVideos]);
   const [rows, setRows] = useState<LibraryRow[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [busy, setBusy] = useState<"" | "scan" | "permission" | "relocate" | "hash" | "remove">("");
+  const [busy, setBusy] = useState<"" | "scan" | "permission" | "relocate" | "hash" | "remove" | "audit-export" | "audit-read">("");
   const [message, setMessage] = useState("索引只记录浏览器文件句柄和指纹；维护动作不会移动、改名或删除磁盘原文件。 ");
   const [progress, setProgress] = useState("");
   const [removeArmed, setRemoveArmed] = useState(false);
   const [hashQueue, setHashQueue] = useState<HashQueueItem[]>([]);
   const [hashQueueState, setHashQueueState] = useState<"idle" | "running" | "pausing" | "paused" | "complete">("idle");
+  const [duplicateAudit, setDuplicateAudit] = useState<DuplicateAuditState | null>(null);
   const pauseRequested = useRef(false);
   const resumeHashing = useRef<(() => void) | null>(null);
   const hashAbortController = useRef<AbortController | null>(null);
@@ -122,6 +151,16 @@ export function ExternalMediaLibrary({ videos }: ExternalMediaLibraryProps) {
 
   const selectedRows = useMemo(() => rows.filter((row) => selected.has(row.sourceKey)), [rows, selected]);
   const duplicateReport = useMemo(() => createExternalMediaDuplicateReport(rows), [rows]);
+  const auditedDuplicateReceipt = duplicateAudit?.inspection.receipt;
+
+  useEffect(() => {
+    if (!auditedDuplicateReceipt) return;
+    let active = true;
+    compareExternalMediaDuplicateAuditToIndex(auditedDuplicateReceipt, rows).then((comparison) => {
+      if (active) setDuplicateAudit((current) => current ? { ...current, comparison } : null);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [auditedDuplicateReceipt, rows]);
 
   function toggleSelection(sourceKey: string) {
     setSelected((current) => {
@@ -286,6 +325,40 @@ export function ExternalMediaLibrary({ videos }: ExternalMediaLibraryProps) {
     resumeHashing.current = null;
   }
 
+  async function exportDuplicateAudit() {
+    setBusy("audit-export");
+    try {
+      const receipt = await createExternalMediaDuplicateAudit(rows);
+      downloadText(serializeExternalMediaDuplicateAudit(receipt), `evolve-media-duplicate-audit-${receipt.createdAt.replace(/[-:]/g, "").slice(0, 13)}.json`);
+      setMessage("无内容重复审计摘要已生成；文件名、路径、来源 ID、采样指纹和原始完整哈希均未导出。 ");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "无法生成外部媒体重复审计摘要");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function readDuplicateAudit(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setBusy("audit-read");
+    try {
+      if (file.size > MAX_EXTERNAL_MEDIA_DUPLICATE_AUDIT_BYTES) throw new Error("外部媒体重复审计摘要超过 64 KiB 上限");
+      const inspection = await inspectExternalMediaDuplicateAuditText(await file.text());
+      const comparison = await compareExternalMediaDuplicateAuditToIndex(inspection.receipt, rows);
+      setDuplicateAudit({ fileName: file.name, inspection, comparison });
+      setMessage(comparison.matches
+        ? "审计摘要的 SHA-256 封签有效，并与本机重复报告逐项一致；没有读取或覆盖任何媒体索引。 "
+        : `审计摘要封签有效，但与本机报告不同：${comparison.reasons.join("；")}。`);
+    } catch (error) {
+      setDuplicateAudit(null);
+      setMessage(error instanceof Error ? error.message : "无法核对外部媒体重复审计摘要");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function removeSelected() {
     if (!selected.size) return;
     if (!removeArmed) {
@@ -336,6 +409,22 @@ export function ExternalMediaLibrary({ videos }: ExternalMediaLibraryProps) {
           <footer><i>!</i><span><strong>报告不执行清理，也不推荐删除哪一份。</strong>不同索引可能是有意保留的副本；如需处理，请先在磁盘中人工确认用途和备份。</span></footer>
         </section>
       )}
+
+      <section className="media-duplicate-audit-dock">
+        <header>
+          <div><span>DUPLICATE AUDIT / 跨设备只读</span><h3>把重复结论带走，不把文件线索带走。</h3><p>导出只重算已有索引的统计与封签，不重新读取原文件；导入只做结构、完整性与本机报告对照。</p></div>
+          <div><button onClick={() => void exportDuplicateAudit()} disabled={Boolean(busy) || duplicateReport.hashedRecords < 1}>{busy === "audit-export" ? "正在封装…" : "导出无内容摘要"}<small>JSON ≤ 64KB</small></button><button onClick={() => duplicateAuditInput.current?.click()} disabled={Boolean(busy)}>{busy === "audit-read" ? "正在核对…" : "读取另一台设备摘要"}<small>只读</small></button><input ref={duplicateAuditInput} type="file" accept="application/json,.json" onChange={readDuplicateAudit} hidden /></div>
+        </header>
+        <div className="media-audit-redaction-rail" aria-label="审计摘要隐私边界"><span>EXCLUDED</span><s>文件名</s><s>路径</s><s>来源 ID</s><s>原始哈希</s><i>→</i><strong>计数 + 组集合封签</strong></div>
+        {duplicateAudit ? (
+          <article className={`media-duplicate-audit-proof ${duplicateAudit.comparison.matches ? "matches" : "differs"}`}>
+            <div className="media-audit-proof-mark"><i>✓</i><span><strong>SHA-256 完整性封签有效</strong><small>{duplicateAudit.fileName}</small></span></div>
+            <div className="media-audit-proof-facts"><span><small>完整哈希</small><strong>{duplicateAudit.inspection.receipt.summary.completeHashRecords}</strong></span><span><small>重复组</small><strong>{duplicateAudit.inspection.receipt.summary.duplicateGroups}</strong></span><span><small>组内记录</small><strong>{duplicateAudit.inspection.receipt.summary.duplicateRecords}</strong></span><span><small>组内字节</small><strong>{formatBytes(duplicateAudit.inspection.receipt.summary.duplicateBytes)}</strong></span></div>
+            <code>{duplicateAudit.inspection.digest.slice(0, 20)}…{duplicateAudit.inspection.digest.slice(-10)}</code>
+            <div className="media-audit-proof-comparison"><strong>{duplicateAudit.comparison.matches ? "与本机重复报告逐项一致" : "与本机重复报告不一致"}</strong><span>{duplicateAudit.comparison.matches ? "计数和匿名组集合封签一致；没有导入、覆盖或清理任何索引。" : duplicateAudit.comparison.reasons.join("；")}</span></div>
+          </article>
+        ) : <small>摘要的组集合封签可跨设备比较，但仍只是 SHA-256 完整性证据，不能证明由哪台设备生成；已知候选完整哈希的一方仍可能验证猜测。</small>}
+      </section>
 
       {rows.length ? (
         <div className="external-media-ledger">

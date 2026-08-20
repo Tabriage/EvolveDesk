@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import {
+  compareExternalMediaDuplicateAuditToIndex,
+  createExternalMediaDuplicateAudit,
+  inspectExternalMediaDuplicateAuditText,
+  serializeExternalMediaDuplicateAudit,
+} from "../app/features/external-media-duplicate-audit.mjs";
 import { createExternalMediaFullHash } from "../app/features/external-media-hash.mjs";
 import { createExternalMediaDuplicateReport, createExternalMediaFingerprint, createExternalMediaRecord, planExternalMediaRelocations, verifyExternalMediaFile } from "../app/features/external-media-store.mjs";
 
@@ -101,6 +107,72 @@ test("duplicate reports require a complete hash and never infer from sampled evi
   assert.equal(report.groups.length, 1);
   assert.equal(report.groups[0].size, 120);
   assert.deepEqual(report.groups[0].records.map((record) => record.name), ["副本.mov", "原文件.mp4"]);
+});
+
+test("duplicate audit summaries seal counts and group identity without disclosing file identifiers", async () => {
+  const duplicateHash = "a".repeat(64);
+  const records = [
+    { sourceKey: "local-media://duplicate_audit_first_01", name: "私密原片.mp4", size: 120, fullHash: duplicateHash },
+    { sourceKey: "local-media://duplicate_audit_second_02", name: "私密副本.mov", size: 120, fullHash: duplicateHash },
+    { sourceKey: "local-media://duplicate_audit_unique_03", name: "独有素材.mp4", size: 80, fullHash: "b".repeat(64) },
+  ];
+  const receipt = await createExternalMediaDuplicateAudit(records, "2026-08-23T08:00:00.000Z");
+  const serialized = serializeExternalMediaDuplicateAudit(receipt);
+  const inspection = await inspectExternalMediaDuplicateAuditText(serialized);
+
+  assert.equal(receipt.summary.indexedRecords, 3);
+  assert.equal(receipt.summary.completeHashRecords, 3);
+  assert.equal(receipt.summary.duplicateGroups, 1);
+  assert.equal(receipt.summary.duplicateRecords, 2);
+  assert.equal(receipt.summary.duplicateBytes, 240);
+  assert.match(receipt.auditId, /^media_duplicate_audit_[0-9a-f]{32}$/);
+  assert.match(receipt.manifest.groupSetDigest, /^[0-9a-f]{64}$/);
+  assert.equal(inspection.contentIdentifiersDisclosed, false);
+  assert.equal(serialized.includes("私密原片"), false);
+  assert.equal(serialized.includes("duplicate_audit_first"), false);
+  assert.equal(serialized.includes(duplicateHash), false);
+});
+
+test("duplicate audits compare across devices by sealed group set, not local names or source ids", async () => {
+  const sharedHash = "c".repeat(64);
+  const original = [
+    { sourceKey: "local-media://device_one_first_01", name: "A.mp4", size: 200, fullHash: sharedHash },
+    { sourceKey: "local-media://device_one_second_02", name: "B.mp4", size: 200, fullHash: sharedHash },
+  ];
+  const otherDevice = [
+    { sourceKey: "local-media://device_two_first_001", name: "已改名甲.mov", size: 200, fullHash: sharedHash },
+    { sourceKey: "local-media://device_two_second_02", name: "已改名乙.mov", size: 200, fullHash: sharedHash },
+  ];
+  const changedDevice = [
+    otherDevice[0],
+    { ...otherDevice[1], fullHash: "d".repeat(64) },
+  ];
+  const receipt = await createExternalMediaDuplicateAudit(original, "2026-08-23T08:10:00.000Z");
+  const matching = await compareExternalMediaDuplicateAuditToIndex(receipt, otherDevice);
+  const changed = await compareExternalMediaDuplicateAuditToIndex(receipt, changedDevice);
+
+  assert.equal(matching.matches, true);
+  assert.equal(matching.manifestMatches, true);
+  assert.equal(changed.matches, false);
+  assert.equal(changed.manifestMatches, false);
+});
+
+test("duplicate audit inspection rejects hidden fields, tampering, and missing full-hash evidence", async () => {
+  const records = [
+    { sourceKey: "local-media://audit_tamper_first_01", name: "第一份.mp4", size: 300, fullHash: "e".repeat(64) },
+    { sourceKey: "local-media://audit_tamper_second_02", name: "第二份.mp4", size: 300, fullHash: "e".repeat(64) },
+  ];
+  const receipt = await createExternalMediaDuplicateAudit(records, "2026-08-23T08:20:00.000Z");
+  const tampered = structuredClone(receipt);
+  tampered.summary.duplicateRecords = 3;
+  const hidden = structuredClone(receipt);
+  hidden.fileNames = ["不应出现.mp4"];
+
+  await assert.rejects(inspectExternalMediaDuplicateAuditText(JSON.stringify(tampered)), /统计数量关系无效|完整性封签不一致/);
+  await assert.rejects(inspectExternalMediaDuplicateAuditText(JSON.stringify(hidden)), /缺失或未声明字段/);
+  await assert.rejects(createExternalMediaDuplicateAudit([
+    { sourceKey: "local-media://audit_unhashed_only_01", name: "未哈希.mp4", size: 100, fullHash: "" },
+  ]), /至少需要一条已完成完整 SHA-256/);
 });
 
 test("batch relocation uses unique sample matches and full hashes for renamed files", () => {
