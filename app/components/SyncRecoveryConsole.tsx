@@ -28,8 +28,9 @@ import {
 import {
   MAX_RECOVERY_MAINTENANCE_AUDIT_BYTES,
   assessSyncRecoveryMaintenance,
+  assessSyncRecoveryMaintenanceAuditTrust,
   compareSyncRecoveryMaintenanceAuditToRecord,
-  createSyncRecoveryMaintenanceAudit,
+  createSignedSyncRecoveryMaintenanceAudit,
   createSyncRecoveryMaintenanceRecord,
   createSyncRecoverySecurityProfile,
   inspectSyncRecoveryMaintenanceAuditText,
@@ -38,7 +39,7 @@ import {
   setSyncRecoveryMaintenanceConfirmation,
   shouldTrackSyncRecoveryKit,
 } from "../features/recovery-maintenance.mjs";
-import type { SyncRecoveryDrillReceipt, SyncRecoveryMaintenanceAssessment, SyncRecoveryMaintenanceAuditInspection, SyncRecoveryMaintenanceRecord } from "../features/recovery-maintenance.mjs";
+import type { SyncRecoveryDrillReceipt, SyncRecoveryMaintenanceAssessment, SyncRecoveryMaintenanceAuditInspection, SyncRecoveryMaintenanceAuditTrustAssessment, SyncRecoveryMaintenanceRecord } from "../features/recovery-maintenance.mjs";
 import type { BackupSources } from "../features/backup-core.mjs";
 import type { WorkbenchState } from "../features/workbench-core.mjs";
 
@@ -132,10 +133,11 @@ export function SyncRecoveryConsole({
   const [maintenanceRecord, setMaintenanceRecord] = useState<SyncRecoveryMaintenanceRecord | null>(null);
   const [maintenanceAssessment, setMaintenanceAssessment] = useState<SyncRecoveryMaintenanceAssessment | null>(null);
   const [drillReceipt, setDrillReceipt] = useState<SyncRecoveryDrillReceipt | null>(null);
-  const [maintenanceAudit, setMaintenanceAudit] = useState<{ fileName: string; inspection: SyncRecoveryMaintenanceAuditInspection } | null>(null);
+  const [maintenanceAudit, setMaintenanceAudit] = useState<{ fileName: string; inspection: SyncRecoveryMaintenanceAuditInspection; trust: SyncRecoveryMaintenanceAuditTrustAssessment } | null>(null);
 
   const canExport = Boolean(selectedChannel && selectedChannel.role === "owner" && !selectedChannel.retiredAt);
   const maintenanceAuditComparison = maintenanceAudit && maintenanceRecord ? compareSyncRecoveryMaintenanceAuditToRecord(maintenanceAudit.inspection.receipt, maintenanceRecord) : null;
+  const inspectedMaintenanceReceipt = maintenanceAudit?.inspection.receipt;
 
   useEffect(() => {
     let active = true;
@@ -167,6 +169,15 @@ export function SyncRecoveryConsole({
       globalThis.removeEventListener(SYNC_RECOVERY_MAINTENANCE_CHANGED_EVENT, handleRefresh);
     };
   }, [selectedChannel, setMessage]);
+
+  useEffect(() => {
+    if (!inspectedMaintenanceReceipt) return;
+    let active = true;
+    assessSyncRecoveryMaintenanceAuditTrust(inspectedMaintenanceReceipt, channels).then((trust) => {
+      if (active) setMaintenanceAudit((current) => current && current.inspection.receipt === inspectedMaintenanceReceipt ? { ...current, trust } : current);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [channels, inspectedMaintenanceReceipt]);
 
   async function persistMaintenance(record: SyncRecoveryMaintenanceRecord) {
     const saved = await saveSyncRecoveryMaintenance(record);
@@ -312,12 +323,12 @@ export function SyncRecoveryConsole({
   }
 
   async function downloadMaintenanceAudit() {
-    if (!maintenanceRecord) return;
+    if (!maintenanceRecord || !identity) return;
     setBusy("recovery-audit-export");
     try {
-      const receipt = await createSyncRecoveryMaintenanceAudit(maintenanceRecord);
+      const receipt = await createSignedSyncRecoveryMaintenanceAudit(maintenanceRecord, identity);
       downloadText(serializeSyncRecoveryMaintenanceAudit(receipt), `evolve-recovery-audit-generation-${maintenanceRecord.generation}-${fileStamp(new Date(receipt.createdAt))}.json`);
-      setMessage("无内容恢复维护审计摘要已下载；它可离线只读核对，但 SHA-256 不是设备签名。 ");
+      setMessage("设备签名的无内容恢复维护审计摘要已下载；公开设备身份随封签导出，私钥仍不可导出并留在本机。 ");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "无法导出恢复维护审计摘要");
     } finally {
@@ -332,11 +343,14 @@ export function SyncRecoveryConsole({
     setBusy("recovery-audit-read");
     try {
       const inspection = await inspectSyncRecoveryMaintenanceAuditText(await readBoundedFile(file, MAX_RECOVERY_MAINTENANCE_AUDIT_BYTES, "恢复维护审计摘要"));
-      setMaintenanceAudit({ fileName: file.name, inspection });
+      const trust = await assessSyncRecoveryMaintenanceAuditTrust(inspection.receipt, channels);
+      setMaintenanceAudit({ fileName: file.name, inspection, trust });
       const comparison = maintenanceRecord ? compareSyncRecoveryMaintenanceAuditToRecord(inspection.receipt, maintenanceRecord) : null;
-      setMessage(comparison?.matches
-        ? "审计摘要完整性有效，并与当前设备的恢复维护回执逐字段一致；没有写入任何状态。 "
-        : "审计摘要完整性有效，已作为只读维护元数据打开；没有导入密钥库或恢复状态。 ");
+      setMessage(trust.trusted
+        ? `审计摘要完整性和设备签名有效；签发者是本机保存的“${trust.channelLabel || "对应空间"}”原创所有者${comparison?.matches ? "，且与本机维护回执逐字段一致" : ""}。没有写入任何状态。 `
+        : inspection.signed
+          ? `审计摘要完整性和设备签名有效，但本机无法确认签发者：${trust.reason}。没有导入密钥库或恢复状态。 `
+          : "旧版审计摘要的完整性封签有效，但没有设备签名；已作为只读维护元数据打开。没有导入密钥库或恢复状态。 ");
     } catch (error) {
       setMaintenanceAudit(null);
       setMessage(error instanceof Error ? error.message : "无法核对恢复维护审计摘要");
@@ -454,20 +468,21 @@ export function SyncRecoveryConsole({
               </div>
             ))}
           </div>
-          <footer><span>维护回执只含材料 ID、版本头、授权清单摘要和时间；不保存恢复文件、口令、密钥或工作台内容。</span><div>{maintenanceRecord && <button onClick={() => void downloadMaintenanceAudit()} disabled={Boolean(busy)}>{busy === "recovery-audit-export" ? "正在封签…" : "导出无内容审计摘要"}</button>}<code>{maintenanceRecord ? `${maintenanceRecord.recoveryId.slice(0, 20)}…` : "NO LOCAL RECEIPT"}</code></div></footer>
+          <footer><span>维护回执只含材料 ID、版本头、授权清单摘要和时间；不保存恢复文件、口令、密钥或工作台内容。</span><div>{maintenanceRecord && <button onClick={() => void downloadMaintenanceAudit()} disabled={!identity || Boolean(busy)}>{busy === "recovery-audit-export" ? "正在签发…" : "导出设备签名摘要"}</button>}<code>{maintenanceRecord ? `${maintenanceRecord.recoveryId.slice(0, 20)}…` : "NO LOCAL RECEIPT"}</code></div></footer>
         </section>
       )}
 
       <section className={`recovery-audit-console ${maintenanceAudit ? "inspected" : ""}`}>
         <header><div><span>MAINTENANCE AUDIT / 跨设备只读</span><h4>核对恢复封条，不接触恢复秘密</h4><p>严格检查材料世代、授权摘要、演练版本与维护确认；文件不会导入本机密钥库。</p></div><button onClick={() => maintenanceAuditInput.current?.click()} disabled={Boolean(busy)}>{busy === "recovery-audit-read" ? "正在核对…" : "读取审计摘要"}<small>JSON ≤ 128KB</small></button><input ref={maintenanceAuditInput} type="file" accept="application/json,.json" onChange={readMaintenanceAudit} hidden /></header>
         {maintenanceAudit ? (
-          <div className="recovery-audit-proof">
-            <div className="recovery-audit-mark"><i>✓</i><span><strong>SHA-256 完整性封签有效</strong><small>{maintenanceAudit.fileName}</small></span></div>
+          <div className={`recovery-audit-proof ${maintenanceAudit.trust.trusted ? "trusted" : maintenanceAudit.inspection.signed ? "signed-untrusted" : "legacy"}`}>
+            <div className="recovery-audit-mark"><i>{maintenanceAudit.trust.trusted ? "✓" : maintenanceAudit.inspection.signed ? "~" : "!"}</i><span><strong>{maintenanceAudit.trust.trusted ? "设备签名有效 · 原创所有者可信" : maintenanceAudit.inspection.signed ? "设备签名有效 · 签发者未确认" : "完整性封签有效 · 旧版未签名"}</strong><small>{maintenanceAudit.fileName}</small></span></div>
             <div className="recovery-audit-facts"><span><small>空间世代</small><strong>{maintenanceAudit.inspection.receipt.record.generation}</strong></span><span><small>授权 / 撤销</small><strong>{maintenanceAudit.inspection.receipt.record.authorizedDeviceCount} / {maintenanceAudit.inspection.receipt.record.revokedDeviceCount}</strong></span><span><small>恢复演练</small><strong>{maintenanceAudit.inspection.hasDrill ? "已登记" : "未登记"}</strong></span><span><small>分开保管</small><strong>{maintenanceAudit.inspection.separateStorageConfirmed ? "已确认" : "未确认"}</strong></span></div>
             <div className="recovery-audit-dates"><span><small>下次演练</small><strong>{maintenanceAudit.inspection.nextDrillAt ? maintenanceAudit.inspection.nextDrillAt.slice(0, 10) : "首次演练未完成"}</strong></span><span><small>180 天复核</small><strong>{maintenanceAudit.inspection.replacementReviewAt.slice(0, 10)}</strong></span><code>{maintenanceAudit.inspection.digest.slice(0, 18)}…{maintenanceAudit.inspection.digest.slice(-10)}</code></div>
+            <div className="recovery-audit-trust-chain"><span className="pass"><i>1</i><strong>内容封签</strong><small>SHA-256 与回执 ID 一致</small></span><b>→</b><span className={maintenanceAudit.inspection.signed ? "pass" : "missing"}><i>2</i><strong>设备签名</strong><small>{maintenanceAudit.inspection.signed ? `${maintenanceAudit.inspection.signer?.name || "签发设备"} · ${maintenanceAudit.inspection.signer?.fingerprint.slice(0, 12)}…` : "v1 摘要未携带签名"}</small></span><b>→</b><span className={maintenanceAudit.trust.trusted ? "pass" : "untrusted"}><i>3</i><strong>本机信任</strong><small>{maintenanceAudit.trust.reason}</small></span></div>
             {maintenanceRecord && maintenanceAuditComparison && <div className={maintenanceAuditComparison.matches ? "recovery-audit-match" : "recovery-audit-mismatch"}><strong>{maintenanceAuditComparison.matches ? "与本机维护回执逐字段一致" : "与本机维护回执不一致"}</strong><span>{maintenanceAuditComparison.matches ? "只读核对完成，没有覆盖本机记录。" : maintenanceAuditComparison.reasons.join("；")}</span></div>}
           </div>
-        ) : <footer><i>i</i><span>摘要不含恢复文件、口令、密钥、同步密文或工作台内容。SHA-256 能发现封签不一致，但不能证明由哪台设备签发。</span></footer>}
+        ) : <footer><i>i</i><span>v2 摘要使用本机不可导出的 ECDSA 私钥签发；读取端仍会把“签名有效”和“签发者属于本机信任空间”分开核对。旧版 v1 摘要继续只读兼容。</span></footer>}
       </section>
 
       <div className="sync-recovery-grid">

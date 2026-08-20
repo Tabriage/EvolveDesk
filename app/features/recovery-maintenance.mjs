@@ -1,4 +1,9 @@
 import { sha256Text } from "./backup-core.mjs";
+import {
+  normalizeSyncPublicDevice,
+  signSyncDeviceStatement,
+  verifySyncDeviceStatement,
+} from "./sync-core.mjs";
 
 export const RECOVERY_MAINTENANCE_RECORD_VERSION = 1;
 export const RECOVERY_DRILL_INTERVAL_DAYS = 90;
@@ -10,7 +15,9 @@ const SAFE_ID = /^[A-Za-z0-9_-]{8,100}$/;
 const HASH = /^[0-9a-f]{64}$/;
 const CONFIRMATION_IDS = new Set(["separate-storage", "retire-old-copies"]);
 const AUDIT_FORMAT = "evolve-desk.recovery-maintenance-audit";
-const AUDIT_FORMAT_VERSION = 1;
+const AUDIT_FORMAT_VERSION = 2;
+const LEGACY_AUDIT_FORMAT_VERSION = 1;
+const AUDIT_SIGNATURE_PURPOSE = "recovery-maintenance-audit/v2";
 const RECORD_KEYS = ["recordVersion", "channelId", "generation", "recoveryId", "ownerFingerprint", "kitCreatedAt", "kitBoundRevisionId", "securityProfileHash", "authorizedDeviceCount", "revokedDeviceCount", "trackedAt", "previousRecoveryId", "separateStorageConfirmedAt", "oldCopiesRetiredAt", "lastDrill"];
 const DRILL_KEYS = ["drilledAt", "packetRevisionId", "packetCreatedAt", "packetAuthorFingerprint", "workspaceVersion", "securityProfileHash"];
 
@@ -118,15 +125,75 @@ function strictSyncRecoveryMaintenanceRecord(value) {
   return normalized;
 }
 
-function auditContent(value) {
-  return { format: AUDIT_FORMAT, formatVersion: AUDIT_FORMAT_VERSION, createdAt: value.createdAt, record: value.record };
+function auditContent(value, formatVersion = AUDIT_FORMAT_VERSION) {
+  const content = { format: AUDIT_FORMAT, formatVersion, createdAt: value.createdAt, record: value.record };
+  return formatVersion === AUDIT_FORMAT_VERSION ? { ...content, signer: value.signer } : content;
+}
+
+function auditSignaturePayload(value) {
+  return JSON.stringify({ receiptId: value.receiptId, integrity: value.integrity });
+}
+
+function normalizeAuditIntegrity(value) {
+  exactKeys(value, ["algorithm", "digest"], "恢复维护审计完整性封签");
+  if (value.algorithm !== "SHA-256" || !HASH.test(String(value.digest || ""))) throw new Error("恢复维护审计完整性封签无效");
+  return { algorithm: "SHA-256", digest: value.digest };
+}
+
+async function normalizeLegacyMaintenanceAudit(value) {
+  exactKeys(value, ["format", "formatVersion", "receiptId", "createdAt", "record", "integrity"], "旧版恢复维护审计摘要");
+  if (value.format !== AUDIT_FORMAT || value.formatVersion !== LEGACY_AUDIT_FORMAT_VERSION) throw new Error("旧版恢复维护审计摘要格式无效");
+  const content = auditContent({
+    createdAt: canonicalIsoDate(value.createdAt, "恢复维护审计时间"),
+    record: strictSyncRecoveryMaintenanceRecord(value.record),
+  }, LEGACY_AUDIT_FORMAT_VERSION);
+  const integrity = normalizeAuditIntegrity(value.integrity);
+  const digest = await sha256Text(JSON.stringify(content));
+  const receiptId = `recovery_audit_${digest.slice(0, 32)}`;
+  if (digest !== integrity.digest || value.receiptId !== receiptId) throw new Error("恢复维护审计完整性封签不一致，文件可能已被修改");
+  return { ...content, receiptId, integrity };
+}
+
+async function normalizeSignedMaintenanceAudit(value) {
+  exactKeys(value, ["format", "formatVersion", "receiptId", "createdAt", "record", "signer", "integrity", "proof"], "设备签名恢复维护审计摘要");
+  if (value.format !== AUDIT_FORMAT || value.formatVersion !== AUDIT_FORMAT_VERSION) throw new Error("设备签名恢复维护审计摘要格式无效");
+  const record = strictSyncRecoveryMaintenanceRecord(value.record);
+  const signer = await normalizeSyncPublicDevice(value.signer);
+  if (signer.fingerprint !== record.ownerFingerprint) throw new Error("恢复维护审计签发设备不是材料登记的原创所有者");
+  const content = auditContent({
+    createdAt: canonicalIsoDate(value.createdAt, "恢复维护审计时间"),
+    record,
+    signer,
+  });
+  const integrity = normalizeAuditIntegrity(value.integrity);
+  const digest = await sha256Text(JSON.stringify(content));
+  const receiptId = `recovery_audit_${digest.slice(0, 32)}`;
+  if (digest !== integrity.digest || value.receiptId !== receiptId) throw new Error("恢复维护审计完整性封签不一致，文件可能已被修改");
+  const verified = await verifySyncDeviceStatement(signer, value.proof, AUDIT_SIGNATURE_PURPOSE, auditSignaturePayload({ receiptId, integrity }));
+  return { ...content, receiptId, integrity, proof: verified.proof };
 }
 
 export async function createSyncRecoveryMaintenanceAudit(recordValue, createdAtValue = new Date().toISOString()) {
   const record = normalizeSyncRecoveryMaintenanceRecord(recordValue);
-  const content = auditContent({ createdAt: canonicalIsoDate(new Date(createdAtValue).toISOString(), "恢复维护审计时间"), record });
+  const content = auditContent({ createdAt: canonicalIsoDate(new Date(createdAtValue).toISOString(), "恢复维护审计时间"), record }, LEGACY_AUDIT_FORMAT_VERSION);
   const digest = await sha256Text(JSON.stringify(content));
   return { ...content, receiptId: `recovery_audit_${digest.slice(0, 32)}`, integrity: { algorithm: "SHA-256", digest } };
+}
+
+export async function createSignedSyncRecoveryMaintenanceAudit(recordValue, identity, createdAtValue = new Date().toISOString()) {
+  const record = normalizeSyncRecoveryMaintenanceRecord(recordValue);
+  const signer = await normalizeSyncPublicDevice(identity?.device);
+  if (signer.fingerprint !== record.ownerFingerprint) throw new Error("只有恢复材料登记的原创所有者设备可以签发维护审计摘要");
+  const content = auditContent({
+    createdAt: canonicalIsoDate(new Date(createdAtValue).toISOString(), "恢复维护审计时间"),
+    record,
+    signer,
+  });
+  const digest = await sha256Text(JSON.stringify(content));
+  const receiptId = `recovery_audit_${digest.slice(0, 32)}`;
+  const integrity = { algorithm: "SHA-256", digest };
+  const proof = await signSyncDeviceStatement(identity, AUDIT_SIGNATURE_PURPOSE, auditSignaturePayload({ receiptId, integrity }));
+  return { ...content, receiptId, integrity, proof };
 }
 
 export function serializeSyncRecoveryMaintenanceAudit(receipt) {
@@ -143,22 +210,66 @@ export async function inspectSyncRecoveryMaintenanceAuditText(raw) {
   } catch {
     throw new Error("恢复维护审计摘要不是有效的 JSON 文件");
   }
-  exactKeys(value, ["format", "formatVersion", "receiptId", "createdAt", "record", "integrity"], "恢复维护审计摘要");
-  if (value.format !== AUDIT_FORMAT || value.formatVersion !== AUDIT_FORMAT_VERSION) throw new Error("这不是受支持的 Evolve Desk 恢复维护审计摘要");
-  if (!/^recovery_audit_[0-9a-f]{32}$/.test(String(value.receiptId || ""))) throw new Error("恢复维护审计回执标识无效");
-  exactKeys(value.integrity, ["algorithm", "digest"], "恢复维护审计完整性封签");
-  if (value.integrity.algorithm !== "SHA-256" || !HASH.test(String(value.integrity.digest || ""))) throw new Error("恢复维护审计完整性封签无效");
-  const content = auditContent({ createdAt: canonicalIsoDate(value.createdAt, "恢复维护审计时间"), record: strictSyncRecoveryMaintenanceRecord(value.record) });
-  const digest = await sha256Text(JSON.stringify(content));
-  if (digest !== value.integrity.digest || value.receiptId !== `recovery_audit_${digest.slice(0, 32)}`) throw new Error("恢复维护审计完整性封签不一致，文件可能已被修改");
+  if (value?.format !== AUDIT_FORMAT) throw new Error("这不是 Evolve Desk 恢复维护审计摘要");
+  if (![LEGACY_AUDIT_FORMAT_VERSION, AUDIT_FORMAT_VERSION].includes(value.formatVersion)) throw new Error("恢复维护审计摘要版本不受支持");
+  const receipt = value.formatVersion === LEGACY_AUDIT_FORMAT_VERSION
+    ? await normalizeLegacyMaintenanceAudit(value)
+    : await normalizeSignedMaintenanceAudit(value);
+  const digest = receipt.integrity.digest;
   return {
-    receipt: { ...content, receiptId: value.receiptId, integrity: { algorithm: "SHA-256", digest } },
+    receipt,
+    sealed: true,
+    signed: receipt.formatVersion === AUDIT_FORMAT_VERSION,
+    signatureValid: receipt.formatVersion === AUDIT_FORMAT_VERSION,
+    signer: receipt.formatVersion === AUDIT_FORMAT_VERSION ? receipt.signer : null,
     digest,
-    nextDrillAt: content.record.lastDrill ? addDays(content.record.lastDrill.drilledAt, RECOVERY_DRILL_INTERVAL_DAYS) : "",
-    replacementReviewAt: addDays(content.record.kitCreatedAt, RECOVERY_REPLACEMENT_REVIEW_DAYS),
-    hasDrill: Boolean(content.record.lastDrill),
-    separateStorageConfirmed: Boolean(content.record.separateStorageConfirmedAt),
-    oldCopiesRetired: !content.record.previousRecoveryId || Boolean(content.record.oldCopiesRetiredAt),
+    nextDrillAt: receipt.record.lastDrill ? addDays(receipt.record.lastDrill.drilledAt, RECOVERY_DRILL_INTERVAL_DAYS) : "",
+    replacementReviewAt: addDays(receipt.record.kitCreatedAt, RECOVERY_REPLACEMENT_REVIEW_DAYS),
+    hasDrill: Boolean(receipt.record.lastDrill),
+    separateStorageConfirmed: Boolean(receipt.record.separateStorageConfirmedAt),
+    oldCopiesRetired: !receipt.record.previousRecoveryId || Boolean(receipt.record.oldCopiesRetiredAt),
+  };
+}
+
+export async function assessSyncRecoveryMaintenanceAuditTrust(receiptValue, channelsValue = []) {
+  if (receiptValue?.formatVersion !== AUDIT_FORMAT_VERSION) {
+    return { signed: false, signatureValid: false, trusted: false, channelKnown: false, channelLabel: "", channelRetired: false, generationMatches: false, ownerMatches: false, signer: null, reason: "这份旧版摘要只有完整性封签，没有设备签名" };
+  }
+  const receipt = await normalizeSignedMaintenanceAudit(receiptValue);
+  const channel = (Array.isArray(channelsValue) ? channelsValue : []).find((candidate) => candidate?.channelId === receipt.record.channelId);
+  if (!channel) {
+    return { signed: true, signatureValid: true, trusted: false, channelKnown: false, channelLabel: "", channelRetired: false, generationMatches: false, ownerMatches: false, signer: receipt.signer, reason: "本机没有保存这份摘要对应的同步空间，无法确认签发者" };
+  }
+  const authorized = [];
+  for (const candidate of Array.isArray(channel.authorizedDevices) ? channel.authorizedDevices : []) {
+    try {
+      authorized.push(await normalizeSyncPublicDevice(candidate));
+    } catch {
+      // Malformed local membership entries never establish trust.
+    }
+  }
+  const generationMatches = channel.generation === receipt.record.generation;
+  const revoked = Array.isArray(channel.revokedDeviceIds) && channel.revokedDeviceIds.includes(receipt.signer.deviceId);
+  const owner = authorized.find((candidate) => candidate.deviceId === channel.ownerDeviceId);
+  const ownerMatches = Boolean(owner && owner.deviceId === receipt.signer.deviceId && owner.fingerprint === receipt.signer.fingerprint);
+  const trusted = Boolean(generationMatches && ownerMatches && !revoked);
+  return {
+    signed: true,
+    signatureValid: true,
+    trusted,
+    channelKnown: true,
+    channelLabel: String(channel.label || "").slice(0, 80),
+    channelRetired: Boolean(channel.retiredAt),
+    generationMatches,
+    ownerMatches,
+    signer: receipt.signer,
+    reason: revoked
+      ? "签发设备已在本机保存的该空间记录中撤销"
+      : !generationMatches
+        ? "摘要绑定的空间世代与本机记录不一致"
+        : ownerMatches
+          ? `签发者是本机保存的该空间原创所有者${channel.retiredAt ? "；该空间现已停用" : ""}`
+          : "签发者不是本机保存的该空间原创所有者",
   };
 }
 

@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { sha256Text } from "../app/features/backup-core.mjs";
 import {
   RECOVERY_DRILL_INTERVAL_DAYS,
   RECOVERY_REPLACEMENT_REVIEW_DAYS,
   assessSyncRecoveryMaintenance,
+  assessSyncRecoveryMaintenanceAuditTrust,
   compareSyncRecoveryMaintenanceAuditToRecord,
+  createSignedSyncRecoveryMaintenanceAudit,
   createSyncRecoveryMaintenanceAudit,
   createSyncRecoveryMaintenanceRecord,
   createSyncRecoverySecurityProfile,
@@ -14,6 +17,7 @@ import {
   serializeSyncRecoveryMaintenanceAudit,
   shouldTrackSyncRecoveryKit,
 } from "../app/features/recovery-maintenance.mjs";
+import { createSyncChannel, createSyncIdentity } from "../app/features/sync-core.mjs";
 
 const owner = {
   deviceId: "device_owner_01",
@@ -112,10 +116,91 @@ test("recovery maintenance audits seal only non-content metadata for offline ins
   assert.equal(inspection.nextDrillAt, "2026-04-03T00:00:00.000Z");
   assert.equal(inspection.replacementReviewAt, "2026-07-01T00:00:00.000Z");
   assert.equal(inspection.separateStorageConfirmed, true);
+  assert.equal(inspection.signed, false);
+  assert.equal(inspection.signatureValid, false);
   assert.equal(comparison.matches, true);
   assert.equal(serialized.includes("恢复维护测试"), false);
   assert.equal(serialized.includes("passphrase"), false);
   assert.equal(serialized.includes("privateKey"), false);
+});
+
+test("device-signed recovery audits verify offline and trust only the saved original owner", async () => {
+  const identity = await createSyncIdentity("恢复签发设备", "2026-02-02T08:00:00.000Z");
+  const current = await createSyncChannel(identity, "可信恢复空间", "2026-02-02T08:01:00.000Z");
+  const profile = await createSyncRecoverySecurityProfile(current);
+  const kit = {
+    delegation: {
+      recoveryId: "recovery_signed_audit_01",
+      createdAt: "2026-02-02T08:02:00.000Z",
+      channel: { channelId: current.channelId, generation: current.generation, headRevisionId: current.headRevisionId },
+      owner: identity.device,
+    },
+  };
+  const record = createSyncRecoveryMaintenanceRecord(current, kit, profile, "2026-02-02T08:03:00.000Z");
+  const receipt = await createSignedSyncRecoveryMaintenanceAudit(record, identity, "2026-02-02T08:04:00.000Z");
+  const serialized = serializeSyncRecoveryMaintenanceAudit(receipt);
+  const inspection = await inspectSyncRecoveryMaintenanceAuditText(serialized);
+  const trusted = await assessSyncRecoveryMaintenanceAuditTrust(inspection.receipt, [current]);
+  const unknown = await assessSyncRecoveryMaintenanceAuditTrust(inspection.receipt, []);
+  const revoked = await assessSyncRecoveryMaintenanceAuditTrust(inspection.receipt, [{ ...current, revokedDeviceIds: [identity.device.deviceId] }]);
+  const wrongGeneration = await assessSyncRecoveryMaintenanceAuditTrust(inspection.receipt, [{ ...current, generation: current.generation + 1 }]);
+  const stranger = await createSyncIdentity("自带公钥设备", "2026-02-02T08:05:00.000Z");
+  const selfAssertedRecord = { ...record, ownerFingerprint: stranger.device.fingerprint };
+  const selfAssertedReceipt = await createSignedSyncRecoveryMaintenanceAudit(selfAssertedRecord, stranger, "2026-02-02T08:06:00.000Z");
+  const selfAssertedInspection = await inspectSyncRecoveryMaintenanceAuditText(serializeSyncRecoveryMaintenanceAudit(selfAssertedReceipt));
+  const selfAssertedTrust = await assessSyncRecoveryMaintenanceAuditTrust(selfAssertedInspection.receipt, [current]);
+
+  assert.equal(receipt.formatVersion, 2);
+  assert.equal(receipt.signer.fingerprint, record.ownerFingerprint);
+  assert.equal(serialized.includes("signingPrivateKey"), false);
+  assert.equal(serialized.includes("ciphertext"), false);
+  assert.equal(serialized.includes("passphrase"), false);
+  assert.equal(inspection.sealed, true);
+  assert.equal(inspection.signed, true);
+  assert.equal(inspection.signatureValid, true);
+  assert.equal(trusted.trusted, true);
+  assert.equal(trusted.ownerMatches, true);
+  assert.equal(trusted.generationMatches, true);
+  assert.equal(trusted.channelLabel, "可信恢复空间");
+  assert.equal(unknown.trusted, false);
+  assert.equal(unknown.channelKnown, false);
+  assert.equal(revoked.trusted, false);
+  assert.match(revoked.reason, /撤销/);
+  assert.equal(wrongGeneration.trusted, false);
+  assert.equal(wrongGeneration.generationMatches, false);
+  assert.equal(selfAssertedInspection.signatureValid, true);
+  assert.equal(selfAssertedTrust.trusted, false);
+  assert.equal(selfAssertedTrust.ownerMatches, false);
+  assert.match(selfAssertedTrust.reason, /不是.*原创所有者/);
+});
+
+test("a recomputed SHA seal cannot forge a device-signed recovery audit", async () => {
+  const identity = await createSyncIdentity("恢复防伪设备", "2026-02-03T08:00:00.000Z");
+  const current = await createSyncChannel(identity, "恢复防伪空间", "2026-02-03T08:01:00.000Z");
+  const profile = await createSyncRecoverySecurityProfile(current);
+  const kit = {
+    delegation: {
+      recoveryId: "recovery_forgery_audit_01",
+      createdAt: "2026-02-03T08:02:00.000Z",
+      channel: { channelId: current.channelId, generation: current.generation, headRevisionId: current.headRevisionId },
+      owner: identity.device,
+    },
+  };
+  const record = createSyncRecoveryMaintenanceRecord(current, kit, profile, "2026-02-03T08:03:00.000Z");
+  const receipt = await createSignedSyncRecoveryMaintenanceAudit(record, identity, "2026-02-03T08:04:00.000Z");
+  const forged = structuredClone(receipt);
+  forged.record.authorizedDeviceCount = 2;
+  const content = structuredClone(forged);
+  delete content.receiptId;
+  delete content.integrity;
+  delete content.proof;
+  const digest = await sha256Text(JSON.stringify(content));
+  forged.receiptId = `recovery_audit_${digest.slice(0, 32)}`;
+  forged.integrity = { algorithm: "SHA-256", digest };
+
+  await assert.rejects(inspectSyncRecoveryMaintenanceAuditText(JSON.stringify(forged)), /设备声明签名无效/);
+  const stranger = await createSyncIdentity("非所有者设备", "2026-02-03T08:05:00.000Z");
+  await assert.rejects(createSignedSyncRecoveryMaintenanceAudit(record, stranger), /原创所有者/);
 });
 
 test("offline recovery audit inspection rejects hidden fields, tampering, and another local record", async () => {

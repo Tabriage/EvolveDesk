@@ -1,4 +1,4 @@
-import type { SyncChannel, SyncRecoveryKit } from "./sync-core.mjs";
+import type { DeviceProof, SyncChannel, SyncIdentity, SyncPublicDevice, SyncRecoveryKit } from "./sync-core.mjs";
 
 export const RECOVERY_MAINTENANCE_RECORD_VERSION: 1;
 export const RECOVERY_DRILL_INTERVAL_DAYS: 90;
@@ -55,14 +55,36 @@ export type SyncRecoveryMaintenanceAuditReceipt = {
   record: SyncRecoveryMaintenanceRecord;
   integrity: { algorithm: "SHA-256"; digest: string };
 };
+export type SignedSyncRecoveryMaintenanceAuditReceipt = Omit<SyncRecoveryMaintenanceAuditReceipt, "formatVersion"> & {
+  formatVersion: 2;
+  signer: SyncPublicDevice;
+  proof: DeviceProof;
+};
+export type AnySyncRecoveryMaintenanceAuditReceipt = SyncRecoveryMaintenanceAuditReceipt | SignedSyncRecoveryMaintenanceAuditReceipt;
 export type SyncRecoveryMaintenanceAuditInspection = {
-  receipt: SyncRecoveryMaintenanceAuditReceipt;
+  receipt: AnySyncRecoveryMaintenanceAuditReceipt;
+  sealed: true;
+  signed: boolean;
+  signatureValid: boolean;
+  signer: SyncPublicDevice | null;
   digest: string;
   nextDrillAt: string;
   replacementReviewAt: string;
   hasDrill: boolean;
   separateStorageConfirmed: boolean;
   oldCopiesRetired: boolean;
+};
+export type SyncRecoveryMaintenanceAuditTrustAssessment = {
+  signed: boolean;
+  signatureValid: boolean;
+  trusted: boolean;
+  channelKnown: boolean;
+  channelLabel: string;
+  channelRetired: boolean;
+  generationMatches: boolean;
+  ownerMatches: boolean;
+  signer: SyncPublicDevice | null;
+  reason: string;
 };
 
 export function normalizeSyncRecoveryMaintenanceRecord(value: unknown): SyncRecoveryMaintenanceRecord;
@@ -73,6 +95,8 @@ export function recordSyncRecoveryDrill(record: SyncRecoveryMaintenanceRecord, d
 export function setSyncRecoveryMaintenanceConfirmation(record: SyncRecoveryMaintenanceRecord, confirmationId: "separate-storage" | "retire-old-copies", confirmed: boolean, confirmedAt?: string): SyncRecoveryMaintenanceRecord;
 export function assessSyncRecoveryMaintenance(channel: SyncChannel, record: SyncRecoveryMaintenanceRecord | null, now?: string): Promise<SyncRecoveryMaintenanceAssessment>;
 export function createSyncRecoveryMaintenanceAudit(record: SyncRecoveryMaintenanceRecord, createdAt?: string): Promise<SyncRecoveryMaintenanceAuditReceipt>;
-export function serializeSyncRecoveryMaintenanceAudit(receipt: SyncRecoveryMaintenanceAuditReceipt): string;
+export function createSignedSyncRecoveryMaintenanceAudit(record: SyncRecoveryMaintenanceRecord, identity: SyncIdentity, createdAt?: string): Promise<SignedSyncRecoveryMaintenanceAuditReceipt>;
+export function serializeSyncRecoveryMaintenanceAudit(receipt: AnySyncRecoveryMaintenanceAuditReceipt): string;
 export function inspectSyncRecoveryMaintenanceAuditText(raw: string): Promise<SyncRecoveryMaintenanceAuditInspection>;
-export function compareSyncRecoveryMaintenanceAuditToRecord(receipt: SyncRecoveryMaintenanceAuditReceipt, record: SyncRecoveryMaintenanceRecord): { matches: boolean; reasons: string[] };
+export function assessSyncRecoveryMaintenanceAuditTrust(receipt: AnySyncRecoveryMaintenanceAuditReceipt, channels?: SyncChannel[]): Promise<SyncRecoveryMaintenanceAuditTrustAssessment>;
+export function compareSyncRecoveryMaintenanceAuditToRecord(receipt: AnySyncRecoveryMaintenanceAuditReceipt, record: SyncRecoveryMaintenanceRecord): { matches: boolean; reasons: string[] };
