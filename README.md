@@ -150,7 +150,7 @@ sam deploy --guided
 部署后，在已经提交且工作树干净的源码上生成无秘密发布封签：
 
 ```bash
-pnpm broker:release-check -- \
+pnpm --silent broker:release-check -- \
   --target cloudflare-worker-r2 \
   --endpoint https://evolve-desk-r2-credential-broker.example.workers.dev \
   --origin https://desk.example \
