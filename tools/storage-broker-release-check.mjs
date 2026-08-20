@@ -16,6 +16,7 @@ function argumentsFrom(argv) {
   const values = {};
   for (let index = 0; index < argv.length; index += 1) {
     const name = argv[index];
+    if (name === "--") continue;
     if (!new Set(["--target", "--endpoint", "--origin"]).has(name) || !argv[index + 1]) throw new Error("用法：pnpm broker:release-check -- --target <cloudflare-worker-r2|aws-lambda-s3> --endpoint <HTTPS_ORIGIN> --origin <WORKBENCH_HTTPS_ORIGIN>");
     values[name.slice(2)] = argv[index + 1];
     index += 1;
