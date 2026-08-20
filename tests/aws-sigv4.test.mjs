@@ -44,6 +44,21 @@ test("SigV4 binds temporary session credentials and conditional write headers", 
   assert.equal(headers["if-none-match"], "*");
 });
 
+test("SigV4 can sign an AWS STS POST without changing S3 defaults", async () => {
+  const body = "Action=AssumeRole&Version=2011-06-15";
+  const headers = await createAwsSigV4Headers(officialCredentials, {
+    method: "POST",
+    service: "sts",
+    url: "https://sts.us-east-1.amazonaws.com/",
+    headers: { "Content-Type": "application/x-www-form-urlencoded;charset=utf-8" },
+    body,
+  }, "2026-08-21T09:10:11.000Z");
+
+  assert.match(headers.Authorization, /\/20260821\/us-east-1\/sts\/aws4_request/);
+  assert.match(headers.Authorization, /SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date/);
+  assert.equal(headers["x-amz-content-sha256"], "8c5a2f96788492c37e55f1e4f0fea8f59ed4791621dd61b248f8788f7b05d9e4");
+});
+
 test("SigV4 credential normalization rejects control characters and invalid regions", () => {
   assert.equal(normalizeAwsSigV4Credentials(officialCredentials).sessionToken, "");
   assert.throws(() => normalizeAwsSigV4Credentials({ ...officialCredentials, secretAccessKey: "unsafe\nsecret" }), /格式无效/);

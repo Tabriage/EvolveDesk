@@ -1,5 +1,5 @@
 import { inspectAwsCredentialLifecycle, normalizeAwsSigV4Credentials } from "./aws-sigv4.mjs";
-import { buildSyncStorageObjectUrl, getSyncStorageRecipe, normalizeSyncStorageObjectKey } from "./sync-storage-recipes.mjs";
+import { createSyncStorageScopeTicket } from "./sync-storage-scope.mjs";
 
 export const MAX_CREDENTIAL_BROKER_RESPONSE_BYTES = 64 * 1_024;
 export const MIN_CREDENTIAL_TTL_SECONDS = 5 * 60;
@@ -38,6 +38,18 @@ function normalizeTtl(value) {
   return ttlSeconds;
 }
 
+function stableValue(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) throw new Error("续签请求必须是普通 JSON 对象");
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+}
+
+function stableJson(value) {
+  return JSON.stringify(stableValue(value));
+}
+
 function credentialPayload(parsed) {
   if (parsed?.success === false) throw new Error("续签服务拒绝签发短期凭据");
   return parsed?.result || parsed?.Credentials || parsed?.credentials || parsed;
@@ -49,29 +61,44 @@ function valueFrom(payload, ...names) {
 }
 
 export function createCredentialBrokerRequest(scopeValue) {
-  const recipe = getSyncStorageRecipe(scopeValue?.provider);
-  if (recipe.authType !== "aws-sigv4") throw new Error("当前连接配方不使用 SigV4 短期凭据");
   const ttlSeconds = normalizeTtl(scopeValue?.ttlSeconds);
-  const objectKey = normalizeSyncStorageObjectKey(scopeValue?.objectKey);
-  buildSyncStorageObjectUrl(recipe.id, {
+  const ticket = createSyncStorageScopeTicket(scopeValue?.provider, {
     accountId: scopeValue?.accountId,
     bucket: scopeValue?.bucket,
-    objectKey,
+    objectKey: scopeValue?.objectKey,
     region: scopeValue?.region,
+    ttlSeconds,
   });
   return {
     format: "evolve-desk-storage-credential-request",
     version: 1,
-    provider: recipe.id,
+    provider: ticket.provider,
     scope: {
-      ...(recipe.id === "cloudflare-r2" ? { accountId: String(scopeValue.accountId).trim().toLowerCase() } : {}),
-      bucket: String(scopeValue.bucket).trim().toLowerCase(),
-      objectKey,
-      region: recipe.id === "cloudflare-r2" ? "auto" : String(scopeValue.region).trim().toLowerCase(),
-      operations: ["GetObject", "PutObject"],
+      ...(ticket.target.accountId ? { accountId: ticket.target.accountId } : {}),
+      bucket: ticket.target.bucket,
+      objectKey: ticket.target.objectKey,
+      region: ticket.target.region,
+      operations: [...ticket.operations],
     },
     ttlSeconds,
   };
+}
+
+export function inspectCredentialBrokerRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("续签请求格式无效");
+  if (value.format !== "evolve-desk-storage-credential-request" || value.version !== 1) throw new Error("续签请求版本不受支持");
+  const scope = value.scope;
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) throw new Error("续签请求范围无效");
+  const expected = createCredentialBrokerRequest({
+    provider: value.provider,
+    accountId: scope.accountId,
+    bucket: scope.bucket,
+    objectKey: scope.objectKey,
+    region: scope.region,
+    ttlSeconds: value.ttlSeconds,
+  });
+  if (stableJson(value) !== stableJson(expected)) throw new Error("续签请求与当前单对象 GET/PUT 最小权限规范不等价");
+  return expected;
 }
 
 export function normalizeCredentialBrokerResponse(parsed, request, nowValue = new Date()) {
@@ -135,5 +162,49 @@ export async function renewSyncStorageCredentials(configValue, scopeValue, fetch
     credentials: normalizeCredentialBrokerResponse(parsed, request, requestedAt),
     requestedAt: new Date(requestedAt).toISOString(),
     ttlSeconds: request.ttlSeconds,
+  };
+}
+
+export async function inspectCredentialBrokerHealth(configValue, fetchImpl = globalThis.fetch) {
+  if (typeof fetchImpl !== "function") throw new Error("当前环境不支持本地凭据代理检查");
+  const endpointUrl = new URL(normalizeBrokerUrl(configValue?.endpointUrl));
+  const healthUrl = new URL("./health", endpointUrl);
+  const bearerToken = normalizeBrokerToken(configValue?.bearerToken);
+  let response;
+  try {
+    response = await fetchImpl(healthUrl.toString(), {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+      },
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+    });
+  } catch {
+    throw new Error("无法访问本地凭据代理，请检查地址、进程与 CORS 配置");
+  }
+  if (response.status === 401 || response.status === 403) throw new Error("本地凭据代理拒绝访问，请检查 Bearer");
+  if (response.status !== 200) throw new Error(`本地凭据代理健康检查返回 HTTP ${response.status}`);
+  const declaredLength = Number(response.headers.get("content-length") || 0);
+  if (declaredLength > MAX_CREDENTIAL_BROKER_RESPONSE_BYTES) throw new Error("本地凭据代理健康响应超过 64 KiB 上限");
+  const raw = await response.text();
+  if (byteLength(raw) > MAX_CREDENTIAL_BROKER_RESPONSE_BYTES) throw new Error("本地凭据代理健康响应超过 64 KiB 上限");
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("本地凭据代理没有返回有效 JSON");
+  }
+  if (parsed?.ok !== true || parsed?.service !== "evolve-desk-storage-broker"
+    || typeof parsed?.providers?.cloudflareR2 !== "boolean" || typeof parsed?.providers?.amazonS3 !== "boolean") {
+    throw new Error("本地凭据代理健康响应格式无效");
+  }
+  return {
+    ok: true,
+    service: "evolve-desk-storage-broker",
+    providers: { cloudflareR2: parsed.providers.cloudflareR2, amazonS3: parsed.providers.amazonS3 },
   };
 }

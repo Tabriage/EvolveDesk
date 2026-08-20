@@ -28,6 +28,7 @@ export type CredentialBrokerRequest = {
 };
 
 export function createCredentialBrokerRequest(scope: CredentialBrokerScope): CredentialBrokerRequest;
+export function inspectCredentialBrokerRequest(value: unknown): CredentialBrokerRequest;
 export function normalizeCredentialBrokerResponse(parsed: unknown, request: CredentialBrokerRequest, now?: string | Date): { accessKeyId: string; secretAccessKey: string; sessionToken: string; region: string; expiresAt: string };
 export function renewSyncStorageCredentials(
   config: { endpointUrl: string; bearerToken?: string },
@@ -35,3 +36,12 @@ export function renewSyncStorageCredentials(
   fetchImpl?: typeof fetch,
   nowImpl?: () => Date,
 ): Promise<{ credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string; region: string; expiresAt: string }; requestedAt: string; ttlSeconds: number }>;
+export type CredentialBrokerHealth = {
+  ok: true;
+  service: "evolve-desk-storage-broker";
+  providers: { cloudflareR2: boolean; amazonS3: boolean };
+};
+export function inspectCredentialBrokerHealth(
+  config: { endpointUrl: string; bearerToken?: string },
+  fetchImpl?: typeof fetch,
+): Promise<CredentialBrokerHealth>;

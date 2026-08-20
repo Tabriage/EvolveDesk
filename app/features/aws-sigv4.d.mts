@@ -21,6 +21,6 @@ export function inspectAwsCredentialLifecycle(value: Pick<AwsSigV4Credentials, "
 export function assertAwsCredentialUsable(value: Pick<AwsSigV4Credentials, "sessionToken" | "expiresAt">, now?: string | Date): AwsCredentialLifecycle;
 export function createAwsSigV4Headers(
   credentials: AwsSigV4Credentials,
-  request: { method: "GET" | "HEAD" | "PUT"; url: string; headers?: Record<string, string>; body?: string },
+  request: { method: "GET" | "HEAD" | "POST" | "PUT"; service?: "s3" | "sts"; url: string; headers?: Record<string, string>; body?: string },
   now?: string | Date,
 ): Promise<Record<string, string>>;

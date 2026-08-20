@@ -126,7 +126,9 @@ export async function createAwsSigV4Headers(credentialsValue, requestValue, nowV
   const credentials = normalizeAwsSigV4Credentials(credentialsValue);
   assertAwsCredentialUsable(credentials, nowValue);
   const method = String(requestValue?.method || "").trim().toUpperCase();
-  if (!new Set(["GET", "HEAD", "PUT"]).has(method)) throw new Error("SigV4 请求方法不受支持");
+  if (!new Set(["GET", "HEAD", "POST", "PUT"]).has(method)) throw new Error("SigV4 请求方法不受支持");
+  const service = String(requestValue?.service || "s3").trim().toLowerCase();
+  if (!new Set(["s3", "sts"]).has(service)) throw new Error("SigV4 服务不受支持");
   let url;
   try {
     url = new URL(String(requestValue?.url || ""));
@@ -156,11 +158,11 @@ export async function createAwsSigV4Headers(credentialsValue, requestValue, nowV
   const canonicalHeaders = `${orderedHeaders.map(([name, value]) => `${name}:${value}`).join("\n")}\n`;
   const signedHeaders = orderedHeaders.map(([name]) => name).join(";");
   const canonicalRequest = [method, canonicalPath(url), canonicalQuery(url), canonicalHeaders, signedHeaders, payloadHash].join("\n");
-  const credentialScope = `${dateStamp}/${credentials.region}/s3/aws4_request`;
+  const credentialScope = `${dateStamp}/${credentials.region}/${service}/aws4_request`;
   const stringToSign = ["AWS4-HMAC-SHA256", timestamp, credentialScope, await sha256Hex(canonicalRequest)].join("\n");
   const dateKey = await hmacSha256(`AWS4${credentials.secretAccessKey}`, dateStamp);
   const regionKey = await hmacSha256(dateKey, credentials.region);
-  const serviceKey = await hmacSha256(regionKey, "s3");
+  const serviceKey = await hmacSha256(regionKey, service);
   const signingKey = await hmacSha256(serviceKey, "aws4_request");
   const signature = hex(await hmacSha256(signingKey, stringToSign));
   const authorization = `AWS4-HMAC-SHA256 Credential=${credentials.accessKeyId}/${credentialScope},SignedHeaders=${signedHeaders},Signature=${signature}`;

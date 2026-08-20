@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createCredentialBrokerRequest,
+  inspectCredentialBrokerHealth,
+  inspectCredentialBrokerRequest,
   normalizeCredentialBrokerResponse,
   renewSyncStorageCredentials,
 } from "../app/features/sync-credential-broker.mjs";
@@ -21,7 +23,27 @@ test("credential broker requests only the current object and GET/PUT intent", ()
   assert.equal(request.scope.objectKey, "evolve-desk/channel.json");
   assert.equal(request.ttlSeconds, 900);
   assert.equal(JSON.stringify(request).includes("secretAccessKey"), false);
+  assert.deepEqual(inspectCredentialBrokerRequest(request), request);
+  assert.throws(() => inspectCredentialBrokerRequest({ ...request, scope: { ...request.scope, operations: ["GetObject", "PutObject", "DeleteObject"] } }), /不等价/);
   assert.throws(() => createCredentialBrokerRequest({ ...r2Scope, ttlSeconds: 60 }), /300–604800/);
+});
+
+test("credential broker health check derives a sibling endpoint and validates capabilities", async () => {
+  const calls = [];
+  const health = await inspectCredentialBrokerHealth({
+    endpointUrl: "http://127.0.0.1:4243/credentials",
+    bearerToken: "memory-only-token",
+  }, async (url, options) => {
+    calls.push({ url, options });
+    return new Response(JSON.stringify({
+      ok: true,
+      service: "evolve-desk-storage-broker",
+      providers: { cloudflareR2: true, amazonS3: false },
+    }), { status: 200 });
+  });
+  assert.equal(calls[0].url, "http://127.0.0.1:4243/health");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer memory-only-token");
+  assert.deepEqual(health.providers, { cloudflareR2: true, amazonS3: false });
 });
 
 test("credential broker accepts a Cloudflare result and derives expiry from requested TTL", async () => {

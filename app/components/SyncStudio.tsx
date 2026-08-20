@@ -36,8 +36,10 @@ import type { AwsCredentialLifecycle } from "../features/aws-sigv4.mjs";
 import {
   MAX_CREDENTIAL_TTL_SECONDS,
   MIN_CREDENTIAL_TTL_SECONDS,
+  inspectCredentialBrokerHealth,
   renewSyncStorageCredentials,
 } from "../features/sync-credential-broker.mjs";
+import type { CredentialBrokerHealth } from "../features/sync-credential-broker.mjs";
 import {
   createSyncConnectionDiagnostic,
   serializeSyncConnectionDiagnostic,
@@ -50,6 +52,8 @@ import {
   getSyncStorageRecipe,
 } from "../features/sync-storage-recipes.mjs";
 import type { SyncStorageRecipeId } from "../features/sync-storage-recipes.mjs";
+import { createSyncStorageScopeTicket } from "../features/sync-storage-scope.mjs";
+import type { SyncStorageScopeTicket } from "../features/sync-storage-scope.mjs";
 import { SyncRecoveryConsole } from "./SyncRecoveryConsole";
 import {
   SYNC_CHANNELS_CHANGED_EVENT,
@@ -200,6 +204,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   const [remoteBrokerUrl, setRemoteBrokerUrl] = useState("");
   const [remoteBrokerToken, setRemoteBrokerToken] = useState("");
   const [remoteBrokerTtlSeconds, setRemoteBrokerTtlSeconds] = useState(900);
+  const [remoteBrokerHealth, setRemoteBrokerHealth] = useState<CredentialBrokerHealth | null>(null);
   const [remoteClock, setRemoteClock] = useState(() => Date.now());
   const [currentOrigin, setCurrentOrigin] = useState("");
   const [remoteProof, setRemoteProof] = useState<RemoteProof | null>(null);
@@ -241,10 +246,28 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
     : { label: "尚未装载凭据", detail: "手动输入短期凭据，或由可信续签服务按当前对象签发。" };
   const remoteCredentialReady = selectedRemoteRecipe.authType === "bearer" || Boolean(hasRemoteSigV4Credential && remoteRegion.trim() && remoteCredentialLifecycle.usable);
   const remoteConnectionReady = Boolean(preparedRemoteObjectUrl && remoteCredentialReady);
+  const remoteScopeTicket = useMemo<SyncStorageScopeTicket | null>(() => {
+    if (selectedRemoteRecipe.id !== "cloudflare-r2" && selectedRemoteRecipe.id !== "amazon-s3") return null;
+    try {
+      return createSyncStorageScopeTicket(selectedRemoteRecipe.id, {
+        accountId: remoteAccountId,
+        bucket: remoteBucket,
+        objectKey: remoteObjectKey.trim() || defaultRemoteObjectKey,
+        region: remoteRegion,
+        ttlSeconds: remoteBrokerTtlSeconds,
+      });
+    } catch {
+      return null;
+    }
+  }, [defaultRemoteObjectKey, remoteAccountId, remoteBrokerTtlSeconds, remoteBucket, remoteObjectKey, remoteRegion, selectedRemoteRecipe]);
+  const checkedBrokerSupportsProvider = !remoteBrokerHealth || (selectedRemoteRecipe.id === "cloudflare-r2"
+    ? remoteBrokerHealth.providers.cloudflareR2
+    : remoteBrokerHealth.providers.amazonS3);
   const remoteRenewalReady = Boolean(
     selectedRemoteRecipe.authType === "aws-sigv4"
-    && preparedRemoteObjectUrl
+    && remoteScopeTicket
     && remoteBrokerUrl.trim()
+    && checkedBrokerSupportsProvider
     && Number.isInteger(remoteBrokerTtlSeconds)
     && remoteBrokerTtlSeconds >= MIN_CREDENTIAL_TTL_SECONDS
     && remoteBrokerTtlSeconds <= MAX_CREDENTIAL_TTL_SECONDS,
@@ -369,8 +392,9 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
     setRemoteSessionToken("");
     setRemoteExpiresAt("");
     setRemoteCredentialSource("manual");
-    setRemoteBrokerUrl("");
+    setRemoteBrokerUrl(recipe.authType === "aws-sigv4" ? "http://127.0.0.1:4243/credentials" : "");
     setRemoteBrokerToken("");
+    setRemoteBrokerHealth(null);
     clearRemoteProbe();
     setMessage(`${recipe.label} 配方已选择；连接参数和凭据只留在当前页面内存。 `);
   }
@@ -399,6 +423,37 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       setMessage(`已复制 ${selectedRemoteRecipe.label} 的最小 CORS 配方；AllowedOrigins 已限定为当前工作台 ${currentOrigin}。 `);
     } catch {
       setMessage("浏览器拒绝写入剪贴板；请手动配置当前 Origin、GET/PUT、SigV4 请求头并暴露 ETag。 ");
+    }
+  }
+
+  async function copyRemoteScopePolicy() {
+    if (!remoteScopeTicket || !globalThis.navigator?.clipboard) {
+      setMessage("请先补全单一对象地址，再复制最小权限策略。 ");
+      return;
+    }
+    try {
+      await globalThis.navigator.clipboard.writeText(`${JSON.stringify(remoteScopeTicket.providerPolicy, null, 2)}\n`);
+      setMessage(`已复制 ${selectedRemoteRecipe.label} 单对象 GET/PUT 最小权限策略；不包含 LIST、DELETE 或通配符。 `);
+    } catch {
+      setMessage("浏览器拒绝写入剪贴板；权限票据仍已在界面中完成范围核对。 ");
+    }
+  }
+
+  async function checkRemoteBroker() {
+    if (!remoteBrokerUrl.trim()) return;
+    setBusy("remote-broker-health");
+    setRemoteBrokerHealth(null);
+    try {
+      const health = await inspectCredentialBrokerHealth({ endpointUrl: remoteBrokerUrl, bearerToken: remoteBrokerToken });
+      setRemoteBrokerHealth(health);
+      const supportsProvider = selectedRemoteRecipe.id === "cloudflare-r2" ? health.providers.cloudflareR2 : health.providers.amazonS3;
+      setMessage(supportsProvider
+        ? `本地凭据代理在线，并已启用 ${selectedRemoteRecipe.label} 签发器。 `
+        : `本地凭据代理在线，但尚未配置 ${selectedRemoteRecipe.label} 签发器。 `);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "无法检查本地凭据代理");
+    } finally {
+      setBusy("");
     }
   }
 
@@ -850,12 +905,18 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
             <section className={`remote-credential-passport ${hasRemoteSigV4Credential ? remoteCredentialLifecycle.status : "empty"}`}>
               <header><div><span>CREDENTIAL LIFELINE / 凭据寿命</span><strong>{remoteCredentialLifeCopy.label}</strong><small>{remoteCredentialLifeCopy.detail}</small></div><b>{remoteCredentialSource === "broker" ? "BROKER ISSUED" : remoteSessionToken ? "MANUAL SESSION" : "MANUAL KEY"}</b></header>
               <div className="remote-credential-life-rail"><span className={hasRemoteSigV4Credential ? "loaded" : ""}><i />凭据装载</span><b>→</b><span className={hasRemoteSigV4Credential && remoteCredentialLifecycle.status === "expiring" ? "active" : ""}><i />5 分钟警戒</span><b>→</b><span className={hasRemoteSigV4Credential && !remoteCredentialLifecycle.usable ? "active" : ""}><i />30 秒停发</span><b>→</b><span className={hasRemoteSigV4Credential && remoteCredentialLifecycle.status === "expired" ? "active" : ""}><i />到期</span></div>
+              <div className={`remote-permission-ticket ${remoteScopeTicket ? "exact" : "incomplete"}`}>
+                <div className="remote-permission-target"><span>PERMISSION TICKET / 权限剪票</span><strong>{remoteScopeTicket ? selectedRemoteRecipe.label : "等待精确对象"}</strong><code>{remoteScopeTicket ? `${remoteScopeTicket.target.bucket}/${remoteScopeTicket.target.objectKey}` : "补全 Account / Bucket / Region 后生成"}</code></div>
+                <i aria-hidden="true" />
+                <div className="remote-permission-scope"><span>ALLOW</span><strong>GET OBJECT + PUT OBJECT</strong><small>NO LIST · NO DELETE · NO WILDCARD · TTL {remoteScopeTicket?.ttlSeconds || "—"}s</small></div>
+                <div className="remote-permission-actions"><b>{remoteBrokerHealth ? checkedBrokerSupportsProvider ? "BROKER READY" : "ISSUER OFF" : "BROKER UNCHECKED"}</b><button onClick={() => void copyRemoteScopePolicy()} disabled={!remoteScopeTicket || Boolean(busy)}>复制最小权限策略</button></div>
+              </div>
               <div className="remote-credential-renewal">
                 <label><span>当前凭据到期时间</span><input type="datetime-local" value={localDateTimeValue(remoteExpiresAt)} onChange={(event) => { setRemoteExpiresAt(event.target.value ? new Date(event.target.value).toISOString() : ""); setRemoteClock(Date.now()); markManualCredential(); }} disabled={Boolean(busy)} /><small>手动凭据可补充；broker 响应会自动填写。</small></label>
-                <label><span>可信续签服务 URL</span><input type="url" value={remoteBrokerUrl} onChange={(event) => setRemoteBrokerUrl(event.target.value)} placeholder="https://credentials.example/evolve-desk/renew" autoComplete="off" disabled={Boolean(busy)} /><small>父级 R2/AWS 凭据必须留在这个可信服务端。</small></label>
-                <label><span>续签服务 Bearer（可选）</span><input type="password" value={remoteBrokerToken} onChange={(event) => setRemoteBrokerToken(event.target.value)} placeholder="只留在当前页面内存" autoComplete="off" disabled={Boolean(busy)} /><small>不会发送给对象存储，也不会进入诊断摘要。</small></label>
-                <label><span>申请寿命（秒）</span><input type="number" min={300} max={604800} step={60} value={remoteBrokerTtlSeconds} onChange={(event) => setRemoteBrokerTtlSeconds(Number(event.target.value))} disabled={Boolean(busy)} /><small>默认 900 秒；安全上限 7 天。</small></label>
-                <button onClick={() => void renewRemoteCredentials()} disabled={!remoteRenewalReady || Boolean(busy)}>{busy === "remote-renew" ? "正在续签…" : "按需续签当前对象"}<span>↻</span></button>
+                <label><span>可信续签服务 URL</span><input type="url" value={remoteBrokerUrl} onChange={(event) => { setRemoteBrokerUrl(event.target.value); setRemoteBrokerHealth(null); }} placeholder="http://127.0.0.1:4243/credentials" autoComplete="off" disabled={Boolean(busy)} /><small>可选本地模板仅监听回环；父级凭据留在代理进程。</small></label>
+                <label><span>续签服务 Bearer（可选）</span><input type="password" value={remoteBrokerToken} onChange={(event) => { setRemoteBrokerToken(event.target.value); setRemoteBrokerHealth(null); }} placeholder="只留在当前页面内存" autoComplete="off" disabled={Boolean(busy)} /><small>不会发送给对象存储，也不会进入诊断摘要。</small></label>
+                <label><span>申请寿命（秒）</span><input type="number" min={selectedRemoteRecipe.id === "amazon-s3" ? 900 : 300} max={selectedRemoteRecipe.id === "amazon-s3" ? 43200 : 604800} step={60} value={remoteBrokerTtlSeconds} onChange={(event) => setRemoteBrokerTtlSeconds(Number(event.target.value))} disabled={Boolean(busy)} /><small>默认 900 秒；AWS 上限 12 小时，R2 上限 7 天。</small></label>
+                <div className="remote-broker-actions"><button onClick={() => void checkRemoteBroker()} disabled={!remoteBrokerUrl.trim() || Boolean(busy)}>{busy === "remote-broker-health" ? "检查中…" : "检查代理"}</button><button onClick={() => void renewRemoteCredentials()} disabled={!remoteRenewalReady || Boolean(busy)}>{busy === "remote-renew" ? "正在续签…" : "按需续签当前对象"}<span>↻</span></button></div>
               </div>
               <footer><i />续签请求只声明供应商、桶、当前对象 Key、Region、GET/PUT 意图与 TTL；不会上传现有 Access Key、Secret 或 Session Token。</footer>
             </section>
