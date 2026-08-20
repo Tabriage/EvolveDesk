@@ -45,7 +45,9 @@ async function main() {
   if (git("status", "--porcelain", "--untracked-files=all")) throw new Error("工作树不干净；请先审阅、提交并验证源码，再生成发布封签");
   for (const path of definition.files) git("ls-files", "--error-unmatch", "--", path);
   const commit = git("rev-parse", "HEAD").toLowerCase();
-  const branch = git("branch", "--show-current");
+  const branch = git("branch", "--show-current") || (process.env.GITHUB_REF?.startsWith("refs/heads/") ? process.env.GITHUB_REF.slice("refs/heads/".length) : "");
+  if (!branch) throw new Error("无法确定源码分支；发布封签只接受命名分支");
+  if (process.env.GITHUB_SHA && process.env.GITHUB_SHA.toLowerCase() !== commit) throw new Error("GitHub Actions 提交与当前检出提交不一致");
   const remoteHead = git("ls-remote", "--exit-code", "origin", `refs/heads/${branch}`).split(/\s+/)[0]?.toLowerCase();
   if (remoteHead !== commit) throw new Error("当前提交尚未成为 GitHub origin 同名分支头；请先推送并再次核对");
   const proof = await createStorageBrokerReleaseProof({

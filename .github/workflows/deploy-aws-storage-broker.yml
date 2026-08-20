@@ -1,0 +1,188 @@
+name: Deploy AWS storage broker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: storage-broker-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: OIDC deploy and attest immutable Lambda version
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: storage-broker-production
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      AWS_REGION: ${{ vars.EVOLVE_AWS_REGION }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.EVOLVE_AWS_DEPLOY_ROLE_ARN }}
+      AWS_ARTIFACT_BUCKET: ${{ vars.EVOLVE_AWS_ARTIFACT_BUCKET }}
+      AWS_STACK_NAME: ${{ vars.EVOLVE_AWS_STACK_NAME }}
+      AWS_TARGET_ROLE_ARN: ${{ vars.EVOLVE_AWS_BROKER_TARGET_ROLE_ARN }}
+      AWS_FUNCTION_NAME: ${{ vars.EVOLVE_AWS_BROKER_FUNCTION_NAME }}
+      AWS_RUNTIME_ROLE_NAME: ${{ vars.EVOLVE_AWS_BROKER_RUNTIME_ROLE_NAME }}
+      WORKBENCH_ORIGIN: ${{ vars.EVOLVE_WORKBENCH_ORIGIN }}
+    steps:
+      - name: Reject incomplete production configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in AWS_REGION AWS_DEPLOY_ROLE_ARN AWS_ARTIFACT_BUCKET AWS_STACK_NAME AWS_TARGET_ROLE_ARN AWS_FUNCTION_NAME AWS_RUNTIME_ROLE_NAME WORKBENCH_ORIGIN; do
+            if [[ -z "${!name:-}" ]]; then missing+=("$name"); fi
+          done
+          if (( ${#missing[@]} )); then
+            printf 'Missing GitHub environment variables: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            printf 'Production deployment requires refs/heads/main, got %s\n' "$GITHUB_REF" >&2
+            exit 1
+          fi
+
+      - name: Check out the exact commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 10.33.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.2
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install pinned AWS SAM CLI
+        uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
+        with:
+          version: 1.165.0
+
+      - name: Exchange GitHub OIDC token for a short-lived AWS session
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: EvolveDesk-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+          retry-max-attempts: 3
+
+      - name: Validate and build the allowlisted runtime
+        run: |
+          set -euo pipefail
+          sam validate --lint --template-file deploy/storage-broker/aws-lambda/template.yaml
+          sam build --template-file deploy/storage-broker/aws-lambda/template.yaml
+
+      - name: Deploy through CloudFormation
+        env:
+          BROKER_TOKEN: ${{ secrets.EVOLVE_BROKER_TOKEN }}
+          TARGET_EXTERNAL_ID: ${{ secrets.EVOLVE_AWS_EXTERNAL_ID }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$BROKER_TOKEN" =~ ^[A-Za-z0-9_-]{32,256}$ ]]; then
+            printf 'EVOLVE_BROKER_TOKEN must be a 32-256 character base64url-style secret\n' >&2
+            exit 1
+          fi
+          overrides=(
+            "AllowedOrigin=$WORKBENCH_ORIGIN"
+            "BrokerToken=$BROKER_TOKEN"
+            "TargetRoleArn=$AWS_TARGET_ROLE_ARN"
+            "SyncRegion=$AWS_REGION"
+            "BrokerFunctionName=$AWS_FUNCTION_NAME"
+            "BrokerExecutionRoleName=$AWS_RUNTIME_ROLE_NAME"
+          )
+          if [[ -n "$TARGET_EXTERNAL_ID" ]]; then overrides+=("ExternalId=$TARGET_EXTERNAL_ID"); fi
+          sam deploy \
+            --template-file .aws-sam/build/template.yaml \
+            --stack-name "$AWS_STACK_NAME" \
+            --region "$AWS_REGION" \
+            --s3-bucket "$AWS_ARTIFACT_BUCKET" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides "${overrides[@]}"
+
+      - name: Read the active immutable cloud version
+        id: cloud
+        shell: bash
+        run: |
+          set -euo pipefail
+          function_name=$(aws cloudformation describe-stack-resource --stack-name "$AWS_STACK_NAME" --logical-resource-id StorageCredentialBroker --query 'StackResourceDetail.PhysicalResourceId' --output text)
+          version=$(aws lambda get-alias --function-name "$function_name" --name live --query 'FunctionVersion' --output text)
+          code_sha256=$(aws lambda get-function-configuration --function-name "$function_name" --qualifier "$version" --query 'CodeSha256' --output text)
+          resource_arn=$(aws lambda get-function-configuration --function-name "$function_name" --query 'FunctionArn' --output text)
+          endpoint=$(aws lambda get-function-url-config --function-name "$function_name" --qualifier live --query 'FunctionUrl' --output text)
+          observed_at=$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')
+          {
+            printf 'function_name=%s\n' "$function_name"
+            printf 'version=%s\n' "$version"
+            printf 'code_sha256=%s\n' "$code_sha256"
+            printf 'resource_arn=%s\n' "$resource_arn"
+            printf 'endpoint=%s\n' "${endpoint%/}"
+            printf 'observed_at=%s\n' "$observed_at"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build closed-field source and deployment proofs
+        env:
+          BROKER_ENDPOINT: ${{ steps.cloud.outputs.endpoint }}
+          LAMBDA_ARN: ${{ steps.cloud.outputs.resource_arn }}
+          LAMBDA_VERSION: ${{ steps.cloud.outputs.version }}
+          LAMBDA_CODE_SHA256: ${{ steps.cloud.outputs.code_sha256 }}
+          CLOUD_OBSERVED_AT: ${{ steps.cloud.outputs.observed_at }}
+        run: |
+          set -euo pipefail
+          release_proof="$RUNNER_TEMP/evolve-storage-broker-release-proof.json"
+          deployment_proof="$RUNNER_TEMP/evolve-storage-broker-deployment-proof.json"
+          pnpm --silent broker:release-check -- \
+            --target aws-lambda-s3 \
+            --endpoint "$BROKER_ENDPOINT" \
+            --origin "$WORKBENCH_ORIGIN" \
+            > "$release_proof"
+          pnpm --silent broker:deployment-proof -- \
+            --release-proof "$release_proof" \
+            --resource-arn "$LAMBDA_ARN" \
+            --cloud-version "$LAMBDA_VERSION" \
+            --code-sha256 "$LAMBDA_CODE_SHA256" \
+            --endpoint "$BROKER_ENDPOINT" \
+            --region "$AWS_REGION" \
+            --observed-at "$CLOUD_OBSERVED_AT" \
+            > "$deployment_proof"
+
+      - name: Attest the deployment proof provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/evolve-storage-broker-deployment-proof.json
+
+      - name: Publish the deployment proof artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: evolve-storage-broker-deployment-proof-${{ github.run_id }}
+          path: ${{ runner.temp }}/evolve-storage-broker-deployment-proof.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Write the operator handoff
+        env:
+          BROKER_ENDPOINT: ${{ steps.cloud.outputs.endpoint }}
+          LAMBDA_VERSION: ${{ steps.cloud.outputs.version }}
+          LAMBDA_CODE_SHA256: ${{ steps.cloud.outputs.code_sha256 }}
+        run: |
+          {
+            printf '### EvolveDesk storage broker deployed\n\n'
+            printf -- '- Endpoint: `%s`\n' "$BROKER_ENDPOINT"
+            printf -- '- Immutable Lambda version: `%s`\n' "$LAMBDA_VERSION"
+            printf -- '- Lambda CodeSha256: `%s`\n' "$LAMBDA_CODE_SHA256"
+            printf -- '- Verify after download: `gh attestation verify evolve-storage-broker-deployment-proof.json -R %s`\n' "$GITHUB_REPOSITORY"
+          } >> "$GITHUB_STEP_SUMMARY"

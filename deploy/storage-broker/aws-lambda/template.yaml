@@ -11,7 +11,7 @@ Parameters:
     Type: String
     NoEcho: true
     MinLength: 16
-    MaxLength: 8192
+    MaxLength: 4096
     Description: Independent bearer token required by every broker request
   TargetRoleArn:
     Type: String
@@ -26,13 +26,52 @@ Parameters:
     NoEcho: true
     Default: ""
     MaxLength: 1224
+  BrokerFunctionName:
+    Type: String
+    Default: evolve-desk-storage-credential-broker
+    AllowedPattern: ^[A-Za-z0-9-_]{1,64}$
+  BrokerExecutionRoleName:
+    Type: String
+    Default: evolve-desk-storage-broker-runtime
+    AllowedPattern: ^[A-Za-z0-9_+=,.@-]{1,64}$
 
 Resources:
+  StorageCredentialBrokerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref BrokerExecutionRoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WriteOnlyOwnLambdaLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${BrokerFunctionName}:*
+        - PolicyName: AssumeOnlyConfiguredCredentialRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Ref TargetRoleArn
+
   StorageCredentialBroker:
     Type: AWS::Serverless::Function
     Metadata:
       BuildMethod: makefile
     Properties:
+      FunctionName: !Ref BrokerFunctionName
       CodeUri: ../../..
       Handler: deploy/storage-broker/aws-lambda/handler.handler
       Runtime: nodejs22.x
@@ -40,6 +79,8 @@ Resources:
       MemorySize: 128
       Timeout: 10
       ReservedConcurrentExecutions: 5
+      Role: !GetAtt StorageCredentialBrokerRole.Arn
+      AutoPublishAlias: live
       Environment:
         Variables:
           ALLOWED_ORIGIN: !Ref AllowedOrigin
@@ -47,12 +88,6 @@ Resources:
           EVOLVE_AWS_ROLE_ARN: !Ref TargetRoleArn
           EVOLVE_AWS_REGION: !Ref SyncRegion
           EVOLVE_AWS_EXTERNAL_ID: !Ref ExternalId
-      Policies:
-        - Statement:
-            - Sid: AssumeOnlyConfiguredCredentialRole
-              Effect: Allow
-              Action: sts:AssumeRole
-              Resource: !Ref TargetRoleArn
       FunctionUrlConfig:
         # Function URLs with NONE auth are public. The handler still requires its
         # independent Bearer, exact Origin, fixed routes, and bounded JSON body.
@@ -63,3 +98,7 @@ Outputs:
   CredentialBrokerUrl:
     Description: Append /credentials in EvolveDesk; /health reports capability only
     Value: !GetAtt StorageCredentialBrokerUrl.FunctionUrl
+  CredentialBrokerFunctionName:
+    Value: !Ref StorageCredentialBroker
+  CredentialBrokerFunctionArn:
+    Value: !GetAtt StorageCredentialBroker.Arn

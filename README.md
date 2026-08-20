@@ -4,6 +4,8 @@
 
 项目主页：[github.com/Tabriage/EvolveDesk](https://github.com/Tabriage/EvolveDesk)
 
+[![CI](https://github.com/Tabriage/EvolveDesk/actions/workflows/ci.yml/badge.svg)](https://github.com/Tabriage/EvolveDesk/actions/workflows/ci.yml)
+
 ## 本地运行
 
 ```bash
@@ -137,6 +139,10 @@ pnpm exec wrangler deploy --config deploy/storage-broker/cloudflare/wrangler.jso
 
 `ALLOWED_ORIGIN` 必须是实际工作台的精确 HTTPS Origin；`BROKER_TOKEN` 至少 16 字符并应独立生成。不要创建或提交 `.dev.vars`，仓库已显式忽略它。
 
+如果 GitHub 仓库侧不能保存长期 Cloudflare 部署 Token，按 [`deploy/storage-broker/cloudflare/WORKERS_BUILDS.md`](deploy/storage-broker/cloudflare/WORKERS_BUILDS.md) 把该 Worker 接到 Cloudflare Workers Builds：GitHub App 只授权本仓库，生产分支固定为 `main`，根目录为 `/`，部署命令使用仓库锁定的 pnpm 与 Wrangler。Cloudflare 会在 GitHub 提交上回写 Check Run 与 Build ID。
+
+这条 Cloudflare 路径不是 OIDC。官方外部 GitHub Actions 路径仍要求 `CLOUDFLARE_API_TOKEN`；Workers Builds 则使用保存在 Cloudflare 一侧的用户 API Token，自动生成 Token 的默认权限还可能覆盖 Workers、KV、R2 和 Routes。仓库无需持有它不等于凭据已经短期化：应改用独立、单账号、尽量只含 Workers Scripts Edit 的 Token，并连同五个运行时 secret 定期轮换。依据见 [Workers Builds Git 集成](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/)、[Build 配置与 Token 边界](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/) 和 [外部 GitHub Actions 认证要求](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)。
+
 AWS 模板位于 `deploy/storage-broker/aws-lambda/`，使用 Node.js 22、Lambda Function URL payload v2.0 和 Makefile 白名单打包。模板不会接收静态 AWS Access Key：Lambda 自动注入执行角色的短期凭据，生成的执行策略只能对参数指定的角色调用 `sts:AssumeRole`。需要安装 AWS SAM CLI 后执行：
 
 ```bash
@@ -146,6 +152,15 @@ sam deploy --guided
 ```
 
 `AllowedOrigin`、`BrokerToken`、`TargetRoleArn` 与 `SyncRegion` 都需要在引导部署中明确填写。Function URL 使用 `NONE` 以允许浏览器调用，因此它是公开互联网端点；应用层仍强制独立 Bearer、精确 Origin、固定 `/health` / `/credentials` 路径、64 KiB 请求上限和最多 5 个并发执行环境。公开生产端点仍应结合预算告警、日志脱敏、限流，以及需要时改用 API Gateway/WAF。浏览器不能直接使用 `AWS_IAM` Function URL，因为那会再次要求它持有可签名 AWS 身份。
+
+仓库还提供手动触发的 `Deploy AWS storage broker` 工作流。它只授予 `contents: read`、`id-token: write` 与 `attestations: write`，用 GitHub OIDC JWT 换取一小时以内的 AWS 会话，不保存 AWS Access Key。首次启用需要先在 AWS 添加 `https://token.actions.githubusercontent.com` OIDC Provider，再部署 `deploy/storage-broker/aws-lambda/github-oidc-role-template.yaml`。信任策略同时固定 `aud=sts.amazonaws.com`、当前仓库不可变 owner/repository ID 和 `storage-broker-production` Environment，不使用仓库通配符。为 Environment 配置审批者和只允许 `main` 的部署分支规则。
+
+在 GitHub Environment `storage-broker-production` 中配置：
+
+- Variables：`EVOLVE_AWS_REGION`、`EVOLVE_AWS_DEPLOY_ROLE_ARN`、`EVOLVE_AWS_ARTIFACT_BUCKET`、`EVOLVE_AWS_STACK_NAME`、`EVOLVE_AWS_BROKER_TARGET_ROLE_ARN`、`EVOLVE_AWS_BROKER_FUNCTION_NAME`、`EVOLVE_AWS_BROKER_RUNTIME_ROLE_NAME`、`EVOLVE_WORKBENCH_ORIGIN`。
+- Secrets：32–256 字符、只含字母数字和 `_` / `-` 的随机 `EVOLVE_BROKER_TOKEN`；跨账号目标角色需要时再配置 `EVOLVE_AWS_EXTERNAL_ID`。
+
+工作流锁定 pnpm、Node.js、SAM CLI 和每个 Action 的完整提交 SHA，SAM 只打包 Makefile 白名单文件。CloudFormation 发布后，`live` Alias 指向一个不可变 Lambda Version；流水线读取该版本的 `CodeSha256`、Function ARN 和实际 Function URL，生成闭集部署回执，并用 GitHub Artifact Attestation 签发来源证明。GitHub 官方说明见 [AWS OIDC](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws) 与 [Artifact Attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)。
 
 部署后，在已经提交且工作树干净的源码上生成无秘密发布封签：
 
@@ -159,7 +174,15 @@ pnpm --silent broker:release-check -- \
 
 AWS 使用 `--target aws-lambda-s3`，`--endpoint` 必须是实际 `https://<id>.lambda-url.<region>.on.aws` Origin。命令拒绝未提交或有改动的工作树，并联网要求当前提交与 GitHub origin 同名分支头一致；随后封签 GitHub origin、40 位提交、分支、远端头核对结果、代理/工作台 Origin、公开端点安全契约，以及目标运行时每一个实际文件的 SHA-256。它不读取或导出任何 secret 值。把文件交给工作台“核对发布封签”后，只有供应商、代理 Origin、当前页面 Origin、字段闭集与整体 SHA-256 全部一致才显示 `SOURCE SEALED`。
 
-该封签是可重复核对的来源与配置清单，不是设备签名、GitHub Attestation 或云平台部署证明：它不能单独证明线上端点确实运行这些字节，也不能证明仓库作者身份。核对方仍应从所声明提交独立计算文件哈希，并在 Cloudflare/AWS 控制台确认当前部署版本、Origin、密钥绑定和角色策略。
+普通发布封签是可重复核对的来源与配置清单，不是设备签名、GitHub Attestation 或云平台部署证明：它不能单独证明线上端点确实运行这些字节，也不能证明仓库作者身份。AWS OIDC 流水线会额外产出 `evolve-storage-broker-deployment-proof.json`，其中嵌套普通封签，并绑定 GitHub Run、Environment、不可变 Lambda Version、Function ARN、Function URL 与 `CodeSha256`。在工作台 Amazon S3 配方中导入后，只有供应商、代理 Origin、页面 Origin 和所有闭集摘要一致才显示 `CI RECEIPT MATCH`。
+
+部署回执自身的 SHA-256 只能检查文件内部是否被改写；工作台不会把这一点伪装成作者身份验证。下载 Actions Artifact 后先执行：
+
+```bash
+gh attestation verify evolve-storage-broker-deployment-proof.json -R Tabriage/EvolveDesk
+```
+
+验证通过再导入工作台。GitHub Attestation 证明该文件由声明的 Actions 工作流产生；它仍不能替代对 AWS 账号、OIDC Role 权限、目标 AssumeRole 信任、桶策略、当前 Alias 或公开端点防滥用措施的独立核对。Cloudflare Workers Builds 目前只回流 Check Run、Build ID 与 Dashboard Version ID，没有生成可导入的 GitHub Attestation 回执。
 
 部署实现依据可对照 [Workers secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[Workers Web Crypto](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/)、[Lambda Function URL payload v2.0](https://docs.aws.amazon.com/lambda/latest/dg/urls-invocation.html)、[Function URL 访问控制](https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html)、[Lambda 运行时环境凭据](https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html) 与 [AWS SAM Makefile 构建](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/building-custom-runtimes.html)。
 
@@ -199,7 +222,7 @@ AWS 使用 `--target aws-lambda-s3`，`--endpoint` 必须是实际 `https://<id>
 - 条件对象适配器只接受 HTTPS（本机回环地址可用 HTTP），拒绝 URL 内嵌账号密码、混用预签名查询参数和跨站重定向；只上传通过同步包解析器的密文。首次发布使用 `If-None-Match: *`，后续发布必须先读到强 ETag 并使用 `If-Match`。远端版本与本机预期不一致、服务器返回 409/412、遗漏强 ETag 或发布后回读版本不一致时，本地版本头保持不变，不会退化为无条件覆盖。R2 与 S3 配方只生成单对象地址，不把一次一操作的预签名 URL 包装成可读写连接；CORS 配方限定当前工作台 Origin，只允许 GET/PUT 和签名所需请求头，并显式暴露 ETag。
 - SigV4 凭据如果带到期时间，会在每次请求签名前重新检查；已经到期或剩余不足 30 秒时不发出网络请求。Session Token 没有到期时间时明确显示“期限未知”，不会伪装成长期有效。续签服务只收到供应商、桶、单一对象 Key、Region、GET/PUT 意图与 TTL，不会收到当前 SigV4 凭据；父级 R2/AWS 凭据必须留在可信服务端。
 - 本地凭据代理是可选参考模板，不随工作台自动启动。它固定绑定 IPv4 回环地址，并同时检查远端地址、Host、Origin 与可选 Bearer；父级云凭据只从代理进程环境读取，不写入页面或响应。R2 使用精确 `actions + objectPaths` 的本地 JWT 签发；AWS 使用精确对象 ARN 的 STS 会话策略。权限票据会通过重新生成和字段闭集比较拒绝额外操作、前缀、通配符与隐藏字段，但不能替代云端父级权限、角色信任、桶策略和 SCP 的独立审计。
-- 部署代理必须使用 HTTPS 且强制至少 16 字符的独立 Bearer。Cloudflare Worker 只从 required secret bindings 读取 R2 父凭据；AWS Lambda 只使用运行时注入的执行角色临时凭据，SAM 角色只允许 AssumeRole 到声明角色。两种部署端点仍然公开可达，Origin/CORS 不是身份验证，Bearer 也不能替代云端限流、预算监控、密钥轮换与访问日志审计。发布封签只证明文件内部、来源声明和当前界面绑定一致，不证明线上版本或作者身份。
+- 部署代理必须使用 HTTPS 且强制至少 16 字符的独立 Bearer。Cloudflare Worker 只从 required secret bindings 读取 R2 父凭据；AWS Lambda 只使用运行时注入的执行角色临时凭据，显式运行角色只允许 AssumeRole 到声明角色。GitHub Actions 到 AWS 的发布身份使用 OIDC 短期会话，信任策略绑定不可变仓库 ID 与受保护 Environment；Cloudflare Workers Builds 仍依赖 Cloudflare 保存的长期用户 Token，不应称为 OIDC。两种部署端点仍然公开可达，Origin/CORS 不是身份验证，Bearer 也不能替代云端限流、预算监控、密钥轮换与访问日志审计。普通发布封签只证明文件内部、来源声明和当前界面绑定一致；AWS 部署回执还绑定 CI Run、不可变 Lambda Version 与 CodeSha256，但必须先通过 GitHub Attestation CLI 验证才能建立工作流来源信任。
 - 无秘密连接诊断限制为 64 KiB，只记录配方、凭据生命周期、脱敏错误分类、条件写入契约，以及端点、对象、Access Key ID、版本 ID 与 ETag 的 SHA-256 摘要。严格读取器拒绝未声明字段、状态矛盾和封签不匹配；摘要没有设备签名，因此只能证明文件内部完整一致，不能证明签发者身份，也不是连接授权或可重放配置。摘要不是匿名凭证：知道候选地址、Key 或 ETag 的接收方仍可计算并比对。
 - 同步信任仍是由创建设备逐台授权的星形模型：创建设备认识每个成员，成员只认识创建设备和自己。只有创建设备可以发起撤销；撤销会原子保存“已停用旧空间 + 仅含创建设备的新世代”，生成新的 AES-256-GCM 空间密钥与随机空间 ID，并下载由创建设备 ECDSA 签名的轮换记录。新世代在创建设备的本地密钥库中继承撤销 ID 阻止清单，拒绝误把同一设备重新授权；界面不会把“从列表隐藏”伪装成撤销。
 - 被撤销设备已经拥有的旧空间密钥和轮换前数据无法远程收回；轮换只保证它不能解锁新世代。轮换记录不含新旧空间密钥，成员导入后会核验旧空间中已经信任的创建设备指纹：被撤销设备只会看到明确撤销状态，保留设备也不会直接得到新密钥，必须重新生成授权请求。新空间 ID 不允许覆盖旧空间的远端对象，因此 HTTP 传输需要连接一个新的空对象地址。
@@ -235,8 +258,8 @@ pnpm evolve:rollback
 
 ## 下一阶段能力路线
 
-视频字幕、关键帧、OCR、视觉问答、带可暂停哈希队列与重复内容报告的外部原文件索引、多来源学习专题、修订审阅、证据星图、口令加密、可逆本地数据迁移、版本兼容证明、设备授权与密钥轮换、带演练提醒、替换清单、设备签名与可信签发者核对的离线所有者恢复、供应商无关的加密同步包、通用 HTTP、Cloudflare R2 与 Amazon S3 条件对象传输、短期凭据到期阻断与显式续签、单对象最小权限剪票、本地/Worker/Lambda 凭据代理、带 Git 来源与运行时文件哈希的发布封签、无秘密连接诊断、字段级三方合并、可离线校验的无内容决策回执、显式批量冲突校样与提案分支审阅已经可用，后续继续补齐：
+视频字幕、关键帧、OCR、视觉问答、带可暂停哈希队列与重复内容报告的外部原文件索引、多来源学习专题、修订审阅、证据星图、口令加密、可逆本地数据迁移、版本兼容证明、设备授权与密钥轮换、带演练提醒、替换清单、设备签名与可信签发者核对的离线所有者恢复、供应商无关的加密同步包、通用 HTTP、Cloudflare R2 与 Amazon S3 条件对象传输、短期凭据到期阻断与显式续签、单对象最小权限剪票、本地/Worker/Lambda 凭据代理、带 Git 来源与运行时文件哈希的发布封签、GitHub Actions CI、AWS OIDC 无长期部署密钥发布、不可变 Lambda 云端版本回执、GitHub Artifact Attestation、Cloudflare Workers Builds 边界、无秘密连接诊断、字段级三方合并、可离线校验的无内容决策回执、显式批量冲突校样与提案分支审阅已经可用，后续继续补齐：
 
-1. 使用 GitHub Actions OIDC 的无长期发布密钥流水线，以及把 CI 与云端版本证明回流到工作台核对。
+1. 在线核对 GitHub Run / Attestation 状态，并把 Cloudflare Worker Version ID 与运行时提交挑战也做成可导入证明。
 
 联网抓取、上传文件、Git 提交和远程协作都必须保持独立授权，不能由模型自行开启。源码提案的本地提交由用户确认触发，GitHub 推送与草稿 PR 由第二次确认触发。
