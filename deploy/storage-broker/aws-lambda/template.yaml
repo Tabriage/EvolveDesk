@@ -1,0 +1,65 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: EvolveDesk exact-object Amazon S3 temporary credential broker
+
+Parameters:
+  AllowedOrigin:
+    Type: String
+    Description: Exact HTTPS origin of the EvolveDesk deployment
+    AllowedPattern: ^https://[^/]+$
+  BrokerToken:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    MaxLength: 8192
+    Description: Independent bearer token required by every broker request
+  TargetRoleArn:
+    Type: String
+    AllowedPattern: ^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9_+=,.@/-]+$
+    Description: Role whose maximum permissions intersect the exact-object session policy
+  SyncRegion:
+    Type: String
+    Default: us-east-1
+    AllowedPattern: ^[a-z0-9][a-z0-9-]{1,31}$
+  ExternalId:
+    Type: String
+    NoEcho: true
+    Default: ""
+    MaxLength: 1224
+
+Resources:
+  StorageCredentialBroker:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      CodeUri: ../../..
+      Handler: deploy/storage-broker/aws-lambda/handler.handler
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      MemorySize: 128
+      Timeout: 10
+      ReservedConcurrentExecutions: 5
+      Environment:
+        Variables:
+          ALLOWED_ORIGIN: !Ref AllowedOrigin
+          BROKER_TOKEN: !Ref BrokerToken
+          EVOLVE_AWS_ROLE_ARN: !Ref TargetRoleArn
+          EVOLVE_AWS_REGION: !Ref SyncRegion
+          EVOLVE_AWS_EXTERNAL_ID: !Ref ExternalId
+      Policies:
+        - Statement:
+            - Sid: AssumeOnlyConfiguredCredentialRole
+              Effect: Allow
+              Action: sts:AssumeRole
+              Resource: !Ref TargetRoleArn
+      FunctionUrlConfig:
+        # Function URLs with NONE auth are public. The handler still requires its
+        # independent Bearer, exact Origin, fixed routes, and bounded JSON body.
+        AuthType: NONE
+        InvokeMode: BUFFERED
+
+Outputs:
+  CredentialBrokerUrl:
+    Description: Append /credentials in EvolveDesk; /health reports capability only
+    Value: !GetAtt StorageCredentialBrokerUrl.FunctionUrl

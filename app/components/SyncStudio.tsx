@@ -54,6 +54,11 @@ import {
 import type { SyncStorageRecipeId } from "../features/sync-storage-recipes.mjs";
 import { createSyncStorageScopeTicket } from "../features/sync-storage-scope.mjs";
 import type { SyncStorageScopeTicket } from "../features/sync-storage-scope.mjs";
+import {
+  MAX_STORAGE_BROKER_RELEASE_PROOF_BYTES,
+  inspectStorageBrokerReleaseProofText,
+} from "../features/storage-broker-release-proof.mjs";
+import type { StorageBrokerReleaseProof } from "../features/storage-broker-release-proof.mjs";
 import { SyncRecoveryConsole } from "./SyncRecoveryConsole";
 import {
   SYNC_CHANNELS_CHANGED_EVENT,
@@ -108,6 +113,13 @@ type RemoteProof = {
 type RemoteProbeFailure = {
   checkedAt: string;
   failureCode: "access-denied" | "network-or-cors" | "invalid-object" | "conditional-conflict" | "unknown";
+};
+
+type RemoteBrokerReleaseReceipt = {
+  proof: StorageBrokerReleaseProof;
+  providerMatches: boolean;
+  endpointMatches: boolean;
+  originMatches: boolean;
 };
 
 const relationLabels: Record<SyncRevisionRelation, string> = {
@@ -180,6 +192,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   const grantInput = useRef<HTMLInputElement>(null);
   const packetInput = useRef<HTMLInputElement>(null);
   const rotationInput = useRef<HTMLInputElement>(null);
+  const brokerReleaseInput = useRef<HTMLInputElement>(null);
   const [identity, setIdentity] = useState<SyncIdentity | null>(null);
   const [channels, setChannels] = useState<SyncChannel[]>([]);
   const [selectedChannelId, setSelectedChannelId] = useState("");
@@ -205,6 +218,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   const [remoteBrokerToken, setRemoteBrokerToken] = useState("");
   const [remoteBrokerTtlSeconds, setRemoteBrokerTtlSeconds] = useState(900);
   const [remoteBrokerHealth, setRemoteBrokerHealth] = useState<CredentialBrokerHealth | null>(null);
+  const [remoteBrokerReleaseReceipt, setRemoteBrokerReleaseReceipt] = useState<RemoteBrokerReleaseReceipt | null>(null);
   const [remoteClock, setRemoteClock] = useState(() => Date.now());
   const [currentOrigin, setCurrentOrigin] = useState("");
   const [remoteProof, setRemoteProof] = useState<RemoteProof | null>(null);
@@ -263,6 +277,10 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   const checkedBrokerSupportsProvider = !remoteBrokerHealth || (selectedRemoteRecipe.id === "cloudflare-r2"
     ? remoteBrokerHealth.providers.cloudflareR2
     : remoteBrokerHealth.providers.amazonS3);
+  const remoteBrokerReleaseBound = Boolean(remoteBrokerReleaseReceipt
+    && remoteBrokerReleaseReceipt.providerMatches
+    && remoteBrokerReleaseReceipt.endpointMatches
+    && remoteBrokerReleaseReceipt.originMatches);
   const remoteRenewalReady = Boolean(
     selectedRemoteRecipe.authType === "aws-sigv4"
     && remoteScopeTicket
@@ -395,6 +413,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
     setRemoteBrokerUrl(recipe.authType === "aws-sigv4" ? "http://127.0.0.1:4243/credentials" : "");
     setRemoteBrokerToken("");
     setRemoteBrokerHealth(null);
+    setRemoteBrokerReleaseReceipt(null);
     clearRemoteProbe();
     setMessage(`${recipe.label} 配方已选择；连接参数和凭据只留在当前页面内存。 `);
   }
@@ -452,6 +471,35 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
         : `本地凭据代理在线，但尚未配置 ${selectedRemoteRecipe.label} 签发器。 `);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "无法检查本地凭据代理");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function readRemoteBrokerReleaseProof(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setBusy("remote-release-proof");
+    setRemoteBrokerReleaseReceipt(null);
+    try {
+      const proof = await inspectStorageBrokerReleaseProofText(await readJsonFile(file, MAX_STORAGE_BROKER_RELEASE_PROOF_BYTES, "发布封签"));
+      const providerMatches = proof.body.capabilities.provider === selectedRemoteRecipe.id;
+      let endpointMatches = false;
+      try { endpointMatches = new URL(remoteBrokerUrl).origin === proof.body.deployment.endpointOrigin; } catch { endpointMatches = false; }
+      const originMatches = currentOrigin === proof.body.deployment.allowedWorkbenchOrigin;
+      const receipt = { proof, providerMatches, endpointMatches, originMatches };
+      setRemoteBrokerReleaseReceipt(receipt);
+      const mismatches = [
+        ...(!providerMatches ? ["供应商"] : []),
+        ...(!endpointMatches ? ["代理 Origin"] : []),
+        ...(!originMatches ? ["工作台 Origin"] : []),
+      ];
+      setMessage(mismatches.length
+        ? `发布封签本身完整，但与当前 ${mismatches.join("、")} 不一致；不会把它标记为已绑定。 `
+        : `发布封签已绑定当前代理：源码提交 ${proof.body.source.commit.slice(0, 12)}，${proof.body.files.length} 个运行时文件 SHA-256 均完整。 `);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "无法核对凭据代理发布封签");
     } finally {
       setBusy("");
     }
@@ -909,11 +957,11 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
                 <div className="remote-permission-target"><span>PERMISSION TICKET / 权限剪票</span><strong>{remoteScopeTicket ? selectedRemoteRecipe.label : "等待精确对象"}</strong><code>{remoteScopeTicket ? `${remoteScopeTicket.target.bucket}/${remoteScopeTicket.target.objectKey}` : "补全 Account / Bucket / Region 后生成"}</code></div>
                 <i aria-hidden="true" />
                 <div className="remote-permission-scope"><span>ALLOW</span><strong>GET OBJECT + PUT OBJECT</strong><small>NO LIST · NO DELETE · NO WILDCARD · TTL {remoteScopeTicket?.ttlSeconds || "—"}s</small></div>
-                <div className="remote-permission-actions"><b>{remoteBrokerHealth ? checkedBrokerSupportsProvider ? "BROKER READY" : "ISSUER OFF" : "BROKER UNCHECKED"}</b><button onClick={() => void copyRemoteScopePolicy()} disabled={!remoteScopeTicket || Boolean(busy)}>复制最小权限策略</button></div>
+                <div className="remote-permission-actions"><b>{remoteBrokerHealth ? checkedBrokerSupportsProvider ? "BROKER READY" : "ISSUER OFF" : "BROKER UNCHECKED"}</b>{remoteBrokerReleaseReceipt && <em className={`remote-release-seal ${remoteBrokerReleaseBound ? "bound" : "unbound"}`}>{remoteBrokerReleaseBound ? "SOURCE SEALED" : "SEAL UNBOUND"}<small>{remoteBrokerReleaseReceipt.proof.body.source.commit.slice(0, 8)} · {remoteBrokerReleaseReceipt.proof.body.files.length} FILES</small></em>}<button onClick={() => void copyRemoteScopePolicy()} disabled={!remoteScopeTicket || Boolean(busy)}>复制最小权限策略</button><button onClick={() => brokerReleaseInput.current?.click()} disabled={!remoteBrokerUrl.trim() || Boolean(busy)}>{busy === "remote-release-proof" ? "核对中…" : "核对发布封签"}</button><input ref={brokerReleaseInput} type="file" accept="application/json,.json" onChange={readRemoteBrokerReleaseProof} hidden /></div>
               </div>
               <div className="remote-credential-renewal">
                 <label><span>当前凭据到期时间</span><input type="datetime-local" value={localDateTimeValue(remoteExpiresAt)} onChange={(event) => { setRemoteExpiresAt(event.target.value ? new Date(event.target.value).toISOString() : ""); setRemoteClock(Date.now()); markManualCredential(); }} disabled={Boolean(busy)} /><small>手动凭据可补充；broker 响应会自动填写。</small></label>
-                <label><span>可信续签服务 URL</span><input type="url" value={remoteBrokerUrl} onChange={(event) => { setRemoteBrokerUrl(event.target.value); setRemoteBrokerHealth(null); }} placeholder="http://127.0.0.1:4243/credentials" autoComplete="off" disabled={Boolean(busy)} /><small>可选本地模板仅监听回环；父级凭据留在代理进程。</small></label>
+                <label><span>可信续签服务 URL</span><input type="url" value={remoteBrokerUrl} onChange={(event) => { setRemoteBrokerUrl(event.target.value); setRemoteBrokerHealth(null); setRemoteBrokerReleaseReceipt(null); }} placeholder="http://127.0.0.1:4243/credentials" autoComplete="off" disabled={Boolean(busy)} /><small>可选本地模板仅监听回环；父级凭据留在代理进程。</small></label>
                 <label><span>续签服务 Bearer（可选）</span><input type="password" value={remoteBrokerToken} onChange={(event) => { setRemoteBrokerToken(event.target.value); setRemoteBrokerHealth(null); }} placeholder="只留在当前页面内存" autoComplete="off" disabled={Boolean(busy)} /><small>不会发送给对象存储，也不会进入诊断摘要。</small></label>
                 <label><span>申请寿命（秒）</span><input type="number" min={selectedRemoteRecipe.id === "amazon-s3" ? 900 : 300} max={selectedRemoteRecipe.id === "amazon-s3" ? 43200 : 604800} step={60} value={remoteBrokerTtlSeconds} onChange={(event) => setRemoteBrokerTtlSeconds(Number(event.target.value))} disabled={Boolean(busy)} /><small>默认 900 秒；AWS 上限 12 小时，R2 上限 7 天。</small></label>
                 <div className="remote-broker-actions"><button onClick={() => void checkRemoteBroker()} disabled={!remoteBrokerUrl.trim() || Boolean(busy)}>{busy === "remote-broker-health" ? "检查中…" : "检查代理"}</button><button onClick={() => void renewRemoteCredentials()} disabled={!remoteRenewalReady || Boolean(busy)}>{busy === "remote-renew" ? "正在续签…" : "按需续签当前对象"}<span>↻</span></button></div>

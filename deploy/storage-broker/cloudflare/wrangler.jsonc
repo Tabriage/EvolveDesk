@@ -1,0 +1,16 @@
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "evolve-desk-r2-credential-broker",
+  "main": "./worker.mjs",
+  "compatibility_date": "2026-08-21",
+  "workers_dev": true,
+  "secrets": {
+    "required": [
+      "ALLOWED_ORIGIN",
+      "BROKER_TOKEN",
+      "R2_ACCOUNT_ID",
+      "R2_ACCESS_KEY_ID",
+      "R2_SECRET_ACCESS_KEY"
+    ]
+  }
+}
