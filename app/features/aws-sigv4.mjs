@@ -5,12 +5,16 @@ const REGION = /^(?:auto|[a-z0-9][a-z0-9-]{1,31})$/;
 const HEADER_NAME = /^[A-Za-z0-9-]+$/;
 const FORBIDDEN_SIGNED_HEADERS = new Set(["authorization", "connection", "content-length", "host", "transfer-encoding", "user-agent"]);
 
+export const AWS_CREDENTIAL_EXPIRY_WARNING_MS = 5 * 60 * 1_000;
+export const AWS_CREDENTIAL_MIN_VALIDITY_MS = 30 * 1_000;
+
 function requireCrypto() {
   if (!globalThis.crypto?.subtle) throw new Error("当前环境不支持 SigV4 所需的 Web Crypto");
   return globalThis.crypto;
 }
 
 function text(value, maximum, label, minimum = 0) {
+  if (value !== undefined && value !== null && typeof value !== "string") throw new Error(`${label}格式无效`);
   const candidate = String(value || "").trim();
   if (candidate.length < minimum || candidate.length > maximum || /[\u0000-\u001f\u007f]/.test(candidate)) throw new Error(`${label}格式无效`);
   return candidate;
@@ -66,17 +70,61 @@ function amzTimestamp(value) {
   return date.toISOString().replace(/[:-]|\.\d{3}/g, "");
 }
 
+function normalizeExpiration(value) {
+  if (value === undefined || value === null || value === "") return "";
+  const numeric = typeof value === "number" || /^\d+(?:\.\d+)?$/.test(String(value).trim()) ? Number(value) : Number.NaN;
+  const epoch = Number.isFinite(numeric) ? (numeric < 1_000_000_000_000 ? numeric * 1_000 : numeric) : Date.parse(String(value));
+  if (!Number.isFinite(epoch)) throw new Error("S3 凭据到期时间无效");
+  const date = new Date(epoch);
+  if (date.getUTCFullYear() < 2000 || date.getUTCFullYear() > 2200) throw new Error("S3 凭据到期时间超出支持范围");
+  return date.toISOString();
+}
+
 export function normalizeAwsSigV4Credentials(value) {
   const accessKeyId = text(value?.accessKeyId, MAX_ACCESS_KEY_CHARS, "S3 Access Key ID", 8);
   const secretAccessKey = text(value?.secretAccessKey, MAX_SECRET_KEY_CHARS, "S3 Secret Access Key", 8);
   const sessionToken = text(value?.sessionToken, MAX_SESSION_TOKEN_CHARS, "S3 Session Token");
   const region = text(value?.region, 32, "S3 区域", 2).toLowerCase();
   if (!REGION.test(region)) throw new Error("S3 区域格式无效");
-  return { accessKeyId, secretAccessKey, sessionToken, region };
+  const expiresAt = normalizeExpiration(value?.expiresAt);
+  return { accessKeyId, secretAccessKey, sessionToken, region, expiresAt };
+}
+
+export function inspectAwsCredentialLifecycle(value, nowValue = new Date()) {
+  const sessionToken = text(value?.sessionToken, MAX_SESSION_TOKEN_CHARS, "S3 Session Token");
+  const expiresAt = normalizeExpiration(value?.expiresAt);
+  const now = nowValue instanceof Date ? nowValue : new Date(nowValue);
+  if (!Number.isFinite(now.getTime())) throw new Error("凭据检查时间无效");
+  if (!expiresAt) {
+    return {
+      status: sessionToken ? "unknown" : "long-lived",
+      expiresAt: "",
+      remainingMs: null,
+      usable: true,
+      renewalRecommended: Boolean(sessionToken),
+    };
+  }
+  const remainingMs = new Date(expiresAt).getTime() - now.getTime();
+  const status = remainingMs <= 0 ? "expired" : remainingMs <= AWS_CREDENTIAL_EXPIRY_WARNING_MS ? "expiring" : "valid";
+  return {
+    status,
+    expiresAt,
+    remainingMs,
+    usable: remainingMs > AWS_CREDENTIAL_MIN_VALIDITY_MS,
+    renewalRecommended: remainingMs <= AWS_CREDENTIAL_EXPIRY_WARNING_MS,
+  };
+}
+
+export function assertAwsCredentialUsable(value, nowValue = new Date()) {
+  const lifecycle = inspectAwsCredentialLifecycle(value, nowValue);
+  if (lifecycle.status === "expired") throw new Error("S3 临时凭据已经到期，请先显式续签");
+  if (!lifecycle.usable) throw new Error("S3 临时凭据剩余不足 30 秒，请先显式续签");
+  return lifecycle;
 }
 
 export async function createAwsSigV4Headers(credentialsValue, requestValue, nowValue = new Date()) {
   const credentials = normalizeAwsSigV4Credentials(credentialsValue);
+  assertAwsCredentialUsable(credentials, nowValue);
   const method = String(requestValue?.method || "").trim().toUpperCase();
   if (!new Set(["GET", "HEAD", "PUT"]).has(method)) throw new Error("SigV4 请求方法不受支持");
   let url;

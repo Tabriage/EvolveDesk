@@ -35,6 +35,26 @@ test("remote transport accepts HTTPS and loopback HTTP without embedding credent
   }), /不能混用预签名/);
 });
 
+test("remote transport blocks an expired temporary credential before network access", async () => {
+  let calls = 0;
+  const transport = createHttpSyncTransport({
+    objectUrl: "https://bucket.s3.us-east-1.amazonaws.com/evolve.json",
+    sigv4: {
+      accessKeyId: "TEMPACCESSKEY123",
+      secretAccessKey: "temporary-secret-access-key",
+      sessionToken: "temporary-session-token",
+      region: "us-east-1",
+      expiresAt: "2026-08-21T10:00:00.000Z",
+    },
+  }, async () => {
+    calls += 1;
+    return response(null, 404);
+  }, () => new Date("2026-08-21T10:00:01.000Z"));
+
+  await assert.rejects(transport.read("channel_expired"), /已经到期/);
+  assert.equal(calls, 0);
+});
+
 test("S3 recipes sign every conditional request with memory-only SigV4 credentials", async () => {
   const { channel, packet, text } = await packetFixture();
   const calls = [];

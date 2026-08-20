@@ -31,6 +31,17 @@ import type {
   SyncIdentity,
   SyncRevisionRelation,
 } from "../features/sync-core.mjs";
+import { inspectAwsCredentialLifecycle } from "../features/aws-sigv4.mjs";
+import type { AwsCredentialLifecycle } from "../features/aws-sigv4.mjs";
+import {
+  MAX_CREDENTIAL_TTL_SECONDS,
+  MIN_CREDENTIAL_TTL_SECONDS,
+  renewSyncStorageCredentials,
+} from "../features/sync-credential-broker.mjs";
+import {
+  createSyncConnectionDiagnostic,
+  serializeSyncConnectionDiagnostic,
+} from "../features/sync-connection-diagnostic.mjs";
 import { createHttpSyncTransport } from "../features/sync-remote-transport.mjs";
 import {
   SYNC_STORAGE_RECIPES,
@@ -87,6 +98,12 @@ type RemoteProof = {
   exists: boolean;
   revisionId: string;
   validator: string;
+  checkedAt: string;
+};
+
+type RemoteProbeFailure = {
+  checkedAt: string;
+  failureCode: "access-denied" | "network-or-cors" | "invalid-object" | "conditional-conflict" | "unknown";
 };
 
 const relationLabels: Record<SyncRevisionRelation, string> = {
@@ -128,6 +145,32 @@ function readJsonFile(file: File, maxBytes: number, label: string) {
   return file.text();
 }
 
+function localDateTimeValue(value: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+}
+
+function classifyRemoteFailure(error: unknown): RemoteProbeFailure["failureCode"] {
+  const message = error instanceof Error ? error.message : String(error || "");
+  if (/拒绝访问|401|403|凭据/.test(message)) return "access-denied";
+  if (/无法访问|CORS|网络/.test(message)) return "network-or-cors";
+  if (/409|412|冲突/.test(message)) return "conditional-conflict";
+  if (/同步包|ETag|对象|版本/.test(message)) return "invalid-object";
+  return "unknown";
+}
+
+function credentialLifeCopy(lifecycle: AwsCredentialLifecycle) {
+  if (lifecycle.status === "long-lived") return { label: "期限未声明", detail: "未提供 Session Token；如为长期密钥，请改用服务端签发的短期凭据。" };
+  if (lifecycle.status === "unknown") return { label: "短期 · 到期未知", detail: "Session Token 已装载，但需要补充到期时间才能主动阻断。" };
+  if (lifecycle.status === "expired") return { label: "已经到期", detail: "连接已停止；续签后必须重新取得远端版本证据。" };
+  const minutes = Math.max(1, Math.ceil((lifecycle.remainingMs || 0) / 60_000));
+  if (lifecycle.status === "expiring") return { label: `剩余约 ${minutes} 分钟`, detail: "已进入 5 分钟警戒区；建议现在续签。" };
+  const hours = Math.floor(minutes / 60);
+  return { label: hours ? `剩余约 ${hours} 小时 ${minutes % 60} 分` : `剩余约 ${minutes} 分钟`, detail: "到期前 5 分钟提醒，剩余不足 30 秒时停止发网。" };
+}
+
 export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   const pairingInput = useRef<HTMLInputElement>(null);
   const grantInput = useRef<HTMLInputElement>(null);
@@ -152,8 +195,15 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   const [remoteAccessKeyId, setRemoteAccessKeyId] = useState("");
   const [remoteSecretAccessKey, setRemoteSecretAccessKey] = useState("");
   const [remoteSessionToken, setRemoteSessionToken] = useState("");
+  const [remoteExpiresAt, setRemoteExpiresAt] = useState("");
+  const [remoteCredentialSource, setRemoteCredentialSource] = useState<"manual" | "broker">("manual");
+  const [remoteBrokerUrl, setRemoteBrokerUrl] = useState("");
+  const [remoteBrokerToken, setRemoteBrokerToken] = useState("");
+  const [remoteBrokerTtlSeconds, setRemoteBrokerTtlSeconds] = useState(900);
+  const [remoteClock, setRemoteClock] = useState(() => Date.now());
   const [currentOrigin, setCurrentOrigin] = useState("");
   const [remoteProof, setRemoteProof] = useState<RemoteProof | null>(null);
+  const [remoteProbeFailure, setRemoteProbeFailure] = useState<RemoteProbeFailure | null>(null);
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("先确认这台设备的指纹；授权和传输都只在你明确操作时发生。 ");
 
@@ -177,8 +227,28 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       return "";
     }
   }, [defaultRemoteObjectKey, remoteAccountId, remoteBucket, remoteObjectKey, remoteObjectUrl, remoteRecipeId, remoteRegion]);
-  const remoteCredentialReady = selectedRemoteRecipe.authType === "bearer" || Boolean(remoteAccessKeyId.trim() && remoteSecretAccessKey.trim() && remoteRegion.trim());
+  const remoteCredentialLifecycle = useMemo<AwsCredentialLifecycle>(() => {
+    if (selectedRemoteRecipe.authType !== "aws-sigv4") return { status: "long-lived", expiresAt: "", remainingMs: null, usable: true, renewalRecommended: false };
+    try {
+      return inspectAwsCredentialLifecycle({ sessionToken: remoteSessionToken, expiresAt: remoteExpiresAt }, new Date(remoteClock));
+    } catch {
+      return { status: "expired", expiresAt: remoteExpiresAt, remainingMs: null, usable: false, renewalRecommended: true };
+    }
+  }, [remoteClock, remoteExpiresAt, remoteSessionToken, selectedRemoteRecipe.authType]);
+  const hasRemoteSigV4Credential = Boolean(remoteAccessKeyId.trim() && remoteSecretAccessKey.trim());
+  const remoteCredentialLifeCopy = hasRemoteSigV4Credential
+    ? credentialLifeCopy(remoteCredentialLifecycle)
+    : { label: "尚未装载凭据", detail: "手动输入短期凭据，或由可信续签服务按当前对象签发。" };
+  const remoteCredentialReady = selectedRemoteRecipe.authType === "bearer" || Boolean(hasRemoteSigV4Credential && remoteRegion.trim() && remoteCredentialLifecycle.usable);
   const remoteConnectionReady = Boolean(preparedRemoteObjectUrl && remoteCredentialReady);
+  const remoteRenewalReady = Boolean(
+    selectedRemoteRecipe.authType === "aws-sigv4"
+    && preparedRemoteObjectUrl
+    && remoteBrokerUrl.trim()
+    && Number.isInteger(remoteBrokerTtlSeconds)
+    && remoteBrokerTtlSeconds >= MIN_CREDENTIAL_TTL_SECONDS
+    && remoteBrokerTtlSeconds <= MAX_CREDENTIAL_TTL_SECONDS,
+  );
   const remoteCorsPolicy = useMemo(() => {
     if (!currentOrigin || selectedRemoteRecipe.authType !== "aws-sigv4") return "";
     try {
@@ -224,41 +294,68 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
     };
   }, []);
 
+  useEffect(() => {
+    if (selectedRemoteRecipe.authType !== "aws-sigv4" || !remoteExpiresAt) return undefined;
+    const interval = globalThis.setInterval(() => setRemoteClock(Date.now()), 30_000);
+    return () => globalThis.clearInterval(interval);
+  }, [remoteExpiresAt, selectedRemoteRecipe.authType]);
+
+  function clearRemoteProbe() {
+    setRemoteProof(null);
+    setRemoteProbeFailure(null);
+  }
+
+  function markManualCredential() {
+    setRemoteCredentialSource("manual");
+    clearRemoteProbe();
+  }
+
+  function invalidateRemoteScope() {
+    if (remoteCredentialSource === "broker") {
+      setRemoteAccessKeyId("");
+      setRemoteSecretAccessKey("");
+      setRemoteSessionToken("");
+      setRemoteExpiresAt("");
+      setRemoteCredentialSource("manual");
+    }
+    clearRemoteProbe();
+  }
+
   function replaceChannel(channel: SyncChannel) {
     setChannels((current) => [...current.filter((item) => item.channelId !== channel.channelId), channel]);
-    if (channel.channelId !== selectedChannelId) setRemoteProof(null);
+    if (channel.channelId !== selectedChannelId) invalidateRemoteScope();
     setSelectedChannelId(channel.channelId);
   }
 
   function selectChannel(channelId: string) {
     setSelectedChannelId(channelId);
-    setRemoteProof(null);
+    invalidateRemoteScope();
     setPendingRevocationId("");
   }
 
   function installRecoveredChannels(retiredChannel: SyncChannel, nextChannel: SyncChannel) {
     setChannels((current) => [...current.filter((item) => item.channelId !== retiredChannel.channelId && item.channelId !== nextChannel.channelId), retiredChannel, nextChannel]);
     setSelectedChannelId(nextChannel.channelId);
-    setRemoteProof(null);
+    invalidateRemoteScope();
     setIncoming(null);
     setPendingRevocationId("");
   }
 
   function retireTransferredChannel(channel: SyncChannel) {
     replaceChannel(channel);
-    setRemoteProof(null);
+    invalidateRemoteScope();
     setIncoming(null);
     setPendingRevocationId("");
   }
 
   function changeRemoteObjectUrl(value: string) {
     setRemoteObjectUrl(value);
-    setRemoteProof(null);
+    invalidateRemoteScope();
   }
 
   function changeRemoteToken(value: string) {
     setRemoteToken(value);
-    setRemoteProof(null);
+    clearRemoteProbe();
   }
 
   function selectRemoteRecipe(recipeId: SyncStorageRecipeId) {
@@ -270,7 +367,11 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
     setRemoteAccessKeyId("");
     setRemoteSecretAccessKey("");
     setRemoteSessionToken("");
-    setRemoteProof(null);
+    setRemoteExpiresAt("");
+    setRemoteCredentialSource("manual");
+    setRemoteBrokerUrl("");
+    setRemoteBrokerToken("");
+    clearRemoteProbe();
     setMessage(`${recipe.label} 配方已选择；连接参数和凭据只留在当前页面内存。 `);
   }
 
@@ -283,6 +384,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
         secretAccessKey: remoteSecretAccessKey,
         sessionToken: remoteSessionToken,
         region: remoteRegion,
+        expiresAt: remoteExpiresAt,
       },
     };
   }
@@ -297,6 +399,62 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       setMessage(`已复制 ${selectedRemoteRecipe.label} 的最小 CORS 配方；AllowedOrigins 已限定为当前工作台 ${currentOrigin}。 `);
     } catch {
       setMessage("浏览器拒绝写入剪贴板；请手动配置当前 Origin、GET/PUT、SigV4 请求头并暴露 ETag。 ");
+    }
+  }
+
+  async function renewRemoteCredentials() {
+    if (selectedRemoteRecipe.authType !== "aws-sigv4" || !remoteRenewalReady) return;
+    const provider = selectedRemoteRecipe.id === "cloudflare-r2" ? "cloudflare-r2" : "amazon-s3";
+    setBusy("remote-renew");
+    try {
+      const result = await renewSyncStorageCredentials({ endpointUrl: remoteBrokerUrl, bearerToken: remoteBrokerToken }, {
+        provider,
+        accountId: remoteAccountId,
+        bucket: remoteBucket,
+        objectKey: remoteObjectKey.trim() || defaultRemoteObjectKey,
+        region: remoteRegion,
+        ttlSeconds: remoteBrokerTtlSeconds,
+      });
+      setRemoteAccessKeyId(result.credentials.accessKeyId);
+      setRemoteSecretAccessKey(result.credentials.secretAccessKey);
+      setRemoteSessionToken(result.credentials.sessionToken);
+      setRemoteExpiresAt(result.credentials.expiresAt);
+      setRemoteCredentialSource("broker");
+      setRemoteClock(Date.now());
+      clearRemoteProbe();
+      setMessage(`已显式续签 ${selectedRemoteRecipe.label} 短期凭据，有效期到 ${new Date(result.credentials.expiresAt).toLocaleString()}；请重新连接检查远端版本。 `);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "无法续签短期凭据");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function exportRemoteDiagnostic() {
+    if (!preparedRemoteObjectUrl) return;
+    setBusy("remote-diagnostic");
+    try {
+      const probe = remoteProbeFailure
+        ? { status: "error" as const, checkedAt: remoteProbeFailure.checkedAt, failureCode: remoteProbeFailure.failureCode }
+        : remoteProof
+          ? { status: remoteProof.exists ? remoteProof.validator ? "etag-ready" as const : "read-only" as const : "empty" as const, checkedAt: remoteProof.checkedAt, revisionId: remoteProof.revisionId, validator: remoteProof.validator }
+          : { status: "not-checked" as const };
+      const diagnostic = await createSyncConnectionDiagnostic({
+        recipeId: selectedRemoteRecipe.id,
+        objectUrl: preparedRemoteObjectUrl,
+        region: remoteRegion,
+        accessKeyId: remoteAccessKeyId,
+        sessionToken: remoteSessionToken,
+        expiresAt: remoteExpiresAt,
+        credentialSource: remoteCredentialSource,
+        probe,
+      });
+      downloadText(serializeSyncConnectionDiagnostic(diagnostic), `evolve-sync-diagnostic-${selectedRemoteRecipe.id}-${fileStamp(new Date(diagnostic.body.createdAt))}.json`);
+      setMessage("已导出 SHA-256 封签的无秘密连接诊断；地址、对象 Key、Access Key、令牌、版本 ID 与 ETag 均只留下摘要。 ");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "无法导出连接诊断");
+    } finally {
+      setBusy("");
     }
   }
 
@@ -433,7 +591,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       setChannels((current) => [...current.filter((item) => item.channelId !== result.retiredChannel.channelId && item.channelId !== result.nextChannel.channelId), result.retiredChannel, result.nextChannel]);
       setSelectedChannelId(result.nextChannel.channelId);
       setPendingRevocationId("");
-      setRemoteProof(null);
+      invalidateRemoteScope();
       setIncoming(null);
       setMessage(`已撤销“${target.name}”并进入第 ${result.nextChannel.generation} 代空间；旧空间已停用。剩余设备需要重新生成授权请求，远端传输需连接新的空对象地址。`);
     } catch (error) {
@@ -455,7 +613,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       const result = await acceptSyncRotation(rotation, oldChannel, identity);
       await saveSyncChannel(result.channel);
       replaceChannel(result.channel);
-      setRemoteProof(null);
+      invalidateRemoteScope();
       setIncoming(null);
       setMessage(result.status === "revoked"
         ? "轮换记录签名有效：当前设备已被撤销。旧空间现为只读，本机没有获得新世代密钥。 "
@@ -554,7 +712,9 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
     try {
       const transport = createHttpSyncTransport(remoteTransportConfig());
       const result = await transport.read(selectedChannel.channelId);
-      setRemoteProof({ exists: result.exists, revisionId: result.revisionId, validator: result.validator });
+      const checkedAt = new Date().toISOString();
+      setRemoteProof({ exists: result.exists, revisionId: result.revisionId, validator: result.validator, checkedAt });
+      setRemoteProbeFailure(null);
       if (!result.exists) {
         setMessage("远端对象当前为空；下一次条件发布会使用 If-None-Match，防止抢占已有对象。 ");
         return;
@@ -568,7 +728,9 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       if (!result.packetText) throw new Error("远端对象没有可读取的同步包");
       await stagePacket(result.packetText, `${selectedRemoteRecipe.label} 条件对象`, new TextEncoder().encode(result.packetText).byteLength);
     } catch (error) {
+      setRemoteClock(Date.now());
       setRemoteProof(null);
+      setRemoteProbeFailure({ checkedAt: new Date().toISOString(), failureCode: classifyRemoteFailure(error) });
       setMessage(error instanceof Error ? error.message : "无法检查远端条件对象");
     } finally {
       setBusy("");
@@ -586,7 +748,8 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       const serialized = serializeSyncPacket(packet);
       const result = await transport.write(selectedChannel.channelId, remoteProof.revisionId, serialized);
       if (!result.written) {
-        setRemoteProof({ exists: Boolean(result.currentRevisionId), revisionId: result.currentRevisionId, validator: result.validator });
+        setRemoteProof({ exists: Boolean(result.currentRevisionId), revisionId: result.currentRevisionId, validator: result.validator, checkedAt: new Date().toISOString() });
+        setRemoteProbeFailure(null);
         setMessage("条件写入被远端拒绝：其他设备已先发布新版本。没有覆盖远端内容，请先重新检查并审阅。 ");
         return;
       }
@@ -597,10 +760,13 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       }
       const updated = await setSyncChannelHead(selectedChannel.channelId, packet.revisionId, packet.createdAt);
       if (updated) replaceChannel(updated);
-      setRemoteProof({ exists: true, revisionId: packet.revisionId, validator: result.validator });
+      setRemoteProof({ exists: true, revisionId: packet.revisionId, validator: result.validator, checkedAt: new Date().toISOString() });
+      setRemoteProbeFailure(null);
       setIncoming(null);
       setMessage("加密同步包已通过条件写入发布，并经回读确认；访问令牌仍只在当前页面内存。 ");
     } catch (error) {
+      setRemoteClock(Date.now());
+      setRemoteProbeFailure({ checkedAt: new Date().toISOString(), failureCode: classifyRemoteFailure(error) });
       setMessage(error instanceof Error ? error.message : "无法条件发布远端同步包");
     } finally {
       setBusy("");
@@ -657,9 +823,9 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       </div>
 
       <article className="remote-transport-console">
-        <header><div><span>REMOTE ADAPTER / 显式远端传输</span><h3>选供应商，但不放弃条件写入契约。</h3></div><strong>{remoteProof ? remoteProof.exists ? remoteProof.validator ? "ETAG READY" : "READ ONLY" : "EMPTY SLOT" : selectedRemoteRecipe.id === "http-gateway" ? "HTTP RECIPE" : "SIGV4 RECIPE"}</strong></header>
+        <header><div><span>REMOTE ADAPTER / 显式远端传输</span><h3>选供应商，但不放弃条件写入契约。</h3></div><strong>{selectedRemoteRecipe.authType === "aws-sigv4" && hasRemoteSigV4Credential && remoteCredentialLifecycle.status === "expired" ? "CREDENTIAL EXPIRED" : selectedRemoteRecipe.authType === "aws-sigv4" && hasRemoteSigV4Credential && remoteCredentialLifecycle.status === "expiring" ? "RENEW SOON" : remoteProof ? remoteProof.exists ? remoteProof.validator ? "ETAG READY" : "READ ONLY" : "EMPTY SLOT" : selectedRemoteRecipe.id === "http-gateway" ? "HTTP RECIPE" : "SIGV4 RECIPE"}</strong></header>
         <div className="remote-recipe-strip" role="radiogroup" aria-label="远端存储连接配方">{SYNC_STORAGE_RECIPES.map((recipe) => <button key={recipe.id} className={remoteRecipeId === recipe.id ? "active" : ""} role="radio" aria-checked={remoteRecipeId === recipe.id} onClick={() => selectRemoteRecipe(recipe.id)} disabled={Boolean(busy)}><i>{recipe.id === "cloudflare-r2" ? "R2" : recipe.id === "amazon-s3" ? "S3" : "↔"}</i><span><strong>{recipe.label}</strong><small>{recipe.shortLabel}</small></span></button>)}</div>
-        <div className="remote-recipe-contract"><code>{selectedRemoteRecipe.endpointPattern}</code><div><span><i />GET + PUT</span><b>→</b><span><i />If-None-Match / If-Match</span><b>→</b><span><i />Expose ETag</span>{selectedRemoteRecipe.authType === "aws-sigv4" && <button onClick={() => void copyRemoteCorsPolicy()} disabled={!remoteCorsPolicy || Boolean(busy)}>复制当前 Origin 的 CORS</button>}</div></div>
+        <div className="remote-recipe-contract"><code>{selectedRemoteRecipe.endpointPattern}</code><div><span><i />GET + PUT</span><b>→</b><span><i />If-None-Match / If-Match</span><b>→</b><span><i />Expose ETag</span><div className="remote-contract-actions">{selectedRemoteRecipe.authType === "aws-sigv4" && <button onClick={() => void copyRemoteCorsPolicy()} disabled={!remoteCorsPolicy || Boolean(busy)}>复制 CORS</button>}<button onClick={() => void exportRemoteDiagnostic()} disabled={!preparedRemoteObjectUrl || Boolean(busy)}>{busy === "remote-diagnostic" ? "正在封签…" : "导出无秘密诊断"}</button></div></div></div>
         {selectedRemoteRecipe.authType === "bearer" ? (
           <div className="remote-transport-fields">
             <label><span>同步包对象 URL</span><input type="url" value={remoteObjectUrl} onChange={(event) => changeRemoteObjectUrl(event.target.value)} placeholder="https://storage.example/evolve-sync.json" disabled={Boolean(busy)} /></label>
@@ -669,21 +835,33 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
         ) : (
           <>
             <div className={`remote-s3-address-fields ${selectedRemoteRecipe.id === "cloudflare-r2" ? "r2" : "s3"}`}>
-              {selectedRemoteRecipe.id === "cloudflare-r2" && <label><span>R2 Account ID</span><input value={remoteAccountId} maxLength={32} onChange={(event) => { setRemoteAccountId(event.target.value); setRemoteProof(null); }} placeholder="32 位 Account ID" disabled={Boolean(busy)} /></label>}
-              <label><span>私有存储桶</span><input value={remoteBucket} maxLength={63} onChange={(event) => { setRemoteBucket(event.target.value); setRemoteProof(null); }} placeholder="private-evolve-sync" disabled={Boolean(busy)} /></label>
-              {selectedRemoteRecipe.id === "amazon-s3" && <label><span>AWS Region</span><input value={remoteRegion} maxLength={32} onChange={(event) => { setRemoteRegion(event.target.value); setRemoteProof(null); }} placeholder="ap-southeast-1" disabled={Boolean(busy)} /></label>}
-              <label><span>单一对象 Key</span><input value={remoteObjectKey} maxLength={1024} onChange={(event) => { setRemoteObjectKey(event.target.value); setRemoteProof(null); }} placeholder={defaultRemoteObjectKey} disabled={Boolean(busy)} /></label>
+              {selectedRemoteRecipe.id === "cloudflare-r2" && <label><span>R2 Account ID</span><input value={remoteAccountId} maxLength={32} onChange={(event) => { setRemoteAccountId(event.target.value); invalidateRemoteScope(); }} placeholder="32 位 Account ID" disabled={Boolean(busy)} /></label>}
+              <label><span>私有存储桶</span><input value={remoteBucket} maxLength={63} onChange={(event) => { setRemoteBucket(event.target.value); invalidateRemoteScope(); }} placeholder="private-evolve-sync" disabled={Boolean(busy)} /></label>
+              {selectedRemoteRecipe.id === "amazon-s3" && <label><span>AWS Region</span><input value={remoteRegion} maxLength={32} onChange={(event) => { setRemoteRegion(event.target.value); invalidateRemoteScope(); }} placeholder="ap-southeast-1" disabled={Boolean(busy)} /></label>}
+              <label><span>单一对象 Key</span><input value={remoteObjectKey} maxLength={1024} onChange={(event) => { setRemoteObjectKey(event.target.value); invalidateRemoteScope(); }} placeholder={defaultRemoteObjectKey} disabled={Boolean(busy)} /></label>
               <div><span>签名对象 URL</span><code>{preparedRemoteObjectUrl || "补全供应商地址字段后生成"}</code><small>对象 Key 默认绑定当前空间；轮换后请使用新对象。</small></div>
             </div>
             <div className="remote-s3-credential-fields">
-              <label><span>Access Key ID</span><input value={remoteAccessKeyId} maxLength={128} onChange={(event) => { setRemoteAccessKeyId(event.target.value); setRemoteProof(null); }} autoComplete="off" placeholder="短期凭据" disabled={Boolean(busy)} /></label>
-              <label><span>Secret Access Key</span><input type="password" value={remoteSecretAccessKey} maxLength={256} onChange={(event) => { setRemoteSecretAccessKey(event.target.value); setRemoteProof(null); }} autoComplete="off" placeholder="只留在页面内存" disabled={Boolean(busy)} /></label>
-              <label><span>Session Token（推荐）</span><input type="password" value={remoteSessionToken} maxLength={16384} onChange={(event) => { setRemoteSessionToken(event.target.value); setRemoteProof(null); }} autoComplete="off" placeholder="短期凭据才会提供" disabled={Boolean(busy)} /></label>
+              <label><span>Access Key ID</span><input value={remoteAccessKeyId} maxLength={128} onChange={(event) => { setRemoteAccessKeyId(event.target.value); markManualCredential(); }} autoComplete="off" placeholder="短期凭据" disabled={Boolean(busy)} /></label>
+              <label><span>Secret Access Key</span><input type="password" value={remoteSecretAccessKey} maxLength={256} onChange={(event) => { setRemoteSecretAccessKey(event.target.value); markManualCredential(); }} autoComplete="off" placeholder="只留在页面内存" disabled={Boolean(busy)} /></label>
+              <label><span>Session Token（推荐）</span><input type="password" value={remoteSessionToken} maxLength={16384} onChange={(event) => { setRemoteSessionToken(event.target.value); markManualCredential(); }} autoComplete="off" placeholder="短期凭据才会提供" disabled={Boolean(busy)} /></label>
               <div><span>远端版本证据</span><code>{remoteProof?.revisionId ? `${remoteProof.revisionId.slice(0, 22)}…` : remoteProof ? "尚无远端对象" : "需要签名连接检查"}</code><small>{remoteProof?.validator || selectedRemoteRecipe.credentialHint}</small></div>
             </div>
+            <section className={`remote-credential-passport ${hasRemoteSigV4Credential ? remoteCredentialLifecycle.status : "empty"}`}>
+              <header><div><span>CREDENTIAL LIFELINE / 凭据寿命</span><strong>{remoteCredentialLifeCopy.label}</strong><small>{remoteCredentialLifeCopy.detail}</small></div><b>{remoteCredentialSource === "broker" ? "BROKER ISSUED" : remoteSessionToken ? "MANUAL SESSION" : "MANUAL KEY"}</b></header>
+              <div className="remote-credential-life-rail"><span className={hasRemoteSigV4Credential ? "loaded" : ""}><i />凭据装载</span><b>→</b><span className={hasRemoteSigV4Credential && remoteCredentialLifecycle.status === "expiring" ? "active" : ""}><i />5 分钟警戒</span><b>→</b><span className={hasRemoteSigV4Credential && !remoteCredentialLifecycle.usable ? "active" : ""}><i />30 秒停发</span><b>→</b><span className={hasRemoteSigV4Credential && remoteCredentialLifecycle.status === "expired" ? "active" : ""}><i />到期</span></div>
+              <div className="remote-credential-renewal">
+                <label><span>当前凭据到期时间</span><input type="datetime-local" value={localDateTimeValue(remoteExpiresAt)} onChange={(event) => { setRemoteExpiresAt(event.target.value ? new Date(event.target.value).toISOString() : ""); setRemoteClock(Date.now()); markManualCredential(); }} disabled={Boolean(busy)} /><small>手动凭据可补充；broker 响应会自动填写。</small></label>
+                <label><span>可信续签服务 URL</span><input type="url" value={remoteBrokerUrl} onChange={(event) => setRemoteBrokerUrl(event.target.value)} placeholder="https://credentials.example/evolve-desk/renew" autoComplete="off" disabled={Boolean(busy)} /><small>父级 R2/AWS 凭据必须留在这个可信服务端。</small></label>
+                <label><span>续签服务 Bearer（可选）</span><input type="password" value={remoteBrokerToken} onChange={(event) => setRemoteBrokerToken(event.target.value)} placeholder="只留在当前页面内存" autoComplete="off" disabled={Boolean(busy)} /><small>不会发送给对象存储，也不会进入诊断摘要。</small></label>
+                <label><span>申请寿命（秒）</span><input type="number" min={300} max={604800} step={60} value={remoteBrokerTtlSeconds} onChange={(event) => setRemoteBrokerTtlSeconds(Number(event.target.value))} disabled={Boolean(busy)} /><small>默认 900 秒；安全上限 7 天。</small></label>
+                <button onClick={() => void renewRemoteCredentials()} disabled={!remoteRenewalReady || Boolean(busy)}>{busy === "remote-renew" ? "正在续签…" : "按需续签当前对象"}<span>↻</span></button>
+              </div>
+              <footer><i />续签请求只声明供应商、桶、当前对象 Key、Region、GET/PUT 意图与 TTL；不会上传现有 Access Key、Secret 或 Session Token。</footer>
+            </section>
           </>
         )}
-        <footer><p><i />只会传输已经加密和签名的同步包；GET/PUT 均需当前用户点击。地址、Bearer 或 SigV4 凭据不会写入本地存储。</p><div><button onClick={() => void inspectRemoteObject()} disabled={!selectedChannel || !remoteConnectionReady || Boolean(busy)}>{busy === "remote-read" ? "正在检查…" : "连接并检查"}</button><button onClick={() => void publishRemoteObject()} disabled={!identity || !remotePublishReady || Boolean(busy)}>{busy === "remote-write" ? "正在条件发布…" : "条件发布密文"}<span>↗</span></button></div></footer>
+        <footer><p><i />只会传输已经加密和签名的同步包；GET/PUT 与续签均需当前用户点击。对象地址、Bearer、SigV4 和续签服务凭据都不会写入本地存储。</p><div><button onClick={() => void inspectRemoteObject()} disabled={!selectedChannel || !remoteConnectionReady || Boolean(busy)}>{busy === "remote-read" ? "正在检查…" : "连接并检查"}</button><button onClick={() => void publishRemoteObject()} disabled={!identity || !remotePublishReady || Boolean(busy)}>{busy === "remote-write" ? "正在条件发布…" : "条件发布密文"}<span>↗</span></button></div></footer>
       </article>
 
       <SyncRecoveryConsole

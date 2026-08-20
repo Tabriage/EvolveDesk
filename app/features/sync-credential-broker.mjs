@@ -1,0 +1,139 @@
+import { inspectAwsCredentialLifecycle, normalizeAwsSigV4Credentials } from "./aws-sigv4.mjs";
+import { buildSyncStorageObjectUrl, getSyncStorageRecipe, normalizeSyncStorageObjectKey } from "./sync-storage-recipes.mjs";
+
+export const MAX_CREDENTIAL_BROKER_RESPONSE_BYTES = 64 * 1_024;
+export const MIN_CREDENTIAL_TTL_SECONDS = 5 * 60;
+export const MAX_CREDENTIAL_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+const MAX_BROKER_TOKEN_CHARS = 8_192;
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+function byteLength(value) {
+  return new TextEncoder().encode(String(value || "")).byteLength;
+}
+
+function normalizeBrokerUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value || "").trim());
+  } catch {
+    throw new Error("请输入有效的短期凭据续签服务 URL");
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK.has(url.hostname))) throw new Error("续签服务必须使用 HTTPS；只有本机回环地址可以使用 HTTP");
+  if (url.username || url.password || url.search || url.hash) throw new Error("续签服务 URL 不能包含凭据、查询或片段");
+  return url.toString();
+}
+
+function normalizeBrokerToken(value) {
+  const token = String(value || "").trim();
+  if (token.length > MAX_BROKER_TOKEN_CHARS || /[\r\n]/.test(token)) throw new Error("续签服务访问令牌格式无效");
+  return token;
+}
+
+function normalizeTtl(value) {
+  const ttlSeconds = Number(value);
+  if (!Number.isInteger(ttlSeconds) || ttlSeconds < MIN_CREDENTIAL_TTL_SECONDS || ttlSeconds > MAX_CREDENTIAL_TTL_SECONDS) {
+    throw new Error("短期凭据期限必须为 300–604800 秒");
+  }
+  return ttlSeconds;
+}
+
+function credentialPayload(parsed) {
+  if (parsed?.success === false) throw new Error("续签服务拒绝签发短期凭据");
+  return parsed?.result || parsed?.Credentials || parsed?.credentials || parsed;
+}
+
+function valueFrom(payload, ...names) {
+  for (const name of names) if (payload?.[name] !== undefined && payload?.[name] !== null) return payload[name];
+  return undefined;
+}
+
+export function createCredentialBrokerRequest(scopeValue) {
+  const recipe = getSyncStorageRecipe(scopeValue?.provider);
+  if (recipe.authType !== "aws-sigv4") throw new Error("当前连接配方不使用 SigV4 短期凭据");
+  const ttlSeconds = normalizeTtl(scopeValue?.ttlSeconds);
+  const objectKey = normalizeSyncStorageObjectKey(scopeValue?.objectKey);
+  buildSyncStorageObjectUrl(recipe.id, {
+    accountId: scopeValue?.accountId,
+    bucket: scopeValue?.bucket,
+    objectKey,
+    region: scopeValue?.region,
+  });
+  return {
+    format: "evolve-desk-storage-credential-request",
+    version: 1,
+    provider: recipe.id,
+    scope: {
+      ...(recipe.id === "cloudflare-r2" ? { accountId: String(scopeValue.accountId).trim().toLowerCase() } : {}),
+      bucket: String(scopeValue.bucket).trim().toLowerCase(),
+      objectKey,
+      region: recipe.id === "cloudflare-r2" ? "auto" : String(scopeValue.region).trim().toLowerCase(),
+      operations: ["GetObject", "PutObject"],
+    },
+    ttlSeconds,
+  };
+}
+
+export function normalizeCredentialBrokerResponse(parsed, request, nowValue = new Date()) {
+  const payload = credentialPayload(parsed);
+  const now = nowValue instanceof Date ? nowValue : new Date(nowValue);
+  if (!Number.isFinite(now.getTime())) throw new Error("续签响应检查时间无效");
+  const explicitExpiration = valueFrom(payload, "expiresAt", "Expiration", "expiration")
+    ?? valueFrom(parsed, "expiresAt", "Expiration", "expiration");
+  const expiresAt = explicitExpiration || new Date(now.getTime() + request.ttlSeconds * 1_000).toISOString();
+  const credentials = normalizeAwsSigV4Credentials({
+    accessKeyId: valueFrom(payload, "accessKeyId", "AccessKeyId"),
+    secretAccessKey: valueFrom(payload, "secretAccessKey", "SecretAccessKey", "SecretKey"),
+    sessionToken: valueFrom(payload, "sessionToken", "SessionToken"),
+    region: request.scope.region,
+    expiresAt,
+  });
+  if (!credentials.sessionToken) throw new Error("续签服务没有返回 Session Token，已拒绝把结果当作短期凭据");
+  const lifecycle = inspectAwsCredentialLifecycle(credentials, now);
+  if (!lifecycle.usable) throw new Error("续签服务返回的凭据已经到期或剩余不足 30 秒");
+  if ((lifecycle.remainingMs || 0) > request.ttlSeconds * 1_000 + 60_000) throw new Error("续签服务返回的期限超过本次申请寿命");
+  return credentials;
+}
+
+export async function renewSyncStorageCredentials(configValue, scopeValue, fetchImpl = globalThis.fetch, nowImpl = () => new Date()) {
+  if (typeof fetchImpl !== "function") throw new Error("当前环境不支持短期凭据续签");
+  const endpointUrl = normalizeBrokerUrl(configValue?.endpointUrl);
+  const bearerToken = normalizeBrokerToken(configValue?.bearerToken);
+  const request = createCredentialBrokerRequest(scopeValue);
+  const requestedAt = nowImpl();
+  let response;
+  try {
+    response = await fetchImpl(endpointUrl, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json;charset=utf-8",
+        ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+      },
+      body: JSON.stringify(request),
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+    });
+  } catch {
+    throw new Error("无法访问短期凭据续签服务，请检查地址、CORS 与网络权限");
+  }
+  if (response.status === 401 || response.status === 403) throw new Error("续签服务拒绝访问，请检查当前页面内存中的访问令牌");
+  if (response.status !== 200) throw new Error(`续签服务返回 HTTP ${response.status}`);
+  const declaredLength = Number(response.headers.get("content-length") || 0);
+  if (declaredLength > MAX_CREDENTIAL_BROKER_RESPONSE_BYTES) throw new Error("续签服务响应超过 64 KiB 上限");
+  const raw = await response.text();
+  if (byteLength(raw) > MAX_CREDENTIAL_BROKER_RESPONSE_BYTES) throw new Error("续签服务响应超过 64 KiB 上限");
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("续签服务没有返回有效 JSON");
+  }
+  return {
+    credentials: normalizeCredentialBrokerResponse(parsed, request, requestedAt),
+    requestedAt: new Date(requestedAt).toISOString(),
+    ttlSeconds: request.ttlSeconds,
+  };
+}

@@ -25,6 +25,7 @@ test("storage recipes build provider-specific single-object endpoints", () => {
   assert.equal(getSyncStorageRecipe("cloudflare-r2").region, "auto");
   assert.throws(() => buildSyncStorageObjectUrl("amazon-s3", { bucket: "Bucket.With.Dots", region: "us-east-1", objectKey: "sync.json" }), /存储桶名称/);
   assert.throws(() => buildSyncStorageObjectUrl("cloudflare-r2", { accountId: "short", bucket: "sync-bucket", objectKey: "sync.json" }), /Account ID/);
+  assert.throws(() => buildSyncStorageObjectUrl("amazon-s3", { bucket: "private-sync", region: "us-east-1", objectKey: "sync/../other.json" }), /相对路径段/);
 });
 
 test("S3 CORS recipes expose only ETag and scope origins without wildcards", () => {

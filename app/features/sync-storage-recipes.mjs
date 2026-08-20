@@ -33,10 +33,15 @@ export const SYNC_STORAGE_RECIPES = Object.freeze([
   }),
 ]);
 
-function objectKey(value) {
+export function normalizeSyncStorageObjectKey(value) {
   const key = String(value || "").trim().replace(/^\/+/, "");
   if (!key || key.length > 1_024 || /[\u0000-\u001f\u007f]/.test(key)) throw new Error("同步对象 Key 无效");
-  return key.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+  if (key.split("/").some((segment) => segment === "." || segment === "..")) throw new Error("同步对象 Key 不能包含相对路径段");
+  return key;
+}
+
+function objectKey(value) {
+  return normalizeSyncStorageObjectKey(value).split("/").map((segment) => encodeURIComponent(segment)).join("/");
 }
 
 function bucketName(value) {

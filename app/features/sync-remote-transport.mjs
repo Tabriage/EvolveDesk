@@ -1,5 +1,5 @@
 import { MAX_SYNC_PACKET_BYTES, inspectSyncPacketText } from "./sync-core.mjs";
-import { createAwsSigV4Headers, normalizeAwsSigV4Credentials } from "./aws-sigv4.mjs";
+import { assertAwsCredentialUsable, createAwsSigV4Headers, normalizeAwsSigV4Credentials } from "./aws-sigv4.mjs";
 
 export const REMOTE_TRANSPORT_ID = "http-conditional-object";
 export const MAX_REMOTE_TOKEN_CHARS = 8_192;
@@ -44,6 +44,7 @@ function bearerRequestHeaders(token, additions = {}) {
 
 async function requestOptions(method, config, additions = {}, nowValue = new Date()) {
   const baseHeaders = { Accept: "application/json", ...(additions.headers || {}) };
+  if (config.sigv4) assertAwsCredentialUsable(config.sigv4, nowValue);
   const headers = config.sigv4
     ? await createAwsSigV4Headers(config.sigv4, { method, url: config.objectUrl, headers: baseHeaders, body: additions.body }, nowValue)
     : bearerRequestHeaders(config.bearerToken, baseHeaders);

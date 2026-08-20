@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createAwsSigV4Headers, normalizeAwsSigV4Credentials } from "../app/features/aws-sigv4.mjs";
+import {
+  assertAwsCredentialUsable,
+  createAwsSigV4Headers,
+  inspectAwsCredentialLifecycle,
+  normalizeAwsSigV4Credentials,
+} from "../app/features/aws-sigv4.mjs";
 
 const officialCredentials = {
   accessKeyId: "AKIAIOSFODNN7EXAMPLE",
@@ -43,4 +48,20 @@ test("SigV4 credential normalization rejects control characters and invalid regi
   assert.equal(normalizeAwsSigV4Credentials(officialCredentials).sessionToken, "");
   assert.throws(() => normalizeAwsSigV4Credentials({ ...officialCredentials, secretAccessKey: "unsafe\nsecret" }), /格式无效/);
   assert.throws(() => normalizeAwsSigV4Credentials({ ...officialCredentials, region: "US East 1" }), /区域格式无效/);
+});
+
+test("temporary credential lifecycle distinguishes valid, expiring, expired, and unknown sessions", async () => {
+  const now = "2026-08-21T10:00:00.000Z";
+  assert.equal(inspectAwsCredentialLifecycle({ sessionToken: "session", expiresAt: "2026-08-21T10:30:00.000Z" }, now).status, "valid");
+  assert.equal(inspectAwsCredentialLifecycle({ sessionToken: "session", expiresAt: "2026-08-21T10:04:00.000Z" }, now).status, "expiring");
+  assert.equal(inspectAwsCredentialLifecycle({ sessionToken: "session", expiresAt: "2026-08-21T09:59:59.000Z" }, now).status, "expired");
+  assert.equal(inspectAwsCredentialLifecycle({ sessionToken: "session" }, now).status, "unknown");
+  assert.equal(inspectAwsCredentialLifecycle({}, now).status, "long-lived");
+  assert.throws(() => assertAwsCredentialUsable({ sessionToken: "session", expiresAt: "2026-08-21T10:00:20.000Z" }, now), /不足 30 秒/);
+  assert.equal(normalizeAwsSigV4Credentials({ ...officialCredentials, expiresAt: 1787308200 }).expiresAt, "2026-08-21T10:30:00.000Z");
+  await assert.rejects(createAwsSigV4Headers({
+    ...officialCredentials,
+    sessionToken: "session",
+    expiresAt: "2026-08-21T09:59:59.000Z",
+  }, { method: "GET", url: "https://examplebucket.s3.amazonaws.com/test.txt" }, now), /已经到期/);
 });
