@@ -24,6 +24,48 @@ test("remote transport accepts HTTPS and loopback HTTP without embedding credent
   assert.equal(normalizeRemoteTransportConfig({ objectUrl: "http://localhost:8787/evolve.json" }).objectUrl, "http://localhost:8787/evolve.json");
   assert.throws(() => normalizeRemoteTransportConfig({ objectUrl: "http://sync.example/evolve.json" }), /HTTPS/);
   assert.throws(() => normalizeRemoteTransportConfig({ objectUrl: "https://user:secret@sync.example/evolve.json" }), /账号、密码/);
+  assert.throws(() => normalizeRemoteTransportConfig({
+    objectUrl: "https://bucket.s3.us-east-1.amazonaws.com/evolve.json",
+    bearerToken: "bearer",
+    sigv4: { accessKeyId: "ACCESSKEY123", secretAccessKey: "secret-key-value", region: "us-east-1" },
+  }), /不能同时使用/);
+  assert.throws(() => normalizeRemoteTransportConfig({
+    objectUrl: "https://bucket.s3.us-east-1.amazonaws.com/evolve.json?X-Amz-Signature=already-signed",
+    sigv4: { accessKeyId: "ACCESSKEY123", secretAccessKey: "secret-key-value", region: "us-east-1" },
+  }), /不能混用预签名/);
+});
+
+test("S3 recipes sign every conditional request with memory-only SigV4 credentials", async () => {
+  const { channel, packet, text } = await packetFixture();
+  const calls = [];
+  let stored = null;
+  const secretAccessKey = "temporary-secret-access-key";
+  const transport = createHttpSyncTransport({
+    objectUrl: "https://account.r2.cloudflarestorage.com/private-bucket/evolve.json",
+    sigv4: {
+      accessKeyId: "TEMPACCESSKEY123",
+      secretAccessKey,
+      sessionToken: "scoped-session-token",
+      region: "auto",
+    },
+  }, async (_url, options) => {
+    calls.push(options);
+    if (options.method === "PUT") {
+      stored = options.body;
+      return response(null, 201, { ETag: '"sigv4-etag"' });
+    }
+    return stored ? response(stored, 200, { ETag: '"sigv4-etag"' }) : response(null, 404);
+  }, () => new Date("2026-08-21T10:11:12.000Z"));
+
+  const result = await transport.write(channel.channelId, "", text);
+
+  assert.equal(result.written, true);
+  assert.equal(result.currentRevisionId, packet.revisionId);
+  assert.deepEqual(calls.map((call) => call.method), ["GET", "PUT", "GET"]);
+  assert.match(calls[0].headers.Authorization, /^AWS4-HMAC-SHA256 Credential=TEMPACCESSKEY123\/20260821\/auto\/s3\/aws4_request/);
+  assert.equal(calls[1].headers["if-none-match"], "*");
+  assert.equal(calls[1].headers["x-amz-security-token"], "scoped-session-token");
+  assert.equal(JSON.stringify(calls).includes(secretAccessKey), false);
 });
 
 test("remote reads validate packet channel and keep authorization out of storage", async () => {

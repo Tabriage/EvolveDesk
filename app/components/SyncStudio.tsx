@@ -32,6 +32,13 @@ import type {
   SyncRevisionRelation,
 } from "../features/sync-core.mjs";
 import { createHttpSyncTransport } from "../features/sync-remote-transport.mjs";
+import {
+  SYNC_STORAGE_RECIPES,
+  buildSyncStorageObjectUrl,
+  createSyncStorageCorsPolicy,
+  getSyncStorageRecipe,
+} from "../features/sync-storage-recipes.mjs";
+import type { SyncStorageRecipeId } from "../features/sync-storage-recipes.mjs";
 import { SyncRecoveryConsole } from "./SyncRecoveryConsole";
 import {
   SYNC_CHANNELS_CHANGED_EVENT,
@@ -135,8 +142,17 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   const [pendingGrant, setPendingGrant] = useState<DeviceGrant | null>(null);
   const [pendingRevocationId, setPendingRevocationId] = useState("");
   const [incoming, setIncoming] = useState<IncomingReceipt | null>(null);
+  const [remoteRecipeId, setRemoteRecipeId] = useState<SyncStorageRecipeId>("http-gateway");
   const [remoteObjectUrl, setRemoteObjectUrl] = useState("");
   const [remoteToken, setRemoteToken] = useState("");
+  const [remoteAccountId, setRemoteAccountId] = useState("");
+  const [remoteBucket, setRemoteBucket] = useState("");
+  const [remoteObjectKey, setRemoteObjectKey] = useState("");
+  const [remoteRegion, setRemoteRegion] = useState("us-east-1");
+  const [remoteAccessKeyId, setRemoteAccessKeyId] = useState("");
+  const [remoteSecretAccessKey, setRemoteSecretAccessKey] = useState("");
+  const [remoteSessionToken, setRemoteSessionToken] = useState("");
+  const [currentOrigin, setCurrentOrigin] = useState("");
   const [remoteProof, setRemoteProof] = useState<RemoteProof | null>(null);
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("先确认这台设备的指纹；授权和传输都只在你明确操作时发生。 ");
@@ -146,16 +162,44 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
     [channels, selectedChannelId],
   );
 
+  const selectedRemoteRecipe = useMemo(() => getSyncStorageRecipe(remoteRecipeId), [remoteRecipeId]);
+  const defaultRemoteObjectKey = selectedChannel ? `evolve-desk/${selectedChannel.channelId}.json` : "evolve-desk/channel-id.json";
+  const preparedRemoteObjectUrl = useMemo(() => {
+    try {
+      return buildSyncStorageObjectUrl(remoteRecipeId, {
+        objectUrl: remoteObjectUrl,
+        accountId: remoteAccountId,
+        bucket: remoteBucket,
+        objectKey: remoteObjectKey.trim() || defaultRemoteObjectKey,
+        region: remoteRegion,
+      });
+    } catch {
+      return "";
+    }
+  }, [defaultRemoteObjectKey, remoteAccountId, remoteBucket, remoteObjectKey, remoteObjectUrl, remoteRecipeId, remoteRegion]);
+  const remoteCredentialReady = selectedRemoteRecipe.authType === "bearer" || Boolean(remoteAccessKeyId.trim() && remoteSecretAccessKey.trim() && remoteRegion.trim());
+  const remoteConnectionReady = Boolean(preparedRemoteObjectUrl && remoteCredentialReady);
+  const remoteCorsPolicy = useMemo(() => {
+    if (!currentOrigin || selectedRemoteRecipe.authType !== "aws-sigv4") return "";
+    try {
+      return JSON.stringify(createSyncStorageCorsPolicy(currentOrigin), null, 2);
+    } catch {
+      return "";
+    }
+  }, [currentOrigin, selectedRemoteRecipe.authType]);
+
   const remotePublishReady = Boolean(
     selectedChannel
     && !selectedChannel.retiredAt
     && remoteProof
+    && remoteConnectionReady
     && (!remoteProof.exists || (remoteProof.revisionId === selectedChannel.headRevisionId && remoteProof.validator)),
   );
 
   useEffect(() => {
     let active = true;
     async function initialize() {
+      if (globalThis.location?.origin) setCurrentOrigin(globalThis.location.origin);
       const nextIdentity = await loadOrCreateSyncIdentity(defaultDeviceName());
       if (!nextIdentity) throw new Error("当前浏览器不支持 IndexedDB，无法保存不可导出的设备私钥");
       const nextChannels = await listSyncChannels();
@@ -215,6 +259,45 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   function changeRemoteToken(value: string) {
     setRemoteToken(value);
     setRemoteProof(null);
+  }
+
+  function selectRemoteRecipe(recipeId: SyncStorageRecipeId) {
+    const recipe = getSyncStorageRecipe(recipeId);
+    setRemoteRecipeId(recipeId);
+    setRemoteRegion(recipe.region || "us-east-1");
+    setRemoteObjectUrl("");
+    setRemoteToken("");
+    setRemoteAccessKeyId("");
+    setRemoteSecretAccessKey("");
+    setRemoteSessionToken("");
+    setRemoteProof(null);
+    setMessage(`${recipe.label} 配方已选择；连接参数和凭据只留在当前页面内存。 `);
+  }
+
+  function remoteTransportConfig() {
+    if (selectedRemoteRecipe.authType === "bearer") return { objectUrl: preparedRemoteObjectUrl, bearerToken: remoteToken };
+    return {
+      objectUrl: preparedRemoteObjectUrl,
+      sigv4: {
+        accessKeyId: remoteAccessKeyId,
+        secretAccessKey: remoteSecretAccessKey,
+        sessionToken: remoteSessionToken,
+        region: remoteRegion,
+      },
+    };
+  }
+
+  async function copyRemoteCorsPolicy() {
+    if (!remoteCorsPolicy || !globalThis.navigator?.clipboard) {
+      setMessage("当前浏览器不能直接复制 CORS 配方；请按界面契约手动配置 GET、PUT、请求头与 ETag 暴露。 ");
+      return;
+    }
+    try {
+      await globalThis.navigator.clipboard.writeText(remoteCorsPolicy);
+      setMessage(`已复制 ${selectedRemoteRecipe.label} 的最小 CORS 配方；AllowedOrigins 已限定为当前工作台 ${currentOrigin}。 `);
+    } catch {
+      setMessage("浏览器拒绝写入剪贴板；请手动配置当前 Origin、GET/PUT、SigV4 请求头并暴露 ETag。 ");
+    }
   }
 
   async function renameDevice() {
@@ -466,10 +549,10 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
   }
 
   async function inspectRemoteObject() {
-    if (!selectedChannel) return;
+    if (!selectedChannel || !remoteConnectionReady) return;
     setBusy("remote-read");
     try {
-      const transport = createHttpSyncTransport({ objectUrl: remoteObjectUrl, bearerToken: remoteToken });
+      const transport = createHttpSyncTransport(remoteTransportConfig());
       const result = await transport.read(selectedChannel.channelId);
       setRemoteProof({ exists: result.exists, revisionId: result.revisionId, validator: result.validator });
       if (!result.exists) {
@@ -483,7 +566,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
         return;
       }
       if (!result.packetText) throw new Error("远端对象没有可读取的同步包");
-      await stagePacket(result.packetText, "远端条件对象", new TextEncoder().encode(result.packetText).byteLength);
+      await stagePacket(result.packetText, `${selectedRemoteRecipe.label} 条件对象`, new TextEncoder().encode(result.packetText).byteLength);
     } catch (error) {
       setRemoteProof(null);
       setMessage(error instanceof Error ? error.message : "无法检查远端条件对象");
@@ -496,7 +579,7 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
     if (!identity || !selectedChannel || !remoteProof) return;
     setBusy("remote-write");
     try {
-      const transport = createHttpSyncTransport({ objectUrl: remoteObjectUrl, bearerToken: remoteToken });
+      const transport = createHttpSyncTransport(remoteTransportConfig());
       const packetChannel = remoteProof.exists ? selectedChannel : { ...selectedChannel, headRevisionId: "", mergeParentRevisionIds: [] };
       const backup = await createBackupEnvelope(state, sources);
       const packet = await createSyncPacket(serializeBackupEnvelope(backup), packetChannel, identity);
@@ -574,13 +657,33 @@ export function SyncStudio({ state, sources, onStageBackup }: SyncStudioProps) {
       </div>
 
       <article className="remote-transport-console">
-        <header><div><span>REMOTE ADAPTER / 显式远端传输</span><h3>一个对象地址，一条不可盲写的版本线。</h3></div><strong>{remoteProof ? remoteProof.exists ? remoteProof.validator ? "ETAG READY" : "READ ONLY" : "EMPTY SLOT" : "DISCONNECTED"}</strong></header>
-        <div className="remote-transport-fields">
-          <label><span>同步包对象 URL</span><input type="url" value={remoteObjectUrl} onChange={(event) => changeRemoteObjectUrl(event.target.value)} placeholder="https://storage.example/evolve-sync.json" disabled={Boolean(busy)} /></label>
-          <label><span>Bearer 访问令牌（可选）</span><input type="password" value={remoteToken} onChange={(event) => changeRemoteToken(event.target.value)} placeholder="仅保留在当前页面内存" autoComplete="off" disabled={Boolean(busy)} /></label>
-          <div><span>远端版本证据</span><code>{remoteProof?.revisionId ? `${remoteProof.revisionId.slice(0, 22)}…` : remoteProof ? "尚无远端对象" : "需要手动连接检查"}</code><small>{remoteProof?.validator || "未取得强 ETag"}</small></div>
-        </div>
-        <footer><p><i />只会传输已经加密和签名的同步包；GET/PUT 均需当前用户点击。远端必须支持 CORS、强 ETag 与 HTTP 条件请求。</p><div><button onClick={() => void inspectRemoteObject()} disabled={!selectedChannel || !remoteObjectUrl.trim() || Boolean(busy)}>{busy === "remote-read" ? "正在检查…" : "连接并检查"}</button><button onClick={() => void publishRemoteObject()} disabled={!identity || !remotePublishReady || Boolean(busy)}>{busy === "remote-write" ? "正在条件发布…" : "条件发布密文"}<span>↗</span></button></div></footer>
+        <header><div><span>REMOTE ADAPTER / 显式远端传输</span><h3>选供应商，但不放弃条件写入契约。</h3></div><strong>{remoteProof ? remoteProof.exists ? remoteProof.validator ? "ETAG READY" : "READ ONLY" : "EMPTY SLOT" : selectedRemoteRecipe.id === "http-gateway" ? "HTTP RECIPE" : "SIGV4 RECIPE"}</strong></header>
+        <div className="remote-recipe-strip" role="radiogroup" aria-label="远端存储连接配方">{SYNC_STORAGE_RECIPES.map((recipe) => <button key={recipe.id} className={remoteRecipeId === recipe.id ? "active" : ""} role="radio" aria-checked={remoteRecipeId === recipe.id} onClick={() => selectRemoteRecipe(recipe.id)} disabled={Boolean(busy)}><i>{recipe.id === "cloudflare-r2" ? "R2" : recipe.id === "amazon-s3" ? "S3" : "↔"}</i><span><strong>{recipe.label}</strong><small>{recipe.shortLabel}</small></span></button>)}</div>
+        <div className="remote-recipe-contract"><code>{selectedRemoteRecipe.endpointPattern}</code><div><span><i />GET + PUT</span><b>→</b><span><i />If-None-Match / If-Match</span><b>→</b><span><i />Expose ETag</span>{selectedRemoteRecipe.authType === "aws-sigv4" && <button onClick={() => void copyRemoteCorsPolicy()} disabled={!remoteCorsPolicy || Boolean(busy)}>复制当前 Origin 的 CORS</button>}</div></div>
+        {selectedRemoteRecipe.authType === "bearer" ? (
+          <div className="remote-transport-fields">
+            <label><span>同步包对象 URL</span><input type="url" value={remoteObjectUrl} onChange={(event) => changeRemoteObjectUrl(event.target.value)} placeholder="https://storage.example/evolve-sync.json" disabled={Boolean(busy)} /></label>
+            <label><span>Bearer 访问令牌（可选）</span><input type="password" value={remoteToken} onChange={(event) => changeRemoteToken(event.target.value)} placeholder="仅保留在当前页面内存" autoComplete="off" disabled={Boolean(busy)} /></label>
+            <div><span>远端版本证据</span><code>{remoteProof?.revisionId ? `${remoteProof.revisionId.slice(0, 22)}…` : remoteProof ? "尚无远端对象" : "需要手动连接检查"}</code><small>{remoteProof?.validator || "未取得强 ETag"}</small></div>
+          </div>
+        ) : (
+          <>
+            <div className={`remote-s3-address-fields ${selectedRemoteRecipe.id === "cloudflare-r2" ? "r2" : "s3"}`}>
+              {selectedRemoteRecipe.id === "cloudflare-r2" && <label><span>R2 Account ID</span><input value={remoteAccountId} maxLength={32} onChange={(event) => { setRemoteAccountId(event.target.value); setRemoteProof(null); }} placeholder="32 位 Account ID" disabled={Boolean(busy)} /></label>}
+              <label><span>私有存储桶</span><input value={remoteBucket} maxLength={63} onChange={(event) => { setRemoteBucket(event.target.value); setRemoteProof(null); }} placeholder="private-evolve-sync" disabled={Boolean(busy)} /></label>
+              {selectedRemoteRecipe.id === "amazon-s3" && <label><span>AWS Region</span><input value={remoteRegion} maxLength={32} onChange={(event) => { setRemoteRegion(event.target.value); setRemoteProof(null); }} placeholder="ap-southeast-1" disabled={Boolean(busy)} /></label>}
+              <label><span>单一对象 Key</span><input value={remoteObjectKey} maxLength={1024} onChange={(event) => { setRemoteObjectKey(event.target.value); setRemoteProof(null); }} placeholder={defaultRemoteObjectKey} disabled={Boolean(busy)} /></label>
+              <div><span>签名对象 URL</span><code>{preparedRemoteObjectUrl || "补全供应商地址字段后生成"}</code><small>对象 Key 默认绑定当前空间；轮换后请使用新对象。</small></div>
+            </div>
+            <div className="remote-s3-credential-fields">
+              <label><span>Access Key ID</span><input value={remoteAccessKeyId} maxLength={128} onChange={(event) => { setRemoteAccessKeyId(event.target.value); setRemoteProof(null); }} autoComplete="off" placeholder="短期凭据" disabled={Boolean(busy)} /></label>
+              <label><span>Secret Access Key</span><input type="password" value={remoteSecretAccessKey} maxLength={256} onChange={(event) => { setRemoteSecretAccessKey(event.target.value); setRemoteProof(null); }} autoComplete="off" placeholder="只留在页面内存" disabled={Boolean(busy)} /></label>
+              <label><span>Session Token（推荐）</span><input type="password" value={remoteSessionToken} maxLength={16384} onChange={(event) => { setRemoteSessionToken(event.target.value); setRemoteProof(null); }} autoComplete="off" placeholder="短期凭据才会提供" disabled={Boolean(busy)} /></label>
+              <div><span>远端版本证据</span><code>{remoteProof?.revisionId ? `${remoteProof.revisionId.slice(0, 22)}…` : remoteProof ? "尚无远端对象" : "需要签名连接检查"}</code><small>{remoteProof?.validator || selectedRemoteRecipe.credentialHint}</small></div>
+            </div>
+          </>
+        )}
+        <footer><p><i />只会传输已经加密和签名的同步包；GET/PUT 均需当前用户点击。地址、Bearer 或 SigV4 凭据不会写入本地存储。</p><div><button onClick={() => void inspectRemoteObject()} disabled={!selectedChannel || !remoteConnectionReady || Boolean(busy)}>{busy === "remote-read" ? "正在检查…" : "连接并检查"}</button><button onClick={() => void publishRemoteObject()} disabled={!identity || !remotePublishReady || Boolean(busy)}>{busy === "remote-write" ? "正在条件发布…" : "条件发布密文"}<span>↗</span></button></div></footer>
       </article>
 
       <SyncRecoveryConsole

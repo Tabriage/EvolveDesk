@@ -1,4 +1,5 @@
 import { MAX_SYNC_PACKET_BYTES, inspectSyncPacketText } from "./sync-core.mjs";
+import { createAwsSigV4Headers, normalizeAwsSigV4Credentials } from "./aws-sigv4.mjs";
 
 export const REMOTE_TRANSPORT_ID = "http-conditional-object";
 export const MAX_REMOTE_TOKEN_CHARS = 8_192;
@@ -35,16 +36,20 @@ function strongEtag(value) {
   return STRONG_ETAG.test(etag) ? etag : "";
 }
 
-function requestHeaders(token, additions = {}) {
+function bearerRequestHeaders(token, additions = {}) {
   const headers = { Accept: "application/json", ...additions };
   if (token) headers.Authorization = `Bearer ${token}`;
   return headers;
 }
 
-function requestOptions(method, token, additions = {}) {
+async function requestOptions(method, config, additions = {}, nowValue = new Date()) {
+  const baseHeaders = { Accept: "application/json", ...(additions.headers || {}) };
+  const headers = config.sigv4
+    ? await createAwsSigV4Headers(config.sigv4, { method, url: config.objectUrl, headers: baseHeaders, body: additions.body }, nowValue)
+    : bearerRequestHeaders(config.bearerToken, baseHeaders);
   return {
     method,
-    headers: requestHeaders(token, additions.headers),
+    headers,
     ...(additions.body === undefined ? {} : { body: additions.body }),
     cache: "no-store",
     credentials: "omit",
@@ -62,25 +67,34 @@ async function performFetch(fetchImpl, objectUrl, options) {
 }
 
 function requireAllowedStatus(response, allowed, action) {
-  if (response.status === 401 || response.status === 403) throw new Error("远端对象拒绝访问，请检查当前页面内存中的访问令牌");
+  if (response.status === 401 || response.status === 403) throw new Error("远端对象拒绝访问，请检查当前页面内存中的访问凭据");
   if (!allowed.includes(response.status)) throw new Error(`远端对象${action}失败（HTTP ${response.status}）`);
 }
 
 export function normalizeRemoteTransportConfig(value) {
+  const objectUrl = normalizeObjectUrl(value?.objectUrl);
+  const bearerToken = normalizeToken(value?.bearerToken);
+  const sigv4 = value?.sigv4 ? normalizeAwsSigV4Credentials(value.sigv4) : null;
+  if (sigv4 && bearerToken) throw new Error("Bearer 令牌与 SigV4 凭据不能同时使用");
+  if (sigv4) {
+    const url = new URL(objectUrl);
+    if ([...url.searchParams.keys()].some((key) => /^x-amz-/i.test(key))) throw new Error("SigV4 对象 URL 不能混用预签名查询参数");
+  }
   return {
-    objectUrl: normalizeObjectUrl(value?.objectUrl),
-    bearerToken: normalizeToken(value?.bearerToken),
+    objectUrl,
+    bearerToken,
+    sigv4,
   };
 }
 
-export function createHttpSyncTransport(configValue, fetchImpl = globalThis.fetch) {
+export function createHttpSyncTransport(configValue, fetchImpl = globalThis.fetch, nowImpl = () => new Date()) {
   if (typeof fetchImpl !== "function") throw new Error("当前环境不支持远端对象传输");
   const config = normalizeRemoteTransportConfig(configValue);
 
   async function read(channelIdValue) {
     const channelId = String(channelIdValue || "").trim();
     if (!channelId) throw new Error("请先选择同步空间");
-    const response = await performFetch(fetchImpl, config.objectUrl, requestOptions("GET", config.bearerToken));
+    const response = await performFetch(fetchImpl, config.objectUrl, await requestOptions("GET", config, {}, nowImpl()));
     if (response.status === 404) return { exists: false, packetText: null, revisionId: "", validator: "" };
     requireAllowedStatus(response, [200], "读取");
     const declaredLength = Number(response.headers.get("content-length") || 0);
@@ -113,10 +127,10 @@ export function createHttpSyncTransport(configValue, fetchImpl = globalThis.fetc
     if (current.exists && !current.validator) throw new Error("远端对象未提供强 ETag，已拒绝可能覆盖其他设备的写入");
 
     const conditionalHeader = current.exists ? { "If-Match": current.validator } : { "If-None-Match": "*" };
-    const response = await performFetch(fetchImpl, config.objectUrl, requestOptions("PUT", config.bearerToken, {
+    const response = await performFetch(fetchImpl, config.objectUrl, await requestOptions("PUT", config, {
       headers: { "Content-Type": "application/json;charset=utf-8", ...conditionalHeader },
       body: packetText,
-    }));
+    }, nowImpl()));
     if (response.status === 409 || response.status === 412) {
       const latest = await read(channelId);
       return { written: false, conflict: true, currentRevisionId: latest.revisionId, validator: latest.validator };
@@ -131,8 +145,9 @@ export function createHttpSyncTransport(configValue, fetchImpl = globalThis.fetc
 
   return {
     id: REMOTE_TRANSPORT_ID,
-    label: "HTTP 条件对象",
+    label: config.sigv4 ? "S3 SigV4 条件对象" : "HTTP 条件对象",
     objectUrl: config.objectUrl,
+    authType: config.sigv4 ? "aws-sigv4" : "bearer",
     read,
     write,
   };
