@@ -14,6 +14,7 @@ test("deployment templates declare secrets and package only audited Lambda runti
   const wrangler = JSON.parse(await readFile(new URL("../deploy/storage-broker/cloudflare/wrangler.jsonc", import.meta.url), "utf8"));
   assert.equal(wrangler.main, "./worker.mjs");
   assert.equal(wrangler.compatibility_date, "2026-08-21");
+  assert.deepEqual(wrangler.version_metadata, { binding: "CF_VERSION_METADATA" });
   assert.deepEqual(wrangler.secrets.required, [
     "ALLOWED_ORIGIN",
     "BROKER_TOKEN",

@@ -198,4 +198,8 @@ test("workflows pin actions, minimize token permissions, and keep cloud credenti
   assert.doesNotMatch(trust, /token\.actions\.githubusercontent\.com:sub[^\n]*\*/);
   assert.match(cloudflare, /It is not OIDC/);
   assert.match(cloudflare, /long-lived cloud-side credentials/);
+  assert.match(cloudflare, /pnpm broker:cloudflare-deploy/);
+  assert.match(cloudflare, /WORKERS_CI_COMMIT_SHA/);
+  assert.match(cloudflare, /CF_VERSION_METADATA/);
+  assert.match(cloudflare, /BUILD LOG/);
 });

@@ -30,6 +30,8 @@
     "broker:storage": "node tools/storage-credential-broker.mjs",
     "broker:release-check": "node tools/storage-broker-release-check.mjs",
     "broker:deployment-proof": "node tools/storage-broker-deployment-proof.mjs",
+    "broker:cloudflare-deploy": "node tools/cloudflare-storage-broker-deploy.mjs",
+    "broker:cloudflare-proof": "node tools/cloudflare-storage-broker-proof-from-log.mjs",
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "pnpm run build && node --test tests/*.test.mjs",

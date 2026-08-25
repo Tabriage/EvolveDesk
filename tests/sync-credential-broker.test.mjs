@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createCredentialBrokerRequest,
+  createCredentialBrokerRuntimeChallenge,
   inspectCredentialBrokerHealth,
   inspectCredentialBrokerRequest,
   inspectCredentialBrokerRuntimeRelease,
@@ -75,6 +76,53 @@ test("credential broker health accepts only a closed non-secret runtime release 
   assert.deepEqual(inspectCredentialBrokerRuntimeRelease(release), release);
   assert.throws(() => inspectCredentialBrokerRuntimeRelease({ ...release, hidden: true }), /字段无效/);
   assert.throws(() => inspectCredentialBrokerRuntimeRelease({ ...release, runtime: { ...release.runtime, immutableVersion: "$LATEST" } }), /不可变版本/);
+});
+
+test("credential broker verifies a closed Cloudflare runtime identity and the requested challenge", async () => {
+  const release = {
+    ci: {
+      system: "cloudflare-workers-builds",
+      repository: "Tabriage/EvolveDesk",
+      commit: "b".repeat(40),
+      branch: "main",
+      buildUuid: "12345678-1234-4234-8234-123456789abc",
+    },
+    runtime: {
+      provider: "cloudflare-workers",
+      scriptName: "evolve-desk-r2-credential-broker",
+      versionId: "11111111-2222-4333-8444-555555555555",
+      versionTag: `evolve-${"b".repeat(40)}`,
+      versionCreatedAt: "2026-08-21T09:59:30.000Z",
+    },
+  };
+  const challengeValue = "0123456789abcdef".repeat(4);
+  let request;
+  const health = await inspectCredentialBrokerHealth({
+    endpointUrl: "https://broker.example/credentials",
+    bearerToken: "memory-only-token",
+  }, async (url, options) => {
+    request = { url, options };
+    return new Response(JSON.stringify({
+      ok: true,
+      service: "evolve-desk-storage-broker",
+      providers: { cloudflareR2: true, amazonS3: false },
+      release,
+      challenge: await createCredentialBrokerRuntimeChallenge(challengeValue, release),
+    }), { status: 200 });
+  }, { challenge: challengeValue });
+  assert.equal(request.options.headers["X-Evolve-Runtime-Challenge"], challengeValue);
+  assert.deepEqual(health.release, release);
+  assert.equal(health.challenge.value, challengeValue);
+  assert.throws(() => inspectCredentialBrokerRuntimeRelease({ ...release, ci: { ...release.ci, hidden: true } }), /字段无效/);
+  assert.throws(() => inspectCredentialBrokerRuntimeRelease({ ...release, runtime: { ...release.runtime, versionTag: `evolve-${"c".repeat(40)}` } }), /标签与提交/);
+
+  await assert.rejects(inspectCredentialBrokerHealth({ endpointUrl: "https://broker.example/credentials" }, async () => new Response(JSON.stringify({
+    ok: true,
+    service: "evolve-desk-storage-broker",
+    providers: { cloudflareR2: true, amazonS3: false },
+    release,
+    challenge: { ...(await createCredentialBrokerRuntimeChallenge(challengeValue, release)), digest: "f".repeat(64) },
+  }), { status: 200 }), { challenge: challengeValue }), /挑战响应不匹配/);
 });
 
 test("credential broker accepts a Cloudflare result and derives expiry from requested TTL", async () => {

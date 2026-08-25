@@ -34,32 +34,89 @@ function boundedText(value, label, maximum, pattern) {
 function normalizeRuntimeRelease(value) {
   if (value === undefined) return undefined;
   const release = exactKeys(value, ["ci", "runtime"], "凭据代理运行时来源");
-  const ci = exactKeys(release.ci, ["commit", "ref", "repository", "runAttempt", "runId", "system", "workflowPath"], "凭据代理 CI 来源");
-  const runtime = exactKeys(release.runtime, ["functionName", "immutableVersion", "provider", "region"], "凭据代理云端运行时");
-  if (ci.system !== "github-actions") throw new Error("凭据代理 CI 系统无效");
-  if (runtime.provider !== "aws-lambda") throw new Error("凭据代理云端运行时无效");
-  if (!Number.isSafeInteger(ci.runAttempt) || ci.runAttempt < 1) throw new Error("凭据代理 Run Attempt 无效");
-  return {
-    ci: {
-      system: "github-actions",
-      repository: boundedText(ci.repository, "凭据代理 CI 仓库", 180, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
-      commit: boundedText(ci.commit, "凭据代理 CI 提交", 40, /^[0-9a-f]{40}$/),
-      ref: boundedText(ci.ref, "凭据代理 CI Ref", 260, /^refs\/heads\/(?!.*\.\.)(?!.*\/$)[A-Za-z0-9._/-]+$/),
-      workflowPath: boundedText(ci.workflowPath, "凭据代理 CI 工作流", 220, /^\.github\/workflows\/[A-Za-z0-9._/-]+\.ya?ml$/),
-      runId: boundedText(ci.runId, "凭据代理 CI Run ID", 32, /^[1-9][0-9]*$/),
-      runAttempt: ci.runAttempt,
-    },
-    runtime: {
-      provider: "aws-lambda",
-      region: boundedText(runtime.region, "凭据代理 AWS Region", 32, /^[a-z0-9][a-z0-9-]{1,31}$/),
-      functionName: boundedText(runtime.functionName, "凭据代理 Lambda 函数名", 64, /^[A-Za-z0-9-_]+$/),
-      immutableVersion: boundedText(runtime.immutableVersion, "凭据代理 Lambda 不可变版本", 12, /^[1-9][0-9]*$/),
-    },
-  };
+  if (release.ci?.system === "github-actions") {
+    const ci = exactKeys(release.ci, ["commit", "ref", "repository", "runAttempt", "runId", "system", "workflowPath"], "凭据代理 CI 来源");
+    const runtime = exactKeys(release.runtime, ["functionName", "immutableVersion", "provider", "region"], "凭据代理云端运行时");
+    if (runtime.provider !== "aws-lambda") throw new Error("凭据代理云端运行时无效");
+    if (!Number.isSafeInteger(ci.runAttempt) || ci.runAttempt < 1) throw new Error("凭据代理 Run Attempt 无效");
+    return {
+      ci: {
+        system: "github-actions",
+        repository: boundedText(ci.repository, "凭据代理 CI 仓库", 180, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+        commit: boundedText(ci.commit, "凭据代理 CI 提交", 40, /^[0-9a-f]{40}$/),
+        ref: boundedText(ci.ref, "凭据代理 CI Ref", 260, /^refs\/heads\/(?!.*\.\.)(?!.*\/$)[A-Za-z0-9._/-]+$/),
+        workflowPath: boundedText(ci.workflowPath, "凭据代理 CI 工作流", 220, /^\.github\/workflows\/[A-Za-z0-9._/-]+\.ya?ml$/),
+        runId: boundedText(ci.runId, "凭据代理 CI Run ID", 32, /^[1-9][0-9]*$/),
+        runAttempt: ci.runAttempt,
+      },
+      runtime: {
+        provider: "aws-lambda",
+        region: boundedText(runtime.region, "凭据代理 AWS Region", 32, /^[a-z0-9][a-z0-9-]{1,31}$/),
+        functionName: boundedText(runtime.functionName, "凭据代理 Lambda 函数名", 64, /^[A-Za-z0-9-_]+$/),
+        immutableVersion: boundedText(runtime.immutableVersion, "凭据代理 Lambda 不可变版本", 12, /^[1-9][0-9]*$/),
+      },
+    };
+  }
+  if (release.ci?.system === "cloudflare-workers-builds") {
+    const ci = exactKeys(release.ci, ["branch", "buildUuid", "commit", "repository", "system"], "凭据代理 CI 来源");
+    const runtime = exactKeys(release.runtime, ["provider", "scriptName", "versionCreatedAt", "versionId", "versionTag"], "凭据代理云端运行时");
+    if (runtime.provider !== "cloudflare-workers") throw new Error("凭据代理云端运行时无效");
+    const commit = boundedText(ci.commit, "凭据代理 CI 提交", 40, /^[0-9a-f]{40}$/);
+    const versionCreatedAt = boundedText(runtime.versionCreatedAt, "凭据代理 Worker 版本创建时间", 64);
+    const versionDate = new Date(versionCreatedAt);
+    if (!Number.isFinite(versionDate.getTime()) || versionDate.toISOString() !== versionCreatedAt) throw new Error("凭据代理 Worker 版本创建时间无效");
+    const versionTag = boundedText(runtime.versionTag, "凭据代理 Worker 版本标签", 80, /^evolve-[0-9a-f]{40}$/);
+    if (versionTag !== `evolve-${commit}`) throw new Error("凭据代理 Worker 版本标签与提交不一致");
+    return {
+      ci: {
+        system: "cloudflare-workers-builds",
+        repository: boundedText(ci.repository, "凭据代理 CI 仓库", 180, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+        commit,
+        branch: boundedText(ci.branch, "凭据代理 CI 分支", 180, /^(?!.*\.\.)(?!\/)(?!.*\/$)[A-Za-z0-9._/-]+$/),
+        buildUuid: boundedText(ci.buildUuid, "凭据代理 Workers Build UUID", 128, /^[A-Za-z0-9._-]+$/),
+      },
+      runtime: {
+        provider: "cloudflare-workers",
+        scriptName: boundedText(runtime.scriptName, "凭据代理 Worker 名称", 63, /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/),
+        versionId: boundedText(runtime.versionId, "凭据代理 Worker Version ID", 36, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
+        versionTag,
+        versionCreatedAt,
+      },
+    };
+  }
+  throw new Error("凭据代理 CI 系统无效");
 }
 
 export function inspectCredentialBrokerRuntimeRelease(value) {
   return normalizeRuntimeRelease(value);
+}
+
+async function sha256Hex(value) {
+  if (!globalThis.crypto?.subtle) throw new Error("当前环境不支持运行时挑战所需的 Web Crypto");
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(value)));
+  return [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2, "0")).join("");
+}
+
+function normalizeRuntimeChallengeValue(value) {
+  return boundedText(value, "凭据代理运行时挑战", 128, /^[0-9a-f]{32,128}$/);
+}
+
+export async function createCredentialBrokerRuntimeChallenge(value, releaseValue) {
+  const challenge = normalizeRuntimeChallengeValue(value);
+  const release = normalizeRuntimeRelease(releaseValue);
+  if (!release) throw new Error("运行时挑战缺少可核对的发布来源");
+  return {
+    algorithm: "SHA-256",
+    value: challenge,
+    digest: await sha256Hex(`${challenge}\n${stableJson(release)}`),
+  };
+}
+
+export async function inspectCredentialBrokerRuntimeChallenge(value, releaseValue, expectedValue) {
+  const challenge = exactKeys(value, ["algorithm", "digest", "value"], "凭据代理运行时挑战响应");
+  const expected = await createCredentialBrokerRuntimeChallenge(expectedValue, releaseValue);
+  if (challenge.algorithm !== expected.algorithm || challenge.value !== expected.value || challenge.digest !== expected.digest) throw new Error("凭据代理运行时挑战响应不匹配");
+  return expected;
 }
 
 function normalizeBrokerUrl(value) {
@@ -215,11 +272,12 @@ export async function renewSyncStorageCredentials(configValue, scopeValue, fetch
   };
 }
 
-export async function inspectCredentialBrokerHealth(configValue, fetchImpl = globalThis.fetch) {
+export async function inspectCredentialBrokerHealth(configValue, fetchImpl = globalThis.fetch, options = {}) {
   if (typeof fetchImpl !== "function") throw new Error("当前环境不支持本地凭据代理检查");
   const endpointUrl = new URL(normalizeBrokerUrl(configValue?.endpointUrl));
   const healthUrl = new URL("./health", endpointUrl);
   const bearerToken = normalizeBrokerToken(configValue?.bearerToken);
+  const challengeValue = options.challenge === undefined ? "" : normalizeRuntimeChallengeValue(options.challenge);
   let response;
   try {
     response = await fetchImpl(healthUrl.toString(), {
@@ -227,6 +285,7 @@ export async function inspectCredentialBrokerHealth(configValue, fetchImpl = glo
       headers: {
         Accept: "application/json",
         ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+        ...(challengeValue ? { "X-Evolve-Runtime-Challenge": challengeValue } : {}),
       },
       cache: "no-store",
       credentials: "omit",
@@ -253,10 +312,16 @@ export async function inspectCredentialBrokerHealth(configValue, fetchImpl = glo
     throw new Error("本地凭据代理健康响应格式无效");
   }
   const release = inspectCredentialBrokerRuntimeRelease(parsed.release);
+  if (challengeValue && !release) throw new Error("凭据代理没有报告运行时挑战所需的发布来源");
+  if (!challengeValue && parsed.challenge !== undefined) throw new Error("凭据代理返回了未请求的运行时挑战");
+  const challenge = challengeValue
+    ? await inspectCredentialBrokerRuntimeChallenge(parsed.challenge, release, challengeValue)
+    : undefined;
   return {
     ok: true,
     service: "evolve-desk-storage-broker",
     providers: { cloudflareR2: parsed.providers.cloudflareR2, amazonS3: parsed.providers.amazonS3 },
     ...(release ? { release } : {}),
+    ...(challenge ? { challenge } : {}),
   };
 }

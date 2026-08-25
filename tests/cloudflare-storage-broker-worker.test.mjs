@@ -11,6 +11,15 @@ const env = {
   R2_ACCOUNT_ID: accountId,
   R2_ACCESS_KEY_ID: "R2PARENTACCESS123",
   R2_SECRET_ACCESS_KEY: "r2-parent-secret-example",
+  EVOLVE_RELEASE_REPOSITORY: "Tabriage/EvolveDesk",
+  EVOLVE_RELEASE_COMMIT: "a".repeat(40),
+  EVOLVE_RELEASE_BRANCH: "main",
+  EVOLVE_CLOUDFLARE_BUILD_UUID: "12345678-1234-4234-8234-123456789abc",
+  CF_VERSION_METADATA: {
+    id: "11111111-2222-4333-8444-555555555555",
+    tag: `evolve-${"a".repeat(40)}`,
+    timestamp: "2026-08-21T09:59:30.000Z",
+  },
 };
 const request = createCredentialBrokerRequest({
   provider: "cloudflare-r2",
@@ -76,4 +85,33 @@ test("Cloudflare Worker broker requires exact origin, bearer, provider, and path
     headers: { Origin: "https://desk.example", Authorization: "Bearer worker-broker-token-example" },
   }), env);
   assert.equal(query.status, 404);
+});
+
+test("Cloudflare Worker health binds build metadata, Version ID, and a fresh challenge", async () => {
+  const challengeValue = "0123456789abcdef".repeat(4);
+  const health = await handleCloudflareBrokerRequest(new Request("https://broker.example/health", {
+    headers: {
+      Origin: "https://desk.example",
+      Authorization: "Bearer worker-broker-token-example",
+      "X-Evolve-Runtime-Challenge": challengeValue,
+    },
+  }), env);
+  assert.equal(health.status, 200);
+  assert.match(health.headers.get("access-control-allow-headers"), /X-Evolve-Runtime-Challenge/);
+  const body = await health.json();
+  assert.equal(body.release.ci.commit, "a".repeat(40));
+  assert.equal(body.release.ci.buildUuid, "12345678-1234-4234-8234-123456789abc");
+  assert.equal(body.release.runtime.versionId, "11111111-2222-4333-8444-555555555555");
+  assert.equal(body.challenge.value, challengeValue);
+  assert.match(body.challenge.digest, /^[0-9a-f]{64}$/);
+
+  const malformed = await handleCloudflareBrokerRequest(new Request("https://broker.example/health", {
+    headers: {
+      Origin: "https://desk.example",
+      Authorization: "Bearer worker-broker-token-example",
+      "X-Evolve-Runtime-Challenge": "predictable",
+    },
+  }), env);
+  assert.equal(malformed.status, 400);
+  assert.match((await malformed.json()).error, /挑战/);
 });

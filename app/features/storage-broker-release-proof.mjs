@@ -9,11 +9,13 @@ export const STORAGE_BROKER_RELEASE_TARGETS = Object.freeze({
     requiredSecretNames: Object.freeze(["ALLOWED_ORIGIN", "BROKER_TOKEN", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]),
     files: Object.freeze([
       "app/features/aws-sigv4.mjs",
+      "app/features/storage-broker-cloudflare-deployment-proof.mjs",
       "app/features/sync-credential-broker.mjs",
       "app/features/sync-storage-recipes.mjs",
       "app/features/sync-storage-scope.mjs",
       "deploy/storage-broker/cloudflare/worker.mjs",
       "deploy/storage-broker/cloudflare/wrangler.jsonc",
+      "tools/cloudflare-storage-broker-deploy.mjs",
     ]),
   }),
   "aws-lambda-s3": Object.freeze({

@@ -56,10 +56,33 @@ export type CredentialBrokerHealth = {
       functionName: string;
       immutableVersion: string;
     };
+  } | {
+    ci: {
+      system: "cloudflare-workers-builds";
+      repository: string;
+      commit: string;
+      branch: string;
+      buildUuid: string;
+    };
+    runtime: {
+      provider: "cloudflare-workers";
+      scriptName: string;
+      versionId: string;
+      versionTag: string;
+      versionCreatedAt: string;
+    };
+  };
+  challenge?: {
+    algorithm: "SHA-256";
+    value: string;
+    digest: string;
   };
 };
 export function inspectCredentialBrokerRuntimeRelease(value: unknown): CredentialBrokerHealth["release"];
+export function createCredentialBrokerRuntimeChallenge(value: string, release: unknown): Promise<NonNullable<CredentialBrokerHealth["challenge"]>>;
+export function inspectCredentialBrokerRuntimeChallenge(value: unknown, release: unknown, expectedValue: string): Promise<NonNullable<CredentialBrokerHealth["challenge"]>>;
 export function inspectCredentialBrokerHealth(
   config: { endpointUrl: string; bearerToken?: string },
   fetchImpl?: typeof fetch,
+  options?: { challenge?: string },
 ): Promise<CredentialBrokerHealth>;

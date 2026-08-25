@@ -134,14 +134,20 @@ pnpm exec wrangler secret put BROKER_TOKEN --config deploy/storage-broker/cloudf
 pnpm exec wrangler secret put R2_ACCOUNT_ID --config deploy/storage-broker/cloudflare/wrangler.jsonc
 pnpm exec wrangler secret put R2_ACCESS_KEY_ID --config deploy/storage-broker/cloudflare/wrangler.jsonc
 pnpm exec wrangler secret put R2_SECRET_ACCESS_KEY --config deploy/storage-broker/cloudflare/wrangler.jsonc
-pnpm exec wrangler deploy --config deploy/storage-broker/cloudflare/wrangler.jsonc
 ```
 
-`ALLOWED_ORIGIN` 必须是实际工作台的精确 HTTPS Origin；`BROKER_TOKEN` 至少 16 字符并应独立生成。不要创建或提交 `.dev.vars`，仓库已显式忽略它。
+`ALLOWED_ORIGIN` 必须是实际工作台的精确 HTTPS Origin；`BROKER_TOKEN` 至少 16 字符并应独立生成。不要创建或提交 `.dev.vars`，仓库已显式忽略它。生产发布不再直接运行裸 `wrangler deploy`，因为那不会注入可核对的源码来源；使用下一段的 Workers Builds 包装器。
 
-如果 GitHub 仓库侧不能保存长期 Cloudflare 部署 Token，按 [`deploy/storage-broker/cloudflare/WORKERS_BUILDS.md`](deploy/storage-broker/cloudflare/WORKERS_BUILDS.md) 把该 Worker 接到 Cloudflare Workers Builds：GitHub App 只授权本仓库，生产分支固定为 `main`，根目录为 `/`，部署命令使用仓库锁定的 pnpm 与 Wrangler。Cloudflare 会在 GitHub 提交上回写 Check Run 与 Build ID。
+按 [`deploy/storage-broker/cloudflare/WORKERS_BUILDS.md`](deploy/storage-broker/cloudflare/WORKERS_BUILDS.md) 把该 Worker 接到 Cloudflare Workers Builds：GitHub App 只授权本仓库，生产分支固定为 `main`，根目录为 `/`，部署命令设为 `pnpm broker:cloudflare-deploy`。包装器先核对干净源码与 GitHub 远端分支头，再把 Workers Builds 原生 Commit、Branch、Build UUID 注入当前 Worker Version；Wrangler 结构化输出中的 Version ID 会被封入日志回执。下载 Build 日志后提取可导入文件：
 
-这条 Cloudflare 路径不是 OIDC。官方外部 GitHub Actions 路径仍要求 `CLOUDFLARE_API_TOKEN`；Workers Builds 则使用保存在 Cloudflare 一侧的用户 API Token，自动生成 Token 的默认权限还可能覆盖 Workers、KV、R2 和 Routes。仓库无需持有它不等于凭据已经短期化：应改用独立、单账号、尽量只含 Workers Scripts Edit 的 Token，并连同五个运行时 secret 定期轮换。依据见 [Workers Builds Git 集成](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/)、[Build 配置与 Token 边界](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/) 和 [外部 GitHub Actions 认证要求](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)。
+```bash
+pnpm broker:cloudflare-proof -- --build-log ~/Downloads/cloudflare-build.log \
+  > evolve-storage-broker-cloudflare-deployment-proof.json
+```
+
+`wrangler.jsonc` 开启 `CF_VERSION_METADATA` binding。工作台导入回执后会生成新的 256-bit 随机挑战，经页面内存中的 Broker Bearer 请求 `/health`，并要求响应的 Commit、Build UUID、Worker 名称、Version ID、版本标签与回执完全一致；旧响应无法通过新挑战。成功显示 `WORKERS RECEIPT MATCH` 和 `CHALLENGE ✓`。
+
+这条 Cloudflare 路径不是 OIDC。官方外部 GitHub Actions 路径仍要求 `CLOUDFLARE_API_TOKEN`；Workers Builds 则使用保存在 Cloudflare 一侧的用户 API Token，自动生成 Token 的默认权限还可能覆盖 Workers、KV、R2 和 Routes。仓库无需持有它不等于凭据已经短期化：应改用独立、单账号、尽量只含 Workers Scripts Edit 的 Token，并连同五个运行时 secret 定期轮换。Build 日志回执只有闭集字段与自校验摘要，随机挑战只证明当前 HTTPS 端点实时报告了同一版本；二者都不是 Cloudflare 平台签名或部署者身份证明。依据见 [Workers Builds Git 集成](https://developers.cloudflare.com/workers/ci-cd/builds/git-integration/)、[Build 配置与默认变量](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/)、[Version Metadata binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/version-metadata/)、[Wrangler 结构化输出](https://developers.cloudflare.com/workers/wrangler/system-environment-variables/) 和 [外部 GitHub Actions 认证要求](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)。
 
 AWS 模板位于 `deploy/storage-broker/aws-lambda/`，使用 Node.js 22、Lambda Function URL payload v2.0 和 Makefile 白名单打包。模板不会接收静态 AWS Access Key：Lambda 自动注入执行角色的短期凭据，生成的执行策略只能对参数指定的角色调用 `sts:AssumeRole`。需要安装 AWS SAM CLI 后执行：
 
@@ -184,7 +190,7 @@ AWS 使用 `--target aws-lambda-s3`，`--endpoint` 必须是实际 `https://<id>
 gh attestation verify evolve-storage-broker-deployment-proof.json -R Tabriage/EvolveDesk
 ```
 
-验证通过再导入工作台。GitHub Attestation 证明该文件由声明的 Actions 工作流产生；它仍不能替代对 AWS 账号、OIDC Role 权限、目标 AssumeRole 信任、桶策略、当前 Alias 或公开端点防滥用措施的独立核对。Cloudflare Workers Builds 目前只回流 Check Run、Build ID 与 Dashboard Version ID，没有生成可导入的 GitHub Attestation 回执。
+验证通过再导入工作台。GitHub Attestation 证明该文件由声明的 Actions 工作流产生；它仍不能替代对 AWS 账号、OIDC Role 权限、目标 AssumeRole 信任、桶策略、当前 Alias 或公开端点防滥用措施的独立核对。Cloudflare 的可导入回执从 Build 日志提取，并通过运行时挑战核对当前 Version ID；它没有 GitHub Artifact Attestation，界面会明确标成 `BUILD LOG`，不能提升成与 AWS OIDC 回执等价的作者身份结论。
 
 部署实现依据可对照 [Workers secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[Workers Web Crypto](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/)、[Lambda Function URL payload v2.0](https://docs.aws.amazon.com/lambda/latest/dg/urls-invocation.html)、[Function URL 访问控制](https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html)、[Lambda 运行时环境凭据](https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html) 与 [AWS SAM Makefile 构建](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/building-custom-runtimes.html)。
 
