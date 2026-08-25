@@ -1,0 +1,147 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Least-trust GitHub OIDC deployment role for the EvolveDesk storage broker
+
+Parameters:
+  GitHubOidcProviderArn:
+    Type: String
+    AllowedPattern: ^arn:(aws|aws-us-gov|aws-cn):iam::[0-9]{12}:oidc-provider/token[.]actions[.]githubusercontent[.]com$
+    Description: Existing IAM OIDC provider for https://token.actions.githubusercontent.com
+  DeploymentRegion:
+    Type: String
+    Default: us-east-1
+    AllowedPattern: ^[a-z0-9][a-z0-9-]{1,31}$
+  ArtifactBucketName:
+    Type: String
+    AllowedPattern: ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$
+  DeploymentStackName:
+    Type: String
+    Default: evolve-desk-storage-broker
+    AllowedPattern: ^[A-Za-z][A-Za-z0-9-]{0,127}$
+  BrokerFunctionName:
+    Type: String
+    Default: evolve-desk-storage-credential-broker
+    AllowedPattern: ^[A-Za-z0-9-_]{1,64}$
+  BrokerExecutionRoleName:
+    Type: String
+    Default: evolve-desk-storage-broker-runtime
+    AllowedPattern: ^[A-Za-z0-9_+=,.@-]{1,64}$
+  DeploymentRoleName:
+    Type: String
+    Default: EvolveDeskGitHubOidcDeploy
+    AllowedPattern: ^[A-Za-z0-9_+=,.@-]{1,64}$
+
+Resources:
+  GitHubDeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref DeploymentRoleName
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "token.actions.githubusercontent.com:aud": sts.amazonaws.com
+                # This repository was created after GitHub immutable OIDC subjects
+                # became the default. These are the current immutable owner/repo IDs.
+                "token.actions.githubusercontent.com:sub": repo:Tabriage@306264537/EvolveDesk@1323515722:environment:storage-broker-production
+      Policies:
+        - PolicyName: DeployOnlyEvolveDeskStorageBroker
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ManageOnlyNamedStack
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:DescribeStacks
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ListStackResources
+                  - cloudformation:UpdateStack
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudformation:${DeploymentRegion}:${AWS::AccountId}:stack/${DeploymentStackName}/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${DeploymentRegion}:aws:transform/Serverless-2016-10-31
+              - Sid: ReadArtifactBucket
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucketName}
+              - Sid: WriteVersionedArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucketName}/*
+              - Sid: ManageOnlyNamedLambda
+                Effect: Allow
+                Action:
+                  - lambda:AddPermission
+                  - lambda:CreateAlias
+                  - lambda:CreateFunction
+                  - lambda:CreateFunctionUrlConfig
+                  - lambda:DeleteAlias
+                  - lambda:DeleteFunction
+                  - lambda:DeleteFunctionConcurrency
+                  - lambda:DeleteFunctionUrlConfig
+                  - lambda:GetAlias
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:GetFunctionConcurrency
+                  - lambda:GetFunctionUrlConfig
+                  - lambda:GetPolicy
+                  - lambda:ListAliases
+                  - lambda:ListTags
+                  - lambda:ListVersionsByFunction
+                  - lambda:PublishVersion
+                  - lambda:PutFunctionConcurrency
+                  - lambda:RemovePermission
+                  - lambda:TagResource
+                  - lambda:UntagResource
+                  - lambda:UpdateAlias
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:UpdateFunctionUrlConfig
+                Resource:
+                  - !Sub arn:${AWS::Partition}:lambda:${DeploymentRegion}:${AWS::AccountId}:function:${BrokerFunctionName}
+                  - !Sub arn:${AWS::Partition}:lambda:${DeploymentRegion}:${AWS::AccountId}:function:${BrokerFunctionName}:*
+              - Sid: ManageOnlyNamedRuntimeRole
+                Effect: Allow
+                Action:
+                  - iam:AttachRolePolicy
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:ListAttachedRolePolicies
+                  - iam:ListRolePolicies
+                  - iam:PutRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:UpdateAssumeRolePolicy
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${BrokerExecutionRoleName}
+              - Sid: PassOnlyNamedRuntimeRoleToLambda
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${BrokerExecutionRoleName}
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+
+Outputs:
+  DeploymentRoleArn:
+    Value: !GetAtt GitHubDeploymentRole.Arn
+  ImmutableGitHubSubject:
+    Value: repo:Tabriage@306264537/EvolveDesk@1323515722:environment:storage-broker-production

@@ -1,0 +1,25 @@
+{
+  "name": "image-size",
+  "version": "2.0.3-evolvedesk.1",
+  "description": "Bounded image dimension reader used by Evolve Desk while upstream image-size parsers have unresolved DoS advisories.",
+  "type": "module",
+  "main": "./index.cjs",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./index.d.ts",
+        "default": "./index.mjs"
+      },
+      "require": {
+        "types": "./index.d.ts",
+        "default": "./index.cjs"
+      }
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

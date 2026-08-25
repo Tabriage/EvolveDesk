@@ -40,5 +40,8 @@ next-env.d.ts
 *.tsbuildinfo
 /dist/
 /.wrangler/
+/.aws-sam/
+**/.dev.vars*
 /outputs/
 /work/
+/.evolve/
