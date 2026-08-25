@@ -235,7 +235,7 @@ button:focus-visible,textarea:focus-visible,input:focus-visible,select:focus-vis
 .lab-seal.online { color:var(--blue); border-color:#aebaf3; animation:seal-arrive .7s ease both; }
 .lab-seal.online::after { background:var(--blue-soft); }
 
-.evolution-route { display:grid; grid-template-columns:auto 1fr auto 1fr auto 1fr auto; align-items:center; margin-bottom:16px; padding:15px 18px; border:1px solid var(--line); border-radius:16px; background:rgba(255,255,255,.58); }
+.evolution-route { display:grid; grid-template-columns:auto 1fr auto 1fr auto 1fr auto 1fr auto; align-items:center; margin-bottom:16px; padding:15px 18px; border:1px solid var(--line); border-radius:16px; background:rgba(255,255,255,.58); }
 .route-node { display:flex; align-items:center; gap:9px; min-width:100px; color:#9ba3a1; }
 .route-node i { display:grid; place-items:center; width:27px; height:27px; border:1px solid #d9dedd; border-radius:50%; font:8px var(--font-geist-mono); font-style:normal; background:white; }
 .route-node strong,.route-node small { display:block; }
@@ -279,6 +279,7 @@ button:focus-visible,textarea:focus-visible,input:focus-visible,select:focus-vis
 .proposal-status.applied { color:#16714d; background:#e9f7f0; }
 .proposal-status.committed { color:#3157b6; background:#edf1ff; }
 .proposal-status.published { color:#5b408f; background:#f1ecfb; }
+.proposal-status.adopted { color:#16714d; background:#e9f7f0; }
 .proposal-status.rolled_back,.proposal-status.discarded { color:#7c8583; background:#eff2f1; }
 .source-summary { display:flex; align-items:center; gap:0; padding:12px 27px; border-top:1px solid #edf0ef; border-bottom:1px solid #edf0ef; background:#fafbfa; }
 .source-summary span { padding:0 20px; border-left:1px solid #e2e6e4; color:#8b9492; font-size:8px; }
@@ -347,6 +348,8 @@ button:focus-visible,textarea:focus-visible,input:focus-visible,select:focus-vis
 .publish-button { border:0; background:#51417e; color:white; }
 .publish-button.armed { background:#9a5c28; box-shadow:0 0 0 3px #f5e7d8; }
 .refresh-review { border:1px solid #cfd7f4; background:#f2f4ff; color:#455bb5; }
+.adopt-button { border:0; background:#176d52; color:white; }
+.adopt-button.armed { background:#9a5c28; box-shadow:0 0 0 3px #f5e7d8; }
 .open-review { display:grid; place-items:center; min-height:37px; padding:0 13px; border-radius:10px; background:#2e374f; color:white; font-size:8px; font-weight:700; text-decoration:none; }
 .source-actions button:focus-visible,.source-actions a:focus-visible,.git-custody a:focus-visible { outline:2px solid #657bea; outline-offset:2px; }
 .rollback-button { border:1px solid #e0aaa3; background:#fff3f1; color:#a5443a; }

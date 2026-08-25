@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import {
   createDiff,
   createIsolatedProposalCommit,
+  fastForwardMergedProposal,
   hashContent,
   isEditablePath,
   mapPullRequestState,
@@ -117,6 +118,102 @@ test("proposal commit is validated and committed on an isolated branch", async (
     assert.equal(await readFile(join(root, "app/components/Demo.tsx"), "utf8"), original);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("merged proposal adoption fast-forwards only the sealed file set and hashes", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "evolve-adopt-git-"));
+  const bare = join(sandbox, "origin.git");
+  const root = join(sandbox, "workbench");
+  const reviewer = join(sandbox, "reviewer");
+  try {
+    await git(sandbox, ["init", "--bare", bare]);
+    await git(sandbox, ["clone", bare, root]);
+    await git(root, ["switch", "-c", "feature/base"]);
+    await git(root, ["config", "user.name", "Evolution Test"]);
+    await git(root, ["config", "user.email", "evolution@example.test"]);
+    await mkdir(join(root, "app/components"), { recursive: true });
+    const original = "export const label = 'before';\n";
+    const proposed = "export const label = 'after';\n";
+    await writeFile(join(root, "app/components/Demo.tsx"), original);
+    await git(root, ["add", "app/components/Demo.tsx"]);
+    await git(root, ["commit", "-m", "base"]);
+    const baseSha = await git(root, ["rev-parse", "HEAD"]);
+    await git(root, ["push", "-u", "origin", "feature/base"]);
+
+    await git(sandbox, ["clone", bare, reviewer]);
+    await git(reviewer, ["switch", "-c", "feature/base", "--track", "origin/feature/base"]);
+    await git(reviewer, ["config", "user.name", "Evolution Reviewer"]);
+    await git(reviewer, ["config", "user.email", "reviewer@example.test"]);
+    await writeFile(join(reviewer, "app/components/Demo.tsx"), proposed);
+    await writeFile(join(reviewer, "README.md"), "unexpected remote change\n");
+    await git(reviewer, ["add", "app/components/Demo.tsx", "README.md"]);
+    await git(reviewer, ["commit", "-m", "unsafe merged scope"]);
+    const unsafeSha = await git(reviewer, ["rev-parse", "HEAD"]);
+    await git(reviewer, ["push", "origin", `HEAD:refs/heads/evolve/proposal-123456781234`, "HEAD:feature/base"]);
+
+    const proposal = {
+      id: "12345678-1234-4abc-8def-1234567890ab",
+      title: "调整演示标签",
+      status: "published",
+      baseSha,
+      baseBranch: "feature/base",
+      files: [{
+        path: "app/components/Demo.tsx",
+        originalContent: original,
+        originalHash: hashContent(original),
+        proposedContent: proposed,
+        proposedHash: hashContent(proposed),
+      }],
+      branch: {
+        name: "evolve/proposal-123456781234",
+        commitSha: unsafeSha,
+        baseBranch: "feature/base",
+      },
+    };
+    const review = {
+      status: "merged",
+      headSha: unsafeSha,
+      inSync: true,
+      baseBranch: "feature/base",
+      mergeCommitSha: unsafeSha,
+    };
+    await assert.rejects(fastForwardMergedProposal(proposal, review, { root }), /只包含封存提案文件/);
+    assert.equal(await git(root, ["rev-parse", "HEAD"]), baseSha);
+
+    await git(reviewer, ["reset", "--hard", baseSha]);
+    await writeFile(join(reviewer, "app/components/Demo.tsx"), proposed);
+    await git(reviewer, ["add", "app/components/Demo.tsx"]);
+    await git(reviewer, ["update-index", "--chmod=+x", "app/components/Demo.tsx"]);
+    await git(reviewer, ["commit", "-m", "unsafe executable mode"]);
+    const executableSha = await git(reviewer, ["rev-parse", "HEAD"]);
+    await git(reviewer, ["push", "--force", "origin", `HEAD:refs/heads/evolve/proposal-123456781234`, "HEAD:feature/base"]);
+    proposal.branch.commitSha = executableSha;
+    review.headSha = executableSha;
+    review.mergeCommitSha = executableSha;
+    await assert.rejects(fastForwardMergedProposal(proposal, review, { root }), /不是普通源码文件/);
+    assert.equal(await git(root, ["rev-parse", "HEAD"]), baseSha);
+
+    await git(reviewer, ["reset", "--hard", baseSha]);
+    await writeFile(join(reviewer, "app/components/Demo.tsx"), proposed);
+    await git(reviewer, ["add", "app/components/Demo.tsx"]);
+    await git(reviewer, ["commit", "-m", "verified merged proposal"]);
+    const mergedSha = await git(reviewer, ["rev-parse", "HEAD"]);
+    await git(reviewer, ["push", "--force", "origin", `HEAD:refs/heads/evolve/proposal-123456781234`, "HEAD:feature/base"]);
+    proposal.branch.commitSha = mergedSha;
+    review.headSha = mergedSha;
+    review.mergeCommitSha = mergedSha;
+
+    const result = await fastForwardMergedProposal(proposal, review, { root });
+    assert.equal(result.adoptedSha, mergedSha);
+    assert.equal(result.alreadyCurrent, false);
+    assert.equal(await git(root, ["rev-parse", "HEAD"]), mergedSha);
+    assert.equal(await readFile(join(root, "app/components/Demo.tsx"), "utf8"), proposed);
+    assert.equal(await git(root, ["status", "--porcelain=v1"]), "");
+    const repeated = await fastForwardMergedProposal(proposal, review, { root });
+    assert.equal(repeated.alreadyCurrent, true);
+  } finally {
+    await rm(sandbox, { recursive: true, force: true });
   }
 });
 

@@ -15,9 +15,10 @@ type SourceProposal = {
   intent: string;
   reflection: string;
   risk: "low" | "medium" | "high";
-  status: "proposed" | "committed" | "published" | "applied" | "rolled_back" | "discarded";
+  status: "proposed" | "committed" | "published" | "adopted" | "applied" | "rolled_back" | "discarded";
   createdAt: string;
   appliedAt: string | null;
+  adoptedAt: string | null;
   rolledBackAt: string | null;
   baseSha: string;
   baseBranch: string;
@@ -39,6 +40,8 @@ type SourceProposal = {
     url: string;
     headSha: string;
     inSync: boolean;
+    baseBranch?: string;
+    mergeCommitSha?: string;
     publishedAt: string;
     checkedAt: string;
   };
@@ -84,8 +87,9 @@ export function EvolutionLab({ baseURL, apiKey, model, onNeedSettings }: Evoluti
   const [proposal, setProposal] = useState<SourceProposal | null>(null);
   const [activePath, setActivePath] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [busy, setBusy] = useState<"" | "proposing" | "committing" | "publishing" | "refreshing" | "rolling-back" | "discarding">("");
+  const [busy, setBusy] = useState<"" | "proposing" | "committing" | "publishing" | "refreshing" | "adopting" | "rolling-back" | "discarding">("");
   const [publishArmed, setPublishArmed] = useState(false);
+  const [adoptArmed, setAdoptArmed] = useState(false);
   const [message, setMessage] = useState("正在确认本地源码沙箱…");
 
   useEffect(() => {
@@ -148,6 +152,7 @@ export function EvolutionLab({ baseURL, apiKey, model, onNeedSettings }: Evoluti
       setProposal(data.proposal);
       setActivePath(data.proposal.files[0]?.path || "");
       setPublishArmed(false);
+      setAdoptArmed(false);
       setPrompt("");
       setMessage("提案已封存。请逐文件检查后决定是否创建隔离分支");
     } catch (error) {
@@ -157,54 +162,47 @@ export function EvolutionLab({ baseURL, apiKey, model, onNeedSettings }: Evoluti
     }
   }
 
-  async function mutate(action: "commit" | "publish" | "refresh" | "rollback" | "discard") {
+  async function mutate(action: "commit" | "publish" | "refresh" | "adopt" | "rollback" | "discard") {
     if (!proposal) return;
     if (action === "publish" && !publishArmed) {
       setPublishArmed(true);
       setMessage("这一步会推送独立分支并创建 GitHub 草稿 PR；再次点击确认远端操作");
       return;
     }
-    const state = action === "commit"
-      ? "committing"
-      : action === "publish"
-        ? "publishing"
-        : action === "refresh"
-          ? "refreshing"
-          : action === "rollback"
-            ? "rolling-back"
-            : "discarding";
-    setBusy(state);
+    if (action === "adopt" && !adoptArmed) {
+      setAdoptArmed(true);
+      setMessage("将重新核对 GitHub 合并提交、文件范围与哈希；再次点击确认安全快进当前分支");
+      return;
+    }
+    const busyState = {
+      commit: "committing",
+      publish: "publishing",
+      refresh: "refreshing",
+      adopt: "adopting",
+      rollback: "rolling-back",
+      discard: "discarding",
+    } as const;
+    setBusy(busyState[action]);
     setPublishArmed(false);
-    setMessage(
-      action === "commit"
-        ? "正在临时 worktree 中写入提案、运行固定检查并创建独立提交…"
-        : action === "publish"
-          ? "正在推送提案分支，并开启 GitHub 草稿审阅…"
-          : action === "refresh"
-            ? "正在读取 GitHub 上的最新审阅状态…"
-        : action === "rollback"
-          ? "正在核对变更指纹并恢复提案前内容…"
-          : "正在搁置提案…",
-    );
+    setAdoptArmed(false);
+    setMessage({
+      commit: "正在临时 worktree 中写入提案、运行固定检查并创建独立提交…",
+      publish: "正在推送提案分支，并开启 GitHub 草稿审阅…",
+      refresh: "正在读取 GitHub 上的最新审阅状态…",
+      adopt: "正在重新验证合并证明、文件范围和哈希，并安全快进当前分支…",
+      rollback: "正在核对变更指纹并恢复提案前内容…",
+      discard: "正在搁置提案…",
+    }[action]);
     try {
       const data = await sourceRequest(`/api/${action}`, { id: proposal.id });
       if (!data.proposal) throw new Error("源码沙箱没有返回结果");
       setProposal(data.proposal);
-      setMessage(
-        action === "commit"
-          ? data.proposal.branch
-            ? `已在 ${data.proposal.branch.name} 形成独立提交；当前工作区未改变`
-            : data.proposal.validation?.summary || "隔离验证未通过，没有保留分支"
-          : action === "publish"
-            ? data.proposal.remoteReview?.url
-              ? "GitHub 草稿审阅已开启，等待人工决定"
-              : "分支已推送，草稿审阅仍待创建"
-            : action === "refresh"
-              ? "远端审阅状态已刷新"
-          : action === "rollback"
-            ? "已恢复提案前的全部文件"
-            : "提案已搁置，没有改动源码",
-      );
+      if (action === "commit") setMessage(data.proposal.branch ? `已在 ${data.proposal.branch.name} 形成独立提交；当前工作区未改变` : data.proposal.validation?.summary || "隔离验证未通过，没有保留分支");
+      else if (action === "publish") setMessage(data.proposal.remoteReview?.url ? "GitHub 草稿审阅已开启，等待人工决定" : "分支已推送，草稿审阅仍待创建");
+      else if (action === "refresh") setMessage(data.proposal.remoteReview?.status === "merged" ? "GitHub 已合并；可在再次确认后验证并同步到当前分支" : "远端审阅状态已刷新");
+      else if (action === "adopt") setMessage(`已同步 GitHub 合并提交 ${data.proposal.remoteReview?.mergeCommitSha?.slice(0, 12) || ""}；工作区保持干净`);
+      else if (action === "rollback") setMessage("已恢复提案前的全部文件");
+      else setMessage("提案已搁置，没有改动源码");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "源码操作失败");
       if (action === "publish") {
@@ -228,7 +226,7 @@ export function EvolutionLab({ baseURL, apiKey, model, onNeedSettings }: Evoluti
         <div className={`lab-seal ${online ? "online" : ""}`}>
           <span>✦</span>
           <strong>{online ? "沙箱已密封" : "沙箱离线"}</strong>
-          <small>{online ? "127.0.0.1 · 5 道门" : "等待本地服务"}</small>
+          <small>{online ? "127.0.0.1 · 6 道门" : "等待本地服务"}</small>
         </div>
       </div>
 
@@ -240,6 +238,8 @@ export function EvolutionLab({ baseURL, apiKey, model, onNeedSettings }: Evoluti
         <div className={`route-node ${proposal?.branch ? "done" : proposal?.validation?.status === "failed" ? "failed" : ""}`}><i>3</i><span><strong>提交</strong><small>隔离验证与分支</small></span></div>
         <div className={`route-line ${proposal?.remoteReview ? "filled" : ""}`} />
         <div className={`route-node ${proposal?.remoteReview ? "done" : ""}`}><i>4</i><span><strong>审阅</strong><small>远端草稿 PR</small></span></div>
+        <div className={`route-line ${proposal?.status === "adopted" ? "filled" : ""}`} />
+        <div className={`route-node ${proposal?.status === "adopted" ? "done" : ""}`}><i>5</i><span><strong>采用</strong><small>验证合并后快进</small></span></div>
       </div>
 
       <form className="evolution-composer" onSubmit={requestProposal}>
@@ -281,11 +281,13 @@ export function EvolutionLab({ baseURL, apiKey, model, onNeedSettings }: Evoluti
                   ? "已提交"
                   : proposal.status === "published"
                     ? proposal.remoteReview?.status === "merged" ? "已合并" : "远端审阅中"
-                    : proposal.status === "applied"
-                      ? "旧版已写入"
-                      : proposal.status === "rolled_back"
-                        ? "已回滚"
-                        : "已搁置"}
+                    : proposal.status === "adopted"
+                      ? "已同步采用"
+                      : proposal.status === "applied"
+                        ? "旧版已写入"
+                        : proposal.status === "rolled_back"
+                          ? "已回滚"
+                          : "已搁置"}
             </div>
           </header>
 
@@ -301,7 +303,7 @@ export function EvolutionLab({ baseURL, apiKey, model, onNeedSettings }: Evoluti
           </div>
 
           {proposal.baseBranch ? <section className="git-custody" aria-label="提案 Git 保管链">
-            <header><span>Git custody chain</span><strong>当前工作区不承载提案代码</strong></header>
+            <header><span>Git custody chain</span><strong>{proposal.status === "adopted" ? "已验证合并并同步当前分支" : "当前工作区不承载提案代码"}</strong></header>
             <div>
               <article className="complete"><i>BASE</i><span><small>只读基线</small><code>{proposal.baseBranch || "未知分支"}@{proposal.baseSha.slice(0, 7)}</code></span></article>
               <article className={proposal.branch ? "complete" : proposal.validation?.status === "failed" ? "failed" : "pending"}><i>BR</i><span><small>{proposal.branch ? "隔离分支" : proposal.validation?.status === "failed" ? "验证未通过" : "等待本地确认"}</small><code>{proposal.branch?.name || "尚未创建"}</code></span></article>
@@ -362,6 +364,7 @@ export function EvolutionLab({ baseURL, apiKey, model, onNeedSettings }: Evoluti
               {proposal.status === "proposed" && <button className="approve" disabled={Boolean(busy)} onClick={() => void mutate("commit")}>{busy === "committing" ? "正在隔离验证与提交…" : "创建提案分支"}<span>↗</span></button>}
               {(proposal.status === "committed" || (proposal.status === "published" && !proposal.remoteReview?.url)) && <button className={`publish-button ${publishArmed ? "armed" : ""}`} disabled={Boolean(busy)} onClick={() => void mutate("publish")}>{busy === "publishing" ? "正在开启远端审阅…" : publishArmed ? "确认推送并创建草稿 PR" : proposal.status === "published" ? "重试创建草稿 PR" : "推送并开启草稿审阅"}</button>}
               {proposal.status === "published" && proposal.remoteReview?.url && <button className="refresh-review" disabled={Boolean(busy)} onClick={() => void mutate("refresh")}>{busy === "refreshing" ? "正在刷新…" : "刷新审阅状态"}</button>}
+              {proposal.status === "published" && proposal.remoteReview?.status === "merged" && proposal.remoteReview.inSync && <button className={`adopt-button ${adoptArmed ? "armed" : ""}`} disabled={Boolean(busy)} onClick={() => void mutate("adopt")}>{busy === "adopting" ? "正在验证并同步…" : adoptArmed ? "确认安全快进当前分支" : "验证并同步已合并版本"}</button>}
               {proposal.remoteReview?.url && <a className="open-review" href={proposal.remoteReview.url} target="_blank" rel="noreferrer">打开 GitHub 审阅 ↗</a>}
               {proposal.status === "applied" && <button className="rollback-button" disabled={Boolean(busy)} onClick={() => void mutate("rollback")}>{busy === "rolling-back" ? "正在恢复…" : "回滚这次变化"}</button>}
             </div>

@@ -225,6 +225,16 @@ async function gitText(args, cwd = ROOT, options = {}) {
   return stdout.trim();
 }
 
+async function gitRaw(args, cwd = ROOT, options = {}) {
+  const { stdout } = await execFileAsync("git", args, {
+    cwd,
+    timeout: GIT_TIMEOUT,
+    maxBuffer: 1024 * 1024,
+    ...options,
+  });
+  return stdout;
+}
+
 function validBranchName(value) {
   const branch = String(value || "").trim();
   return branch.length > 0
@@ -312,6 +322,7 @@ export function toPublicProposal(proposal) {
     status: proposal.status,
     createdAt: proposal.createdAt,
     appliedAt: proposal.appliedAt || null,
+    adoptedAt: proposal.adoptedAt || null,
     rolledBackAt: proposal.rolledBackAt || null,
     baseSha: proposal.baseSha,
     baseBranch: proposal.baseBranch || "",
@@ -595,7 +606,7 @@ async function readPullRequest(branchName, repository) {
     const { stdout } = await execFileAsync("gh", [
       "pr", "view", branchName,
       "--repo", repository.slug,
-      "--json", "url,state,isDraft,mergedAt,headRefOid",
+      "--json", "url,state,isDraft,mergedAt,headRefOid,baseRefName,mergeCommit",
     ], {
       cwd: ROOT,
       timeout: GIT_TIMEOUT,
@@ -614,11 +625,15 @@ function publicRemoteReview(review, expectedCommitSha, publishedAt = null) {
     throw new Error("GitHub 没有返回可验证的审阅地址");
   }
   const headSha = String(review?.headRefOid || "");
+  const baseBranch = validBranchName(review?.baseRefName) ? String(review.baseRefName) : "";
+  const mergeCommitSha = String(review?.mergeCommit?.oid || "");
   return {
     status: mapPullRequestState(review),
     url,
     headSha,
     inSync: headSha === expectedCommitSha,
+    baseBranch,
+    mergeCommitSha: /^[0-9a-f]{40,64}$/i.test(mergeCommitSha) ? mergeCommitSha : "",
     publishedAt: publishedAt || new Date().toISOString(),
     checkedAt: new Date().toISOString(),
   };
@@ -676,6 +691,8 @@ export async function publishProposal(id) {
     url: "",
     headSha: proposal.branch.commitSha,
     inSync: true,
+    baseBranch: proposal.branch.baseBranch,
+    mergeCommitSha: "",
     publishedAt: proposal.remoteReview?.publishedAt || new Date().toISOString(),
     checkedAt: new Date().toISOString(),
   };
@@ -707,6 +724,8 @@ export async function publishProposal(id) {
       isDraft: true,
       mergedAt: null,
       headRefOid: proposal.branch.commitSha,
+      baseRefName: proposal.branch.baseBranch,
+      mergeCommit: null,
     };
   }
 
@@ -729,6 +748,106 @@ export async function refreshProposalReview(id) {
   proposal.remoteReview = publicRemoteReview(review, proposal.branch.commitSha, proposal.remoteReview?.publishedAt);
   await writeProposal(proposal);
   await audit({ action: "review_refreshed", id: proposal.id, status: proposal.remoteReview.status, inSync: proposal.remoteReview.inSync });
+  return toPublicProposal(proposal);
+}
+
+function assertMergedReview(proposal, review) {
+  if (!proposal?.branch || proposal.status !== "published") throw new Error("只有已发布提案可以采用合并结果");
+  if (!validBranchName(proposal.branch.name) || !validBranchName(proposal.branch.baseBranch)
+    || !/^[0-9a-f]{40,64}$/i.test(String(proposal.branch.commitSha || ""))
+    || !/^[0-9a-f]{40,64}$/i.test(String(proposal.baseSha || ""))) {
+    throw new Error("提案分支或 Git 基线记录无效");
+  }
+  if (review?.status !== "merged") throw new Error("GitHub 审阅尚未合并，不能同步到当前分支");
+  if (!review.inSync || review.headSha !== proposal.branch.commitSha) throw new Error("GitHub 审阅头提交已偏离通过验证的提案");
+  if (review.baseBranch !== proposal.branch.baseBranch) throw new Error("GitHub 审阅基分支与提案不一致");
+  if (!/^[0-9a-f]{40,64}$/i.test(String(review.mergeCommitSha || ""))) throw new Error("GitHub 审阅缺少可验证的合并提交");
+}
+
+async function assertAncestor(root, ancestor, descendant) {
+  await execFileAsync("git", ["merge-base", "--is-ancestor", ancestor, descendant], {
+    cwd: root,
+    timeout: GIT_TIMEOUT,
+    maxBuffer: 512 * 1024,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  }).catch(() => {
+    throw new Error("远端合并提交不是封存基线的后继，拒绝采用");
+  });
+}
+
+export async function fastForwardMergedProposal(proposal, review, options = {}) {
+  assertMergedReview(proposal, review);
+  const root = resolve(options.root || ROOT);
+  const baseline = await gitBaseline(root);
+  if (baseline.branch !== proposal.branch.baseBranch) throw new Error("当前分支与提案基分支不一致，拒绝切换或覆盖");
+  if (!baseline.clean) throw new Error("工作区存在未提交变化，无法同步已合并提案");
+  const mergeCommitSha = review.mergeCommitSha;
+  const remoteRef = `refs/remotes/origin/${proposal.branch.baseBranch}`;
+  await gitText([
+    "-c", "core.hooksPath=/dev/null",
+    "fetch", "--no-tags", "origin",
+    `+refs/heads/${proposal.branch.baseBranch}:${remoteRef}`,
+  ], root, { timeout: 120_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }).catch(() => {
+    throw new Error("无法读取 GitHub 已合并基分支；本地源码未改变");
+  });
+  const remoteSha = await gitText(["rev-parse", remoteRef], root);
+  if (remoteSha !== mergeCommitSha) throw new Error("远端基分支已越过或不等于 GitHub 合并提交，请人工核对");
+  if (baseline.sha === remoteSha) {
+    await validateCurrentFiles(proposal.files, "proposedHash", root);
+    return { baseSha: proposal.baseSha, adoptedSha: remoteSha, alreadyCurrent: true };
+  }
+  if (baseline.sha !== proposal.baseSha) throw new Error("当前 Git 基线已变化，拒绝自动同步已合并提案");
+  await assertAncestor(root, proposal.baseSha, remoteSha);
+  const changedPaths = (await gitText(["diff", "--name-only", proposal.baseSha, remoteSha, "--"], root))
+    .split("\n")
+    .filter(Boolean)
+    .sort();
+  const expectedPaths = proposal.files.map((file) => assertEditablePath(file.path)).sort();
+  if (JSON.stringify(changedPaths) !== JSON.stringify(expectedPaths)) {
+    throw new Error("远端合并范围不再只包含封存提案文件，拒绝自动同步");
+  }
+  for (const file of proposal.files) {
+    const treeEntry = await gitText(["ls-tree", remoteSha, "--", file.path], root).catch(() => "");
+    if (!/^100644 blob [0-9a-f]{40,64}\t/.test(treeEntry)) throw new Error(`${file.path} 的远端合并对象不是普通源码文件`);
+    const mergedContent = await gitRaw(["show", `${remoteSha}:${file.path}`], root).catch(() => null);
+    if (hashContent(mergedContent) !== file.proposedHash) throw new Error(`${file.path} 的远端合并内容与封存提案不一致`);
+  }
+  const preMerge = await gitBaseline(root);
+  if (!preMerge.clean || preMerge.branch !== proposal.branch.baseBranch || preMerge.sha !== proposal.baseSha) {
+    throw new Error("远端核验期间本地 Git 基线发生变化，拒绝继续同步");
+  }
+  await validateCurrentFiles(proposal.files, "originalHash", root);
+  await gitText([
+    "-c", "core.hooksPath=/dev/null",
+    "merge", "--ff-only", remoteRef,
+  ], root, { env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }).catch(() => {
+    throw new Error("已合并提案无法安全快进；本地源码未被自动解决或覆盖");
+  });
+  const adopted = await gitBaseline(root);
+  if (!adopted.clean || adopted.branch !== proposal.branch.baseBranch || adopted.sha !== remoteSha) {
+    throw new Error("快进后的 Git 状态与已验证合并提交不一致");
+  }
+  await validateCurrentFiles(proposal.files, "proposedHash", root);
+  return { baseSha: proposal.baseSha, adoptedSha: remoteSha, alreadyCurrent: false };
+}
+
+export async function adoptMergedProposal(id) {
+  const proposal = await readProposal(id);
+  await assertPublishedBranch(proposal);
+  const repository = await githubRepository();
+  if (!proposal.remoteRepository || proposal.remoteRepository !== repository.slug) {
+    throw new Error("GitHub origin 与提案封存时的仓库不一致，无法采用合并结果");
+  }
+  const rawReview = await readPullRequest(proposal.branch.name, repository);
+  if (!rawReview) throw new Error("尚未找到这个分支对应的 GitHub 审阅");
+  const review = publicRemoteReview(rawReview, proposal.branch.commitSha, proposal.remoteReview?.publishedAt);
+  const result = await fastForwardMergedProposal(proposal, review);
+  proposal.remoteReview = review;
+  proposal.status = "adopted";
+  proposal.adoptedAt = new Date().toISOString();
+  proposal.adoptedSha = result.adoptedSha;
+  await writeProposal(proposal);
+  await audit({ action: "adopted", id: proposal.id, branch: proposal.branch.baseBranch, commitSha: result.adoptedSha, alreadyCurrent: result.alreadyCurrent });
   return toPublicProposal(proposal);
 }
 

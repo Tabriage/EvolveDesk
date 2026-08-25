@@ -3,6 +3,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { Output, ToolLoopAgent } from "ai";
 import { z } from "zod";
 import {
+  adoptMergedProposal,
   assertEvolutionGitReady,
   commitProposal,
   createProposal,
@@ -230,8 +231,8 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/health") {
       send(response, 200, {
         ok: true,
-        version: "0.8.0",
-        capabilities: ["source-evolution", "isolated-proposal-branches", "github-draft-review", "video-import", "local-media-upload", "local-transcription", "visual-evidence", "local-ocr"],
+        version: "0.9.0",
+        capabilities: ["source-evolution", "isolated-proposal-branches", "github-draft-review", "verified-merge-adoption", "video-import", "local-media-upload", "local-transcription", "visual-evidence", "local-ocr"],
         sourceEvolutionBusy,
         latest: await latestProposal(),
       }, origin);
@@ -285,6 +286,10 @@ const server = createServer(async (request, response) => {
       }
       if (url.pathname === "/api/review/refresh") {
         send(response, 200, await handleSourceEvolution(async () => ({ proposal: await refreshProposalReview(body.id) })), origin);
+        return;
+      }
+      if (url.pathname === "/api/adopt") {
+        send(response, 200, await handleSourceEvolution(async () => ({ proposal: await adoptMergedProposal(body.id) })), origin);
         return;
       }
       if (url.pathname === "/api/rollback") {
