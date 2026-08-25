@@ -26,6 +26,7 @@ test("deployment templates declare secrets and package only audited Lambda runti
   assert.match(template, /AuthType: NONE/);
   assert.match(template, /Action: sts:AssumeRole/);
   assert.match(template, /Resource: !Ref TargetRoleArn/);
+  assert.match(template, /EVOLVE_RELEASE_COMMIT: !Ref ReleaseCommit/);
   assert.doesNotMatch(template, /AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN/);
 
   const artifacts = await mkdtemp(join(tmpdir(), "evolve-broker-lambda-"));

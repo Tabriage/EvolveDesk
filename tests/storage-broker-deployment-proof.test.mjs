@@ -6,6 +6,7 @@ import {
   inspectStorageBrokerDeploymentProof,
   inspectStorageBrokerDeploymentProofText,
   serializeStorageBrokerDeploymentProof,
+  verifyStorageBrokerDeploymentRuntime,
   verifyStorageBrokerDeploymentRun,
 } from "../app/features/storage-broker-deployment-proof.mjs";
 import {
@@ -140,6 +141,40 @@ test("online run verification rejects failed, mismatched, malformed, oversized, 
   await assert.rejects(verify("not-json"), /有效 JSON/);
   await assert.rejects(verify("{}", { "content-length": String(128 * 1024 + 1) }), /128 KiB/);
   await assert.rejects(verifyStorageBrokerDeploymentRun(proof, { fetchImpl: async () => ({ status: 404, headers: { get: () => null }, text: async () => "" }) }), /HTTP 404/);
+});
+
+test("runtime verification binds the live broker identity to the deployment proof", async () => {
+  const proof = await createStorageBrokerDeploymentProof(await input());
+  const health = {
+    ok: true,
+    service: "evolve-desk-storage-broker",
+    providers: { cloudflareR2: false, amazonS3: true },
+    release: {
+      ci: {
+        system: "github-actions",
+        repository: "Tabriage/EvolveDesk",
+        commit: "a".repeat(40),
+        ref: "refs/heads/main",
+        workflowPath: ".github/workflows/deploy-aws-storage-broker.yml",
+        runId: "123456789",
+        runAttempt: 1,
+      },
+      runtime: {
+        provider: "aws-lambda",
+        region: "us-east-1",
+        functionName: "evolve-desk-storage-credential-broker",
+        immutableVersion: "7",
+      },
+    },
+  };
+  const result = await verifyStorageBrokerDeploymentRuntime(proof, health, { now: "2026-08-21T10:11:00.000Z" });
+  assert.equal(result.system, "broker-runtime-health");
+  assert.equal(result.runId, "123456789");
+  assert.equal(result.immutableVersion, "7");
+  assert.equal(result.checkedAt, "2026-08-21T10:11:00.000Z");
+  await assert.rejects(verifyStorageBrokerDeploymentRuntime(proof, { ...health, release: { ...health.release, runtime: { ...health.release.runtime, immutableVersion: "8" } } }), /immutableVersion/);
+  await assert.rejects(verifyStorageBrokerDeploymentRuntime(proof, { ...health, release: undefined }), /没有报告/);
+  await assert.rejects(verifyStorageBrokerDeploymentRuntime(proof, { ...health, providers: { cloudflareR2: true, amazonS3: false } }), /健康响应无效/);
 });
 
 test("workflows pin actions, minimize token permissions, and keep cloud credentials out of source", () => {

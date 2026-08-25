@@ -40,7 +40,25 @@ export type CredentialBrokerHealth = {
   ok: true;
   service: "evolve-desk-storage-broker";
   providers: { cloudflareR2: boolean; amazonS3: boolean };
+  release?: {
+    ci: {
+      system: "github-actions";
+      repository: string;
+      commit: string;
+      ref: string;
+      workflowPath: string;
+      runId: string;
+      runAttempt: number;
+    };
+    runtime: {
+      provider: "aws-lambda";
+      region: string;
+      functionName: string;
+      immutableVersion: string;
+    };
+  };
 };
+export function inspectCredentialBrokerRuntimeRelease(value: unknown): CredentialBrokerHealth["release"];
 export function inspectCredentialBrokerHealth(
   config: { endpointUrl: string; bearerToken?: string },
   fetchImpl?: typeof fetch,

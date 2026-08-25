@@ -1,6 +1,7 @@
 import {
   inspectStorageBrokerReleaseProof,
 } from "./storage-broker-release-proof.mjs";
+import { inspectCredentialBrokerRuntimeRelease } from "./sync-credential-broker.mjs";
 
 export const MAX_STORAGE_BROKER_DEPLOYMENT_PROOF_BYTES = 256 * 1_024;
 export const MAX_GITHUB_WORKFLOW_RUN_BYTES = 128 * 1_024;
@@ -242,5 +243,43 @@ export async function verifyStorageBrokerDeploymentRun(value, options = {}) {
     conclusion: "success",
     createdAt,
     updatedAt,
+  };
+}
+
+export async function verifyStorageBrokerDeploymentRuntime(value, healthValue, options = {}) {
+  const proof = await inspectStorageBrokerDeploymentProof(value);
+  if (healthValue?.ok !== true || healthValue?.service !== "evolve-desk-storage-broker"
+    || healthValue?.providers?.amazonS3 !== true || typeof healthValue?.providers?.cloudflareR2 !== "boolean") {
+    throw new Error("凭据代理运行时健康响应无效");
+  }
+  const release = inspectCredentialBrokerRuntimeRelease(healthValue.release);
+  if (!release) throw new Error("凭据代理没有报告可核对的运行时来源");
+  const functionName = proof.body.cloud.resourceArn.split(":").at(-1);
+  const checks = {
+    repository: release.ci.repository === proof.body.ci.repository,
+    commit: release.ci.commit === proof.body.ci.commit,
+    ref: release.ci.ref === proof.body.ci.ref,
+    workflowPath: release.ci.workflowPath === proof.body.ci.workflowPath,
+    runId: release.ci.runId === proof.body.ci.runId,
+    runAttempt: release.ci.runAttempt === proof.body.ci.runAttempt,
+    provider: release.runtime.provider === proof.body.cloud.provider,
+    region: release.runtime.region === proof.body.cloud.region,
+    functionName: release.runtime.functionName === functionName,
+    immutableVersion: release.runtime.immutableVersion === proof.body.cloud.immutableVersion,
+  };
+  const mismatches = Object.entries(checks).filter(([, matches]) => !matches).map(([name]) => name);
+  if (mismatches.length) throw new Error(`凭据代理运行时与部署回执不一致：${mismatches.join("、")}`);
+  const checkedAt = new Date(options.now || Date.now());
+  if (!Number.isFinite(checkedAt.getTime())) throw new Error("凭据代理运行时核对时间无效");
+  return {
+    system: "broker-runtime-health",
+    checkedAt: checkedAt.toISOString(),
+    repository: release.ci.repository,
+    commit: release.ci.commit,
+    runId: release.ci.runId,
+    runAttempt: release.ci.runAttempt,
+    region: release.runtime.region,
+    functionName: release.runtime.functionName,
+    immutableVersion: release.runtime.immutableVersion,
   };
 }

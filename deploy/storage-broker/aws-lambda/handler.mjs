@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import {
   MAX_CREDENTIAL_BROKER_RESPONSE_BYTES,
+  inspectCredentialBrokerRuntimeRelease,
   inspectCredentialBrokerRequest,
 } from "../../../app/features/sync-credential-broker.mjs";
 import {
@@ -25,6 +26,36 @@ function normalizeAllowedOrigin(value) {
   return url.origin;
 }
 
+function runtimeRelease(env, region) {
+  const names = [
+    "EVOLVE_RELEASE_REPOSITORY",
+    "EVOLVE_RELEASE_COMMIT",
+    "EVOLVE_RELEASE_REF",
+    "EVOLVE_RELEASE_WORKFLOW",
+    "EVOLVE_RELEASE_RUN_ID",
+    "EVOLVE_RELEASE_RUN_ATTEMPT",
+  ];
+  if (names.every((name) => !String(env?.[name] || "").trim())) return undefined;
+  if (String(env?.AWS_REGION || "").trim() !== region) throw new Error("AWS_REGION 与签发区域不一致");
+  return inspectCredentialBrokerRuntimeRelease({
+    ci: {
+      system: "github-actions",
+      repository: env?.EVOLVE_RELEASE_REPOSITORY,
+      commit: env?.EVOLVE_RELEASE_COMMIT,
+      ref: env?.EVOLVE_RELEASE_REF,
+      workflowPath: env?.EVOLVE_RELEASE_WORKFLOW,
+      runId: env?.EVOLVE_RELEASE_RUN_ID,
+      runAttempt: Number(env?.EVOLVE_RELEASE_RUN_ATTEMPT),
+    },
+    runtime: {
+      provider: "aws-lambda",
+      region: env?.AWS_REGION,
+      functionName: env?.AWS_LAMBDA_FUNCTION_NAME,
+      immutableVersion: env?.AWS_LAMBDA_FUNCTION_VERSION,
+    },
+  });
+}
+
 function validateConfig(env) {
   const allowedOrigin = normalizeAllowedOrigin(env?.ALLOWED_ORIGIN);
   const bearerToken = text(env?.BROKER_TOKEN, "BROKER_TOKEN", 8_192, 16);
@@ -37,7 +68,7 @@ function validateConfig(env) {
     sessionToken: env?.AWS_SESSION_TOKEN,
   });
   if (!issuer.allowedRegion) throw new Error("EVOLVE_AWS_REGION 配置无效");
-  return { allowedOrigin, bearerToken, issuer };
+  return { allowedOrigin, bearerToken, issuer, release: runtimeRelease(env, issuer.allowedRegion) };
 }
 
 function normalizeHeaders(value) {
@@ -95,7 +126,12 @@ export async function handleAwsLambdaBrokerEvent(event, env, options = {}) {
     if (method === "OPTIONS") return response(204, null, cors);
     if (!safeEqual(headers.authorization, `Bearer ${config.bearerToken}`)) return response(401, { error: "访问令牌无效" }, cors);
     if (method === "GET" && path === "/health") {
-      return response(200, { ok: true, service: "evolve-desk-storage-broker", providers: { cloudflareR2: false, amazonS3: true } }, cors);
+      return response(200, {
+        ok: true,
+        service: "evolve-desk-storage-broker",
+        providers: { cloudflareR2: false, amazonS3: true },
+        ...(config.release ? { release: config.release } : {}),
+      }, cors);
     }
     if (method !== "POST" || path !== "/credentials") return response(404, { error: "端点不存在" }, cors);
     if (!String(headers["content-type"] || "").toLowerCase().startsWith("application/json")) return response(415, { error: "只接受 application/json" }, cors);

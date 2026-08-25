@@ -151,7 +151,7 @@ sam build --template-file deploy/storage-broker/aws-lambda/template.yaml
 sam deploy --guided
 ```
 
-`AllowedOrigin`、`BrokerToken`、`TargetRoleArn` 与 `SyncRegion` 都需要在引导部署中明确填写。Function URL 使用 `NONE` 以允许浏览器调用，因此它是公开互联网端点；应用层仍强制独立 Bearer、精确 Origin、固定 `/health` / `/credentials` 路径、64 KiB 请求上限和最多 5 个并发执行环境。公开生产端点仍应结合预算告警、日志脱敏、限流，以及需要时改用 API Gateway/WAF。浏览器不能直接使用 `AWS_IAM` Function URL，因为那会再次要求它持有可签名 AWS 身份。
+`AllowedOrigin`、`BrokerToken`、`TargetRoleArn` 与 `SyncRegion` 都需要在引导部署中明确填写。Function URL 使用 `NONE` 以允许浏览器调用，因此它是公开互联网端点；应用层仍强制独立 Bearer、精确 Origin、固定 `/health` / `/credentials` 路径、64 KiB 请求上限和最多 5 个并发执行环境。经 Bearer 认证的 `/health` 只额外报告非敏感的 GitHub 仓库、提交、Run、工作流，以及 Lambda 区域、函数名和运行中的不可变版本，不返回凭据、角色 ARN 或 Secret。手动部署可把全部 `Release*` 参数留空，此时健康响应不声明 CI 来源；OIDC 工作流会自动完整填写它们，任何部分填写都会失败关闭。公开生产端点仍应结合预算告警、日志脱敏、限流，以及需要时改用 API Gateway/WAF。浏览器不能直接使用 `AWS_IAM` Function URL，因为那会再次要求它持有可签名 AWS 身份。
 
 仓库还提供手动触发的 `Deploy AWS storage broker` 工作流。它只授予 `contents: read`、`id-token: write` 与 `attestations: write`，用 GitHub OIDC JWT 换取一小时以内的 AWS 会话，不保存 AWS Access Key。首次启用需要先在 AWS 添加 `https://token.actions.githubusercontent.com` OIDC Provider，再部署 `deploy/storage-broker/aws-lambda/github-oidc-role-template.yaml`。信任策略同时固定 `aud=sts.amazonaws.com`、当前仓库不可变 owner/repository ID 和 `storage-broker-production` Environment，不使用仓库通配符。为 Environment 配置审批者和只允许 `main` 的部署分支规则。
 
@@ -174,7 +174,9 @@ pnpm --silent broker:release-check -- \
 
 AWS 使用 `--target aws-lambda-s3`，`--endpoint` 必须是实际 `https://<id>.lambda-url.<region>.on.aws` Origin。命令拒绝未提交或有改动的工作树，并联网要求当前提交与 GitHub origin 同名分支头一致；随后封签 GitHub origin、40 位提交、分支、远端头核对结果、代理/工作台 Origin、公开端点安全契约，以及目标运行时每一个实际文件的 SHA-256。它不读取或导出任何 secret 值。把文件交给工作台“核对发布封签”后，只有供应商、代理 Origin、当前页面 Origin、字段闭集与整体 SHA-256 全部一致才显示 `SOURCE SEALED`。
 
-普通发布封签是可重复核对的来源与配置清单，不是设备签名、GitHub Attestation 或云平台部署证明：它不能单独证明线上端点确实运行这些字节，也不能证明仓库作者身份。AWS OIDC 流水线会额外产出 `evolve-storage-broker-deployment-proof.json`，其中嵌套普通封签，并绑定 GitHub Run、Environment、不可变 Lambda Version、Function ARN、Function URL 与 `CodeSha256`。在工作台 Amazon S3 配方中导入后，只有供应商、代理 Origin、页面 Origin 和所有闭集摘要一致才显示 `CI RECEIPT MATCH`。同一次显式导入还会在不发送 Token 的前提下读取 GitHub 公共 Run API，逐项要求仓库、Run ID/Attempt、工作流路径、提交、分支和时间窗口一致，且 `workflow_dispatch` 已以 `success` 完成；成功后显示 `RUN API ✓`，离线、限流或任一字段不一致则保留 `RUN API ?`。
+普通发布封签是可重复核对的来源与配置清单，不是设备签名、GitHub Attestation 或云平台部署证明：它不能单独证明线上端点确实运行这些字节，也不能证明仓库作者身份。AWS OIDC 流水线会额外产出 `evolve-storage-broker-deployment-proof.json`，其中嵌套普通封签，并绑定 GitHub Run、Environment、不可变 Lambda Version、Function ARN、Function URL 与 `CodeSha256`。在工作台 Amazon S3 配方中导入后，只有供应商、代理 Origin、页面 Origin 和所有闭集摘要一致才显示 `CI RECEIPT MATCH`。同一次显式导入会并行完成两项在线核验：一是不发送 Token 地读取 GitHub 公共 Run API，逐项要求仓库、Run ID/Attempt、工作流路径、提交、分支和时间窗口一致，且 `workflow_dispatch` 已以 `success` 完成；二是携带只留在页面内存的 Broker Bearer 读取当前 `/health`，要求它报告完全相同的仓库、提交、Run、Attempt、工作流、区域、函数名与 Lambda 不可变版本。成功后分别显示 `RUN API ✓` 和 `RUNTIME ✓`；离线、限流、旧部署或任一字段不一致时保留问号，且不会被描述成已验证。
+
+运行时来源是 Lambda 对自身环境的声明，不是独立签名；它用于排除“回执正确但当前 URL 已指向另一版本”的错配。最终作者身份与回执完整性仍必须通过下面的 GitHub Artifact Attestation 命令核验。
 
 部署回执自身的 SHA-256 只能检查文件内部是否被改写；工作台不会把这一点伪装成作者身份验证。下载 Actions Artifact 后先执行：
 

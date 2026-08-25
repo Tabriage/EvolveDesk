@@ -12,6 +12,15 @@ const env = {
   AWS_ACCESS_KEY_ID: "AKIAEXAMPLE1234567",
   AWS_SECRET_ACCESS_KEY: "parent-secret-access-key-example",
   AWS_SESSION_TOKEN: "lambda-execution-session-token",
+  AWS_REGION: "ap-southeast-1",
+  AWS_LAMBDA_FUNCTION_NAME: "evolve-desk-storage-credential-broker",
+  AWS_LAMBDA_FUNCTION_VERSION: "7",
+  EVOLVE_RELEASE_REPOSITORY: "Tabriage/EvolveDesk",
+  EVOLVE_RELEASE_COMMIT: "a".repeat(40),
+  EVOLVE_RELEASE_REF: "refs/heads/main",
+  EVOLVE_RELEASE_WORKFLOW: ".github/workflows/deploy-aws-storage-broker.yml",
+  EVOLVE_RELEASE_RUN_ID: "123456789",
+  EVOLVE_RELEASE_RUN_ATTEMPT: "2",
 };
 
 function event(method, path, body, headers = {}) {
@@ -66,6 +75,23 @@ test("AWS Lambda broker validates Function URL v2, origin, bearer, and provider"
   const health = await handleAwsLambdaBrokerEvent(event("GET", "/health"), env);
   assert.equal(health.statusCode, 200);
   assert.deepEqual(JSON.parse(health.body).providers, { cloudflareR2: false, amazonS3: true });
+  assert.deepEqual(JSON.parse(health.body).release, {
+    ci: {
+      system: "github-actions",
+      repository: "Tabriage/EvolveDesk",
+      commit: "a".repeat(40),
+      ref: "refs/heads/main",
+      workflowPath: ".github/workflows/deploy-aws-storage-broker.yml",
+      runId: "123456789",
+      runAttempt: 2,
+    },
+    runtime: {
+      provider: "aws-lambda",
+      region: "ap-southeast-1",
+      functionName: "evolve-desk-storage-credential-broker",
+      immutableVersion: "7",
+    },
+  });
 
   const legacy = await handleAwsLambdaBrokerEvent({ ...event("GET", "/health"), version: "1.0" }, env);
   assert.equal(legacy.statusCode, 400);
@@ -87,4 +113,13 @@ test("AWS Lambda broker validates Function URL v2, origin, bearer, and provider"
   const awsOnly = await handleAwsLambdaBrokerEvent(event("POST", "/credentials", r2Request), env);
   assert.equal(awsOnly.statusCode, 400);
   assert.match(JSON.parse(awsOnly.body).error, /只签发 Amazon S3/);
+
+  const partialRelease = await handleAwsLambdaBrokerEvent(event("GET", "/health"), { ...env, EVOLVE_RELEASE_RUN_ID: "" });
+  assert.equal(partialRelease.statusCode, 503);
+  assert.match(JSON.parse(partialRelease.body).error, /Run ID/);
+
+  const manualEnv = Object.fromEntries(Object.entries(env).filter(([name]) => !name.startsWith("EVOLVE_RELEASE_")));
+  const manualRelease = await handleAwsLambdaBrokerEvent(event("GET", "/health"), manualEnv);
+  assert.equal(manualRelease.statusCode, 200);
+  assert.equal(JSON.parse(manualRelease.body).release, undefined);
 });

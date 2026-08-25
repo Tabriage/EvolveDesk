@@ -12,6 +12,56 @@ function byteLength(value) {
   return new TextEncoder().encode(String(value || "")).byteLength;
 }
 
+function plainObject(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new Error(`${label}格式无效`);
+  return value;
+}
+
+function exactKeys(value, keys, label) {
+  const candidate = plainObject(value, label);
+  const actual = Object.keys(candidate).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) throw new Error(`${label}字段无效`);
+  return candidate;
+}
+
+function boundedText(value, label, maximum, pattern) {
+  const candidate = String(value || "").trim();
+  if (!candidate || candidate.length > maximum || /[\u0000-\u001f\u007f]/.test(candidate) || (pattern && !pattern.test(candidate))) throw new Error(`${label}无效`);
+  return candidate;
+}
+
+function normalizeRuntimeRelease(value) {
+  if (value === undefined) return undefined;
+  const release = exactKeys(value, ["ci", "runtime"], "凭据代理运行时来源");
+  const ci = exactKeys(release.ci, ["commit", "ref", "repository", "runAttempt", "runId", "system", "workflowPath"], "凭据代理 CI 来源");
+  const runtime = exactKeys(release.runtime, ["functionName", "immutableVersion", "provider", "region"], "凭据代理云端运行时");
+  if (ci.system !== "github-actions") throw new Error("凭据代理 CI 系统无效");
+  if (runtime.provider !== "aws-lambda") throw new Error("凭据代理云端运行时无效");
+  if (!Number.isSafeInteger(ci.runAttempt) || ci.runAttempt < 1) throw new Error("凭据代理 Run Attempt 无效");
+  return {
+    ci: {
+      system: "github-actions",
+      repository: boundedText(ci.repository, "凭据代理 CI 仓库", 180, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+      commit: boundedText(ci.commit, "凭据代理 CI 提交", 40, /^[0-9a-f]{40}$/),
+      ref: boundedText(ci.ref, "凭据代理 CI Ref", 260, /^refs\/heads\/(?!.*\.\.)(?!.*\/$)[A-Za-z0-9._/-]+$/),
+      workflowPath: boundedText(ci.workflowPath, "凭据代理 CI 工作流", 220, /^\.github\/workflows\/[A-Za-z0-9._/-]+\.ya?ml$/),
+      runId: boundedText(ci.runId, "凭据代理 CI Run ID", 32, /^[1-9][0-9]*$/),
+      runAttempt: ci.runAttempt,
+    },
+    runtime: {
+      provider: "aws-lambda",
+      region: boundedText(runtime.region, "凭据代理 AWS Region", 32, /^[a-z0-9][a-z0-9-]{1,31}$/),
+      functionName: boundedText(runtime.functionName, "凭据代理 Lambda 函数名", 64, /^[A-Za-z0-9-_]+$/),
+      immutableVersion: boundedText(runtime.immutableVersion, "凭据代理 Lambda 不可变版本", 12, /^[1-9][0-9]*$/),
+    },
+  };
+}
+
+export function inspectCredentialBrokerRuntimeRelease(value) {
+  return normalizeRuntimeRelease(value);
+}
+
 function normalizeBrokerUrl(value) {
   let url;
   try {
@@ -202,9 +252,11 @@ export async function inspectCredentialBrokerHealth(configValue, fetchImpl = glo
     || typeof parsed?.providers?.cloudflareR2 !== "boolean" || typeof parsed?.providers?.amazonS3 !== "boolean") {
     throw new Error("本地凭据代理健康响应格式无效");
   }
+  const release = inspectCredentialBrokerRuntimeRelease(parsed.release);
   return {
     ok: true,
     service: "evolve-desk-storage-broker",
     providers: { cloudflareR2: parsed.providers.cloudflareR2, amazonS3: parsed.providers.amazonS3 },
+    ...(release ? { release } : {}),
   };
 }

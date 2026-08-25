@@ -4,6 +4,7 @@ import {
   createCredentialBrokerRequest,
   inspectCredentialBrokerHealth,
   inspectCredentialBrokerRequest,
+  inspectCredentialBrokerRuntimeRelease,
   normalizeCredentialBrokerResponse,
   renewSyncStorageCredentials,
 } from "../app/features/sync-credential-broker.mjs";
@@ -44,6 +45,36 @@ test("credential broker health check derives a sibling endpoint and validates ca
   assert.equal(calls[0].url, "http://127.0.0.1:4243/health");
   assert.equal(calls[0].options.headers.Authorization, "Bearer memory-only-token");
   assert.deepEqual(health.providers, { cloudflareR2: true, amazonS3: false });
+});
+
+test("credential broker health accepts only a closed non-secret runtime release identity", async () => {
+  const release = {
+    ci: {
+      system: "github-actions",
+      repository: "Tabriage/EvolveDesk",
+      commit: "a".repeat(40),
+      ref: "refs/heads/main",
+      workflowPath: ".github/workflows/deploy-aws-storage-broker.yml",
+      runId: "123456789",
+      runAttempt: 2,
+    },
+    runtime: {
+      provider: "aws-lambda",
+      region: "ap-southeast-1",
+      functionName: "evolve-desk-storage-credential-broker",
+      immutableVersion: "7",
+    },
+  };
+  const health = await inspectCredentialBrokerHealth({ endpointUrl: "https://example.lambda-url.ap-southeast-1.on.aws/credentials" }, async () => new Response(JSON.stringify({
+    ok: true,
+    service: "evolve-desk-storage-broker",
+    providers: { cloudflareR2: false, amazonS3: true },
+    release,
+  }), { status: 200 }));
+  assert.deepEqual(health.release, release);
+  assert.deepEqual(inspectCredentialBrokerRuntimeRelease(release), release);
+  assert.throws(() => inspectCredentialBrokerRuntimeRelease({ ...release, hidden: true }), /字段无效/);
+  assert.throws(() => inspectCredentialBrokerRuntimeRelease({ ...release, runtime: { ...release.runtime, immutableVersion: "$LATEST" } }), /不可变版本/);
 });
 
 test("credential broker accepts a Cloudflare result and derives expiry from requested TTL", async () => {

@@ -34,6 +34,30 @@ Parameters:
     Type: String
     Default: evolve-desk-storage-broker-runtime
     AllowedPattern: ^[A-Za-z0-9_+=,.@-]{1,64}$
+  ReleaseRepository:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^Tabriage/EvolveDesk$
+  ReleaseCommit:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^[0-9a-f]{40}$
+  ReleaseRef:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^refs/heads/main$
+  ReleaseWorkflow:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^\.github/workflows/deploy-aws-storage-broker\.yml$
+  ReleaseRunId:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^[1-9][0-9]{0,31}$
+  ReleaseRunAttempt:
+    Type: String
+    Default: ""
+    AllowedPattern: ^$|^[1-9][0-9]{0,3}$
 
 Resources:
   StorageCredentialBrokerRole:
@@ -88,6 +112,12 @@ Resources:
           EVOLVE_AWS_ROLE_ARN: !Ref TargetRoleArn
           EVOLVE_AWS_REGION: !Ref SyncRegion
           EVOLVE_AWS_EXTERNAL_ID: !Ref ExternalId
+          EVOLVE_RELEASE_REPOSITORY: !Ref ReleaseRepository
+          EVOLVE_RELEASE_COMMIT: !Ref ReleaseCommit
+          EVOLVE_RELEASE_REF: !Ref ReleaseRef
+          EVOLVE_RELEASE_WORKFLOW: !Ref ReleaseWorkflow
+          EVOLVE_RELEASE_RUN_ID: !Ref ReleaseRunId
+          EVOLVE_RELEASE_RUN_ATTEMPT: !Ref ReleaseRunAttempt
       FunctionUrlConfig:
         # Function URLs with NONE auth are public. The handler still requires its
         # independent Bearer, exact Origin, fixed routes, and bounded JSON body.
@@ -96,7 +126,7 @@ Resources:
 
 Outputs:
   CredentialBrokerUrl:
-    Description: Append /credentials in EvolveDesk; /health reports capability only
+    Description: Append /credentials in EvolveDesk; authenticated /health reports capability and non-secret release identity
     Value: !GetAtt StorageCredentialBrokerUrl.FunctionUrl
   CredentialBrokerFunctionName:
     Value: !Ref StorageCredentialBroker

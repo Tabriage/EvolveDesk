@@ -102,6 +102,12 @@ jobs:
             "SyncRegion=$AWS_REGION"
             "BrokerFunctionName=$AWS_FUNCTION_NAME"
             "BrokerExecutionRoleName=$AWS_RUNTIME_ROLE_NAME"
+            "ReleaseRepository=$GITHUB_REPOSITORY"
+            "ReleaseCommit=$GITHUB_SHA"
+            "ReleaseRef=$GITHUB_REF"
+            "ReleaseWorkflow=.github/workflows/deploy-aws-storage-broker.yml"
+            "ReleaseRunId=$GITHUB_RUN_ID"
+            "ReleaseRunAttempt=$GITHUB_RUN_ATTEMPT"
           )
           if [[ -n "$TARGET_EXTERNAL_ID" ]]; then overrides+=("ExternalId=$TARGET_EXTERNAL_ID"); fi
           sam deploy \
